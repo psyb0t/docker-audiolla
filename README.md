@@ -5,34 +5,44 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-> **Self-hosted music-production API.** Stem separation, mastering, MIR analysis, DSP transforms, loudness normalization — one Docker container, one wire format.
+> POST a track. Get stems, a master, analysis, or a processed file back. No cloud, no accounts, runs wherever Docker runs.
+
+HTTP API for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain. Extract BPM and key with librosa. Chain sox transforms. All from curl or any HTTP client.
+
+Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. OpenAPI spec included.
 
 ---
 
 ## Table of Contents
 
-- [Quick Start](#quick-start)
-- [Usage](#usage)
+- [Run it](#run-it)
+- [What it can do](#what-it-can-do)
+  - [Split stems](#split-stems)
+  - [Master](#master)
+  - [Analyze](#analyze)
+  - [Transform](#transform)
+  - [Loudness](#loudness)
+  - [Stage files](#stage-files)
 - [Engines](#engines)
 - [Endpoints](#endpoints)
 - [Configuration](#configuration)
-- [What's Not Included](#whats-not-included)
-- [Build & Development](#build--development)
-- [Supply Chain](#supply-chain)
+- [What's not in here](#whats-not-in-here)
+- [Build & dev](#build--dev)
+- [Supply chain](#supply-chain)
 - [License](#license)
 
 ---
 
-## Quick Start
+## Run it
 
 ```bash
-# CPU (no GPU needed)
+# no GPU
 docker run --rm -it \
   -v $HOME/.audiolla-data:/data \
   -p 8000:8000 \
   psyb0t/audiolla:latest
 
-# CUDA (GPU-accelerated Demucs)
+# GPU
 docker run --rm -it --gpus all \
   -v $HOME/.audiolla-data:/data \
   -e AUDIOLLA_DEVICE=cuda \
@@ -40,53 +50,52 @@ docker run --rm -it --gpus all \
   psyb0t/audiolla:latest-cuda
 ```
 
-Demucs model weights download on first run and cache in `/data/torch_cache/`.
-Same `-v` mount on next run skips the download.
+Demucs weights download on first use and cache in `/data/torch_cache/` — same `-v` mount next time and they're already there.
 
 ---
 
-## Usage
+## What it can do
 
-Output format defaults to `wav`. Add `-F "output_format=mp3"` (or `flac`, `opus`, `aac`, `pcm`) to any request that returns audio.
+Output defaults to `wav`. Any endpoint that returns audio accepts `-F "output_format=mp3"` (also `flac`, `opus`, `aac`, `pcm`).
 
-### Stem separation
+### Split stems
 
 ```bash
-# Pull vocals out of a track
+# vocals only
 curl -X POST http://localhost:8000/v1/audio/separate \
   -F "file=@track.wav" \
   -F "engine=htdemucs" \
   -F "stems=vocals" \
   -o vocals.wav
 
-# Get all 4 stems as a ZIP
+# all 4 stems as a ZIP
 curl -X POST http://localhost:8000/v1/audio/separate \
   -F "file=@track.wav" \
   -F "engine=htdemucs" \
   -o stems.zip
 ```
 
-### Mastering
+### Master
 
 ```bash
-# Match loudness + EQ against a reference track
+# match EQ + loudness to a reference track
 curl -X POST http://localhost:8000/v1/audio/master \
   -F "file=@track.wav" \
   -F "mode=reference" \
   -F "reference=@ref.wav" \
   -o mastered.wav
 
-# Run the built-in pedalboard DSP chain
+# run the built-in pedalboard chain (compression, EQ, limiting)
 curl -X POST http://localhost:8000/v1/audio/master \
   -F "file=@track.wav" \
   -F "mode=chain" \
   -o mastered.wav
 ```
 
-### MIR analysis
+### Analyze
 
 ```bash
-# Get BPM, key, LUFS, duration, spectral features
+# returns JSON — BPM, key, LUFS, duration, spectral features
 curl -X POST http://localhost:8000/v1/audio/analyze \
   -F "file=@track.wav" \
   -F "features=bpm" \
@@ -94,10 +103,10 @@ curl -X POST http://localhost:8000/v1/audio/analyze \
   -F "features=lufs"
 ```
 
-### DSP transforms
+### Transform
 
 ```bash
-# Compress + add reverb, export as mp3
+# compress + reverb, export mp3
 curl -X POST http://localhost:8000/v1/audio/transform \
   -F "file=@track.wav" \
   -F "effects=compand" \
@@ -109,32 +118,33 @@ curl -X POST http://localhost:8000/v1/audio/transform \
 ### Loudness
 
 ```bash
-# Measure LUFS (returns JSON)
+# measure integrated LUFS (returns JSON)
 curl -X POST http://localhost:8000/v1/audio/loudness \
   -F "file=@track.wav"
 
-# Normalize to -14 LUFS (streaming target)
+# normalize to -14 LUFS and get the file back
 curl -X POST http://localhost:8000/v1/audio/loudness \
   -F "file=@track.wav" \
   -F "target_lufs=-14" \
   -o normalized.wav
 ```
 
-### File staging
+### Stage files
 
-Stage files server-side for large uploads or multi-step pipelines instead of uploading the same file repeatedly.
+Upload once, reference by path across multiple requests. Useful when you're running a track through several steps or the file is large.
 
 ```bash
-# Upload once
-curl -X PUT http://localhost:8000/v1/files/mytrack.wav \
-  --data-binary @track.wav
+curl -X PUT http://localhost:8000/v1/files/mytrack.wav --data-binary @track.wav
 
-# Reference by path in subsequent requests
 curl -X POST http://localhost:8000/v1/audio/analyze \
   -F "file_path=mytrack.wav" \
   -F "features=bpm"
 
-# Clean up
+curl -X POST http://localhost:8000/v1/audio/separate \
+  -F "file_path=mytrack.wav" \
+  -F "engine=htdemucs" \
+  -o stems.zip
+
 curl -X DELETE http://localhost:8000/v1/files/mytrack.wav
 ```
 
@@ -142,20 +152,20 @@ curl -X DELETE http://localhost:8000/v1/files/mytrack.wav
 
 ## Engines
 
-| Slug | Backend | What it does |
-|------|---------|--------------|
-| `htdemucs` | demucs | 4-stem separation (drums / bass / other / vocals). Best speed/quality balance. |
-| `htdemucs_ft` | demucs | Same 4 stems, fine-tuned. Highest quality, ~4x slower. |
-| `htdemucs_6s` | demucs | 6 stems — adds guitar and piano. Experimental. |
-| `mdx_extra` | demucs | Strong vocal isolation. MUSDB-trained. |
-| `matchering` | matchering | Reference-based mastering — EQ + loudness matched to a reference track. |
-| `pedalboard-chain` | pedalboard | Preset DSP chain: compression, EQ, limiting. Transparent and loud. |
-| `librosa-analyze` | librosa | MIR analysis: BPM, key, LUFS, duration, spectral features. |
-| `sox-transform` | pysox | DSP transform chain: gain, EQ, compressor, reverb, pitch, tempo. |
+| Slug | What it does |
+|------|--------------|
+| `htdemucs` | 4-stem separation: drums, bass, other, vocals. Best speed/quality tradeoff. |
+| `htdemucs_ft` | Same 4 stems, fine-tuned weights. Higher quality, ~4x slower. |
+| `htdemucs_6s` | 6 stems — also splits guitar and piano. Experimental. |
+| `mdx_extra` | Strong on vocal isolation. MUSDB-trained, different architecture. |
+| `matchering` | Reference-based mastering: EQ + loudness matched to a reference track. |
+| `pedalboard-chain` | Fixed DSP chain via pedalboard: compression, EQ, limiting. |
+| `librosa-analyze` | BPM, key, LUFS, duration, spectral features via librosa. |
+| `sox-transform` | Gain, EQ, compression, reverb, pitch shift, tempo via pysox. |
 
-All Demucs variants share the `facebook/demucs` HuggingFace checkpoint. The entrypoint prefetches them into `/data/torch_cache/` at startup so the first request doesn't pay the cold-download cost.
+Demucs variants all pull from the same `facebook/demucs` checkpoint. Weights get prefetched into `/data/torch_cache/` at startup so your first separation request doesn't sit there downloading.
 
-Use `AUDIOLLA_ENABLED_ENGINES` to activate only the engines you need. Use `AUDIOLLA_PRELOAD` to warm specific engines into memory at startup instead of on first request.
+`AUDIOLLA_ENABLED_ENGINES` — restrict which engines are available. `AUDIOLLA_PRELOAD` — load specific engines into memory at startup instead of waiting for the first request.
 
 ---
 
@@ -163,111 +173,109 @@ Use `AUDIOLLA_ENABLED_ENGINES` to activate only the engines you need. Use `AUDIO
 
 Full wire contract: [`openapi.yaml`](openapi.yaml).
 
-### Audio
+### Audio processing
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/audio/separate` | Stem separation via Demucs. Returns ZIP for multiple stems, audio bytes for a single stem. |
-| `POST` | `/v1/audio/master` | Mastering. `mode=reference` → matchering; `mode=chain` → pedalboard preset. |
-| `POST` | `/v1/audio/analyze` | MIR analysis via librosa. Returns JSON. |
-| `POST` | `/v1/audio/transform` | DSP transform chain via pysox. Returns audio bytes. |
-| `POST` | `/v1/audio/loudness` | No `target_lufs` → LUFS measurement (JSON). With `target_lufs` → normalized audio bytes. |
-
-Output formats: `wav`, `mp3`, `flac`, `opus`, `aac`, `pcm`.
+| Method | Path | Returns |
+|--------|------|---------|
+| `POST` | `/v1/audio/separate` | ZIP (multiple stems) or audio bytes (single stem) |
+| `POST` | `/v1/audio/master` | audio bytes |
+| `POST` | `/v1/audio/analyze` | JSON |
+| `POST` | `/v1/audio/transform` | audio bytes |
+| `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
 
 ### File staging
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/v1/files` | List staged files. |
-| `PUT` | `/v1/files/{path}` | Upload a file. |
-| `GET` | `/v1/files/{path}` | Download a staged file. |
-| `DELETE` | `/v1/files/{path}` | Delete a staged file. |
+| Method | Path | |
+|--------|------|-|
+| `GET` | `/v1/files` | list staged files |
+| `PUT` | `/v1/files/{path}` | upload |
+| `GET` | `/v1/files/{path}` | download |
+| `DELETE` | `/v1/files/{path}` | delete |
 
 ### Management
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/healthz` | Liveness check. Always unauthenticated. |
-| `GET` | `/v1/engines` | List configured engines and their capabilities. |
-| `GET` | `/api/ps` | List engines currently loaded in memory. |
-| `DELETE` | `/api/ps/{engine}` | Evict one engine from memory. |
-| `POST` | `/unload` | Evict all loaded engines. |
+| Method | Path | |
+|--------|------|-|
+| `GET` | `/healthz` | liveness — always unauthenticated |
+| `GET` | `/v1/engines` | list configured engines |
+| `GET` | `/api/ps` | list engines in memory right now |
+| `DELETE` | `/api/ps/{engine}` | evict one engine |
+| `POST` | `/unload` | evict everything |
 
 ---
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUDIOLLA_DEVICE` | `auto` | Compute device: `auto`, `cpu`, `cuda`, `cuda:N` |
-| `AUDIOLLA_ENGINES_FILE` | `/app/engines.json` | Path to the engines registry JSON |
-| `AUDIOLLA_DATA_DIR` | `/data` | Data root — model cache + staged files |
-| `AUDIOLLA_AUTH_TOKEN` | _(none)_ | Bearer token for auth. Empty = no auth. |
-| `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | Comma-separated slugs to activate. Empty = all. |
-| `AUDIOLLA_PRELOAD` | _(none)_ | Comma-separated slugs to load into memory at startup. |
-| `AUDIOLLA_ENGINE_TTL` | `600` | Seconds before an idle engine is unloaded. Accepts Go-style durations (`10m`). |
-| `AUDIOLLA_SWEEPER_INTERVAL` | `60` | How often the idle-engine sweeper runs, in seconds. |
-| `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | Max upload size (default 200 MB). |
+| Variable | Default | |
+|----------|---------|-|
+| `AUDIOLLA_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or `cuda:N` |
+| `AUDIOLLA_ENGINES_FILE` | `/app/engines.json` | path to engines registry |
+| `AUDIOLLA_DATA_DIR` | `/data` | where models and staged files live |
+| `AUDIOLLA_AUTH_TOKEN` | — | bearer token; empty means no auth |
+| `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
+| `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |
+| `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
+| `AUDIOLLA_SWEEPER_INTERVAL` | `60` | how often the idle sweeper checks, in seconds |
+| `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (200 MB) |
 
 ---
 
-## What's Not Included
+## What's not in here
 
-| Feature | Why |
-|---------|-----|
-| Music generation (text-to-music) | MusicGen is CC-BY-NC — non-commercial only. Stable Audio Open requires a Stability AI commercial agreement. No permissively-licensed model at production quality exists. |
-| Essentia MIR analysis | AGPL v3 — using it in a network service requires publishing full source under AGPL. librosa covers the common cases without that obligation. |
-| Real-time streaming separation | Demucs needs the whole file. No chunk-based or streaming inference. |
-| Speech denoising | resemble-enhance / DeepFilterNet are speech-focused tools. Relevant after Demucs separates vocals, not before. Out of scope. |
-| VST3 plugin hosting | Pedalboard supports VST3 but requires mounting the host plugin directory. Not in the default image. |
-| Time-stretch / pitch-shift via rubberband | rubberband is GPL v2 + commercial license for distribution. Sox covers basic pitch/tempo shifting. Add rubberband yourself if you accept the terms. |
+| | Why |
+|-|-----|
+| Music generation | MusicGen is CC-BY-NC. Stable Audio Open needs a Stability AI commercial agreement. Nothing permissively licensed at production quality exists yet. |
+| Essentia analysis | AGPL v3 — any network service using it has to publish full source. librosa handles the common cases without that. |
+| Streaming separation | Demucs needs the whole file. No chunked or real-time inference. |
+| Speech denoising | resemble-enhance / DeepFilterNet are for speech. Useful after you've already pulled vocals with Demucs, but that's a different tool. |
+| VST3 plugin hosting | Pedalboard can do it but you'd need to mount your host plugin directory. Out of scope for the default image. |
+| rubberband pitch/time-stretch | GPL v2 + commercial license. Sox handles basic pitch and tempo. Add it yourself if you accept the terms. |
 
 ---
 
-## Build & Development
+## Build & dev
 
 ```bash
-make build        # build CPU image
-make build-cuda   # build CUDA image
-make run          # run CPU image locally (port 8000)
-make run-cuda     # run CUDA image locally (port 8000, requires --gpus)
+make build        # CPU image
+make build-cuda   # CUDA image
+make run          # CPU image on port 8000
+make run-cuda     # CUDA image on port 8000
 ```
 
 ```bash
 make dev-image          # build the dev container
-make shell              # shell inside the dev container
+make shell              # shell inside it
 make lint               # flake8 + mypy
 make format             # isort + black
-make test-unit          # unit tests (no GPU, no ML deps)
-make test-unit-cov-gate # enforce ≥80% line coverage on support modules
-make test-integration   # integration tests (spawns docker containers)
+make test-unit          # unit tests (no GPU, no ML deps needed)
+make test-unit-cov-gate # fail if coverage on support modules drops below 80%
+make test-integration   # integration tests (spins up Docker containers)
 make generate           # regenerate src/audiolla/schema/ from openapi.yaml
-make clean              # remove build/cache artifacts
+make clean              # wipe build/cache artifacts
 ```
 
 ```bash
 make pkg-lock                 # refresh uv.lock
-make pkg-add PKG=name[==ver]  # add a package
-make pkg-update PKG=name      # upgrade one package
+make pkg-add PKG=name[==ver]  # add a dep
+make pkg-update PKG=name      # upgrade one dep
 make pkg-upgrade              # upgrade everything
-make pkg-remove PKG=name      # remove a package
+make pkg-remove PKG=name      # remove a dep
 make pkg-compile-heavy        # recompile requirements-heavy-{cpu,cuda}.txt
 ```
 
-Every `make pkg-*` command bumps `[tool.uv] exclude-newer` in `pyproject.toml` to today's UTC midnight before touching deps, so packages published in the last 24h are refused. Everything runs inside the dev container — the host only needs `docker`, `make`, and `git`.
+Every `make pkg-*` bumps `[tool.uv] exclude-newer` to today's UTC midnight before touching anything — packages younger than the gate are refused. Everything runs inside the dev container. Host needs `docker`, `make`, `git`.
 
 ---
 
-## Supply Chain
+## Supply chain
 
-Two-layer install in both prod images:
+Both prod images do a two-layer install.
 
-**Light runtime deps** (`fastapi`, `uvicorn`, `pydantic`, etc.) are locked in `uv.lock`. Images install with `uv sync --frozen --no-dev` — build fails if the lockfile is stale, and uv verifies wheel hashes.
+**Light deps** (`fastapi`, `uvicorn`, `pydantic`, etc.): locked in `uv.lock`, installed with `uv sync --frozen --no-dev`. Build fails if the lockfile doesn't match `pyproject.toml`. Wheel hashes verified by uv.
 
-**Heavy ML/DSP deps** (torch, demucs, matchering, pedalboard, librosa, sox, numpy, soundfile, huggingface-hub) are split into per-variant hash-locked files because the torch wheel flavor differs between CPU and CUDA images and the wheels live on a separate index (`download.pytorch.org`). The specs live in `scripts/heavy-deps-{cpu,cuda}.in` and compile to `requirements-heavy-{cpu,cuda}.txt` via `make pkg-compile-heavy`. Both files are committed and installed with `uv pip install --require-hashes`.
+**Heavy ML/DSP deps** (torch, demucs, matchering, pedalboard, librosa, sox, numpy, soundfile, huggingface-hub): one hash-locked requirements file per image variant (`requirements-heavy-cpu.txt`, `requirements-heavy-cuda.txt`), because the torch wheel differs between CPU and CUDA and lives on a different index. Human specs in `scripts/heavy-deps-{cpu,cuda}.in`, compiled via `make pkg-compile-heavy`, installed with `uv pip install --require-hashes`. Both files are committed.
 
-Base images and the `uv` binary are pinned by `@sha256:` digest.
+Base images and the `uv` binary pinned by `@sha256:` digest.
 
 ---
 
@@ -275,4 +283,4 @@ Base images and the `uv` binary are pinned by `@sha256:` digest.
 
 [WTFPL](LICENSE).
 
-matchering and pedalboard are GPL v3 — fine for internal / self-hosted use. Distributing the image as a product requires GPL compliance review.
+matchering and pedalboard are GPL v3. Fine for self-hosted use. Distributing the image as a product needs a GPL compliance review.
