@@ -149,6 +149,22 @@ harness_start() {
         device="cuda"
     fi
 
+    # Forward any AUDIOLLA_* env vars the caller set into the container —
+    # lets a test override AUDIOLLA_FETCH_MODE / AUDIOLLA_AUTH_TOKEN / etc.
+    # without altering the harness signature. DEVICE / ENABLED_ENGINES are
+    # set explicitly above, so we skip them here to avoid duplicate flags.
+    local forwarded_env=()
+    local name value
+    for name in $(compgen -e | grep '^AUDIOLLA_' || true); do
+        case "$name" in
+            AUDIOLLA_DEVICE|AUDIOLLA_ENABLED_ENGINES)
+                continue
+                ;;
+        esac
+        value="${!name}"
+        forwarded_env+=(-e "${name}=${value}")
+    done
+
     docker run -d --rm \
         "${gpu_args[@]}" \
         --name "$HARNESS_CONTAINER" \
@@ -156,6 +172,7 @@ harness_start() {
         -v "${HARNESS_CACHE_DIR}:/data" \
         -e AUDIOLLA_DEVICE="${device}" \
         -e AUDIOLLA_ENABLED_ENGINES="${HARNESS_ENABLED_ENGINES}" \
+        "${forwarded_env[@]}" \
         -p "${HARNESS_PORT}:8000" \
         "$HARNESS_IMAGE" >/dev/null
 

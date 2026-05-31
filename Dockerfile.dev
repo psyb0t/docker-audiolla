@@ -40,4 +40,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uvicorn==0.34.2 \
         pydantic==2.11.4 \
         python-multipart==0.0.20 \
+        httpx==0.28.1 \
+        mcp==1.27.1 \
         datamodel-code-generator==0.31.1

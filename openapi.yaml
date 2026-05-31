@@ -38,6 +38,37 @@ components:
       format: binary
       description: Raw audio bytes in the requested output format.
 
+    StagedOutputResponse:
+      type: object
+      description: Returned when `output_path` is set on an audio-producing endpoint — bytes were written under FILES_DIR / path instead of streamed inline.
+      required: [path, size]
+      properties:
+        path:
+          type: string
+          description: Relative path under the staging area (resolves to FILES_DIR / path on disk).
+        size:
+          type: integer
+          description: Bytes written.
+        output_format:
+          type: string
+          description: Echo of the requested output_format.
+
+    UrlOutputResponse:
+      type: object
+      description: Returned when `output_url` is set on an audio-producing endpoint — bytes were PUT to the URL instead of streamed inline.
+      required: [url, size]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: The presigned PUT URL the bytes were uploaded to.
+        size:
+          type: integer
+          description: Bytes uploaded.
+        output_format:
+          type: string
+          description: Echo of the requested output_format.
+
     EngineInfo:
       type: object
       required: [slug, executor]
@@ -308,9 +339,19 @@ paths:
       summary: Stem separation
       description: |
         Separate an audio file into individual stems using Demucs.
-        If exactly one stem is requested the response is the raw audio bytes
-        (Content-Disposition: attachment; filename=<stem>.<format>).
-        Multiple stems → ZIP archive containing one file per stem.
+
+        Input — exactly one of `file`, `file_path`, or `file_url` (zero or
+        more-than-one returns 400). `file_url` is subject to the
+        AUDIOLLA_FETCH_MODE allowlist/denylist policy.
+
+        Output — by default the response is raw bytes:
+          - single stem requested → audio bytes (Content-Disposition: attachment)
+          - multiple stems → ZIP archive
+
+        Pass `output_path` to write the bytes to FILES_DIR / path instead
+        (response becomes JSON), or `output_url` to PUT to a presigned URL.
+        Exactly one of `output_path` / `output_url` is allowed; supply
+        neither for the default inline response.
       operationId: separate
       requestBody:
         required: true
@@ -318,12 +359,26 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [file, engine]
+              required: [engine]
               properties:
                 file:
                   type: string
                   format: binary
-                  description: Audio file to separate.
+                  description: Audio file to separate (multipart upload). Mutually exclusive with file_path / file_url.
+                file_path:
+                  type: string
+                  description: Path under the staging area (`/v1/files/...`). Mutually exclusive with file / file_url.
+                file_url:
+                  type: string
+                  format: uri
+                  description: Remote URL — server fetches subject to AUDIOLLA_FETCH_MODE policy. Mutually exclusive with file / file_path.
+                output_path:
+                  type: string
+                  description: Optional. Write the output to FILES_DIR / path; response becomes JSON ({path, size, ...}). Mutually exclusive with output_url.
+                output_url:
+                  type: string
+                  format: uri
+                  description: Optional. PUT the output to a presigned URL; response becomes JSON ({url, size, ...}). Mutually exclusive with output_path.
                 engine:
                   type: string
                   description: Engine slug (must have executor=demucs).
@@ -339,7 +394,8 @@ paths:
       responses:
         "200":
           description: |
-            Audio bytes (single stem) or ZIP archive (multiple stems).
+            Audio bytes (single stem), ZIP archive (multiple stems), or
+            JSON descriptor when output_path / output_url is set.
           content:
             audio/wav:
               schema:
@@ -353,6 +409,11 @@ paths:
             application/zip:
               schema:
                 $ref: "#/components/schemas/AudioBlob"
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
         "400":
           $ref: "#/components/responses/400"
         "401":
@@ -376,6 +437,12 @@ paths:
         - `reference`: match loudness, EQ, and dynamics to a reference track (matchering).
         - `chain`: apply a named pedalboard preset (EQ → compress → limit → LUFS normalize).
 
+        Input — exactly one of `file`, `file_path`, or `file_url`. When
+        `mode=reference`, also provide exactly one of `reference`,
+        `reference_path`, or `reference_url`.
+
+        Output — same input/output mode rules as /v1/audio/separate.
+
         `target_lufs` adjusts final integrated loudness in both modes. If omitted, matchering
         targets the reference file's loudness; chain presets use their own built-in target.
       operationId: master
@@ -385,19 +452,40 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [file, mode]
+              required: [mode]
               properties:
                 file:
                   type: string
                   format: binary
-                  description: Audio file to master.
+                  description: Audio file to master. Mutually exclusive with file_path / file_url.
+                file_path:
+                  type: string
+                  description: Path under the staging area. Mutually exclusive with file / file_url.
+                file_url:
+                  type: string
+                  format: uri
+                  description: Remote URL (subject to AUDIOLLA_FETCH_MODE policy). Mutually exclusive with file / file_path.
+                output_path:
+                  type: string
+                  description: Optional. Write the mastered audio to FILES_DIR / path; JSON response.
+                output_url:
+                  type: string
+                  format: uri
+                  description: Optional. PUT the mastered audio to a presigned URL; JSON response.
                 mode:
                   type: string
                   enum: [reference, chain]
                 reference:
                   type: string
                   format: binary
-                  description: Reference audio file. Required when mode=reference.
+                  description: "Reference audio file (multipart). When mode=reference, provide one of reference / reference_path / reference_url."
+                reference_path:
+                  type: string
+                  description: Reference file path under staging. Mode=reference only.
+                reference_url:
+                  type: string
+                  format: uri
+                  description: Reference file remote URL (fetch policy applies). Mode=reference only.
                 preset:
                   type: string
                   description: Pedalboard preset name. Required when mode=chain.
@@ -410,7 +498,7 @@ paths:
                   enum: [wav, mp3, flac, opus, aac, pcm]
       responses:
         "200":
-          description: Mastered audio bytes.
+          description: Mastered audio bytes (or JSON descriptor with output_path / output_url).
           content:
             audio/wav:
               schema:
@@ -421,6 +509,11 @@ paths:
             audio/flac:
               schema:
                 $ref: "#/components/schemas/AudioBlob"
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
         "400":
           $ref: "#/components/responses/400"
         "401":
@@ -442,6 +535,10 @@ paths:
       description: |
         Extract music information retrieval features from an audio file using librosa.
         Specify `features` to limit which are computed; omit to compute all.
+
+        Input — exactly one of `file`, `file_path`, or `file_url`. Output
+        is always JSON (no output_path / output_url here — the body is
+        already structured data).
       operationId: analyze
       requestBody:
         required: true
@@ -449,11 +546,18 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [file]
               properties:
                 file:
                   type: string
                   format: binary
+                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
+                file_path:
+                  type: string
+                  description: Path under the staging area. Mutually exclusive with file / file_url.
+                file_url:
+                  type: string
+                  format: uri
+                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
                 features:
                   type: array
                   items:
@@ -486,6 +590,8 @@ paths:
         `operations` is an ordered array of `{op, params}` objects; each op is a
         SoX effect name and params are passed directly to pysox. The chain is applied
         in order — output of each effect feeds the next.
+
+        Input/output mode rules same as /v1/audio/separate.
       operationId: transform
       requestBody:
         required: true
@@ -493,11 +599,26 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [file, operations]
+              required: [operations]
               properties:
                 file:
                   type: string
                   format: binary
+                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
+                file_path:
+                  type: string
+                  description: Path under the staging area. Mutually exclusive with file / file_url.
+                file_url:
+                  type: string
+                  format: uri
+                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
+                output_path:
+                  type: string
+                  description: Optional. Write the transformed audio to FILES_DIR / path; JSON response.
+                output_url:
+                  type: string
+                  format: uri
+                  description: Optional. PUT the transformed audio to a presigned URL; JSON response.
                 operations:
                   type: string
                   description: JSON-encoded array of SoxOperation objects.
@@ -507,11 +628,16 @@ paths:
                   enum: [wav, mp3, flac, opus, aac, pcm]
       responses:
         "200":
-          description: Transformed audio bytes.
+          description: Transformed audio bytes (or JSON descriptor with output_path / output_url).
           content:
             audio/wav:
               schema:
                 $ref: "#/components/schemas/AudioBlob"
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
         "400":
           $ref: "#/components/responses/400"
         "401":
@@ -530,6 +656,10 @@ paths:
         Measure integrated loudness (LUFS) of an audio file.
         If `target_lufs` is supplied, normalize the file to that target and return
         audio bytes. If omitted, return a JSON analysis result only.
+
+        Input — exactly one of `file`, `file_path`, or `file_url`.
+        `output_path` / `output_url` apply only when target_lufs is set
+        (measurement-only is already JSON).
       operationId: loudness
       requestBody:
         required: true
@@ -537,11 +667,25 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [file]
               properties:
                 file:
                   type: string
                   format: binary
+                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
+                file_path:
+                  type: string
+                  description: Path under the staging area. Mutually exclusive with file / file_url.
+                file_url:
+                  type: string
+                  format: uri
+                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
+                output_path:
+                  type: string
+                  description: Optional. Write the normalized audio to FILES_DIR / path; JSON response. Ignored when target_lufs is omitted.
+                output_url:
+                  type: string
+                  format: uri
+                  description: Optional. PUT the normalized audio to a presigned URL; JSON response. Ignored when target_lufs is omitted.
                 target_lufs:
                   type: number
                   description: Target integrated loudness in LUFS. Omit to analyze only.
@@ -553,11 +697,16 @@ paths:
       responses:
         "200":
           description: |
-            JSON loudness result (analyze-only) or audio bytes (when target_lufs supplied).
+            JSON loudness result (analyze-only or output_path / output_url
+            mode) or audio bytes (when target_lufs supplied without
+            output_path / output_url).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/LoudnessResult"
+                oneOf:
+                  - $ref: "#/components/schemas/LoudnessResult"
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
             audio/wav:
               schema:
                 $ref: "#/components/schemas/AudioBlob"

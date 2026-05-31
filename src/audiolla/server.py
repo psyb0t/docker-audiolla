@@ -16,6 +16,15 @@ Endpoints:
   GET    /v1/files/{path}            retrieve a staged file
   DELETE /v1/files/{path}            delete a staged file
   *      /v1/mcp                     MCP streamable-HTTP (mounted; tools mirror the REST surface)
+
+Audio endpoints accept exactly one of three input modes:
+  - file       (multipart upload)
+  - file_path  (relative path under FILES_DIR / staging)
+  - file_url   (remote URL, subject to AUDIOLLA_FETCH_MODE policy)
+
+Audio-producing endpoints also accept optional output_path / output_url
+to write the result to staging or PUT to a presigned URL instead of
+returning bytes inline. See input_resolver.py / output_writer.py.
 """
 
 from __future__ import annotations
@@ -41,7 +50,9 @@ from .audio import (
 from .auth import BearerAuthMiddleware
 from .engines import build_engines, is_separation_engine, is_mastering_engine
 from .engines import is_analysis_engine, is_transform_engine, is_loudness_engine
+from .input_resolver import resolve_input
 from .mcp_server import build_mcp_server
+from .output_writer import write_output
 from .schema import AnalyzeResult, HealthResponse, LoudnessResult
 
 
@@ -286,18 +297,6 @@ def _validate_engine_supports_device(slug: str) -> None:
         )
 
 
-async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
-    raw = await file.read()
-    if len(raw) > config.MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"upload too large ({len(raw)} bytes > {config.MAX_UPLOAD_BYTES})",
-        )
-    if not raw:
-        raise HTTPException(status_code=400, detail="uploaded file is empty")
-    return raw, file.filename or "audio"
-
-
 async def _evict_siblings(current_slug: str) -> None:
     siblings = [
         (slug, e) for slug, e in ENGINES.items()
@@ -314,7 +313,11 @@ async def _evict_siblings(current_slug: str) -> None:
 
 @app.post("/v1/audio/separate")
 async def separate(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
     engine: str = Form(...),
     stems: list[str] = Form(default=[]),
     output_format: str = Form(default="wav"),
@@ -334,7 +337,9 @@ async def separate(
         )
     _validate_engine_supports_device(engine)
 
-    raw, filename = await _read_upload(file)
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
 
     entry = REGISTRY[engine]
     available_stems = entry.get("stems", [])
@@ -358,27 +363,44 @@ async def separate(
     if len(requested) == 1:
         stem_name = requested[0]
         audio_bytes = stem_results[stem_name]
-        ct = content_type_for(output_format)
-        return Response(
-            content=audio_bytes,
-            media_type=ct,
-            headers={
-                "Content-Disposition": f'attachment; filename="{stem_name}.{output_format}"'
+        return await write_output(
+            audio_bytes,
+            media_type=content_type_for(output_format),
+            filename=f"{stem_name}.{output_format}",
+            output_path=output_path,
+            output_url=output_url,
+            extra_json={
+                "engine": engine,
+                "stem": stem_name,
+                "output_format": output_format,
             },
         )
 
-    return Response(
-        content=multi_stream_zip(stem_results, output_format),
+    return await write_output(
+        multi_stream_zip(stem_results, output_format),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{engine}-stems.zip"'},
+        filename=f"{engine}-stems.zip",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine,
+            "stems": list(stem_results.keys()),
+            "output_format": output_format,
+        },
     )
 
 
 @app.post("/v1/audio/master")
 async def master(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
     mode: str = Form(...),
     reference: UploadFile | None = File(default=None),
+    reference_path: str | None = Form(default=None),
+    reference_url: str | None = Form(default=None),
     preset: str | None = Form(default=None),
     target_lufs: float | None = Form(default=None),
     output_format: str = Form(default="wav"),
@@ -389,17 +411,15 @@ async def master(
         raise HTTPException(
             status_code=400, detail="mode must be 'reference' or 'chain'"
         )
-    if mode == "reference" and (reference is None or not reference.filename):
-        raise HTTPException(
-            status_code=400, detail="mode=reference requires a reference file"
-        )
     if mode == "chain" and not preset:
         raise HTTPException(
             status_code=400, detail="mode=chain requires a preset name"
         )
     _validate_target_lufs(target_lufs)
 
-    raw, filename = await _read_upload(file)
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
 
     if mode == "reference":
         engine_slug = "matchering"
@@ -412,14 +432,12 @@ async def master(
             raise HTTPException(
                 status_code=400, detail="matchering engine does not support mastering"
             )
-        # Belt-and-braces re-check: the mode=reference guard above already
-        # rejected None, but `assert` would be stripped under python -O so we
-        # raise an explicit HTTPException to survive optimised builds.
-        if reference is None:
-            raise HTTPException(
-                status_code=400, detail="mode=reference requires a reference file"
-            )
-        ref_raw, ref_filename = await _read_upload(reference)
+        ref_raw, ref_filename = await resolve_input(
+            file=reference,
+            file_path=reference_path,
+            file_url=reference_url,
+            field_prefix="reference",
+        )
         await _evict_siblings(engine_slug)
         try:
             audio_bytes = await eng.master_reference(
@@ -454,16 +472,25 @@ async def master(
         except AudioConversionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return Response(
-        content=audio_bytes,
+    return await write_output(
+        audio_bytes,
         media_type=content_type_for(output_format),
-        headers={"Content-Disposition": f'attachment; filename="mastered.{output_format}"'},
+        filename=f"mastered.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine_slug,
+            "mode": mode,
+            "output_format": output_format,
+        },
     )
 
 
 @app.post("/v1/audio/analyze", response_model=AnalyzeResult)
 async def analyze(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
     features: list[str] = Form(default=[]),
 ) -> AnalyzeResult:
     _VALID_FEATURES = frozenset({
@@ -489,7 +516,9 @@ async def analyze(
             status_code=400, detail="librosa-analyze engine does not support analysis"
         )
 
-    raw, filename = await _read_upload(file)
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
 
     try:
         result = await eng.analyze(raw, filename, features=requested_features)
@@ -501,7 +530,11 @@ async def analyze(
 
 @app.post("/v1/audio/transform")
 async def transform(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
     operations: str = Form(...),
     output_format: str = Form(default="wav"),
 ) -> Response:
@@ -544,7 +577,9 @@ async def transform(
             status_code=400, detail="sox-transform engine does not support transforms"
         )
 
-    raw, filename = await _read_upload(file)
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
 
     try:
         audio_bytes = await eng.transform(
@@ -553,16 +588,27 @@ async def transform(
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return Response(
-        content=audio_bytes,
+    return await write_output(
+        audio_bytes,
         media_type=content_type_for(output_format),
-        headers={"Content-Disposition": f'attachment; filename="transformed.{output_format}"'},
+        filename=f"transformed.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine_slug,
+            "operations": ops,
+            "output_format": output_format,
+        },
     )
 
 
 @app.post("/v1/audio/loudness")
 async def loudness(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
     target_lufs: float | None = Form(default=None),
     output_format: str = Form(default="wav"),
 ) -> Any:
@@ -580,9 +626,12 @@ async def loudness(
             status_code=400, detail="engine does not support loudness operations"
         )
 
-    raw, filename = await _read_upload(file)
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
 
     if target_lufs is None:
+        # Pure measurement — JSON only, output_path/url are meaningless.
         try:
             lufs = await eng.measure_lufs(raw, filename)
         except AudioConversionError as exc:
@@ -598,13 +647,20 @@ async def loudness(
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return Response(
-        content=audio_bytes,
+    return await write_output(
+        audio_bytes,
         media_type=content_type_for(output_format),
-        headers={
-            "Content-Disposition": f'attachment; filename="normalized.{output_format}"',
+        filename=f"normalized.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_inline_headers={
             "X-Loudness-LUFS": str(lufs),
             "X-Target-LUFS": str(target_lufs),
+        },
+        extra_json={
+            "measured_lufs": lufs,
+            "target_lufs": target_lufs,
+            "output_format": output_format,
         },
     )
 

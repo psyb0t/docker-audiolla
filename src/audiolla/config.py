@@ -98,6 +98,55 @@ MAX_UPLOAD_BYTES: int = _int_env("AUDIOLLA_MAX_UPLOAD_BYTES", 200 * 1024 * 1024)
 PRELOAD: list[str] = _list_env("AUDIOLLA_PRELOAD")
 ENABLED_ENGINES: list[str] = _list_env("AUDIOLLA_ENABLED_ENGINES")
 
+
+# ── URL fetch policy ─────────────────────────────────────────────────────────
+# Controls server-side fetching for `file_url` and PUT-to-`output_url` flows.
+# Default `disabled` keeps the server a pure local-processing box: any caller
+# passing file_url / output_url gets a 400. Switch to allowlist (preferred)
+# or denylist (caveat emptor — leaky by design) to opt in.
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if raw == "":
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name}={raw!r} must be a boolean (1/0, true/false, yes/no, on/off)")
+
+
+FETCH_MODE: str = (
+    os.environ.get("AUDIOLLA_FETCH_MODE", "disabled").strip().lower()
+    or "disabled"
+)
+if FETCH_MODE not in ("disabled", "allowlist", "denylist"):
+    raise ValueError(
+        f"AUDIOLLA_FETCH_MODE={FETCH_MODE!r} must be 'disabled', "
+        "'allowlist', or 'denylist'"
+    )
+
+FETCH_HOSTS: list[str] = _list_env("AUDIOLLA_FETCH_HOSTS")
+if FETCH_MODE == "allowlist" and not FETCH_HOSTS:
+    raise ValueError(
+        "AUDIOLLA_FETCH_MODE=allowlist requires AUDIOLLA_FETCH_HOSTS "
+        "to be a non-empty comma-separated list"
+    )
+
+FETCH_SCHEMES: list[str] = [
+    s.lower() for s in (_list_env("AUDIOLLA_FETCH_SCHEMES") or ["https"])
+]
+for _s in FETCH_SCHEMES:
+    if _s not in ("http", "https"):
+        raise ValueError(
+            f"AUDIOLLA_FETCH_SCHEMES contains unsupported scheme {_s!r}; "
+            "supported: http, https"
+        )
+
+FETCH_TIMEOUT_SECONDS: float = _duration_env("AUDIOLLA_FETCH_TIMEOUT", 30.0)
+FETCH_ALLOW_PRIVATE: bool = _bool_env("AUDIOLLA_FETCH_ALLOW_PRIVATE", False)
+FETCH_MAX_REDIRECTS: int = _int_env("AUDIOLLA_FETCH_MAX_REDIRECTS", 5)
+
 _VALID_EXECUTORS = frozenset({
     "demucs",
     "matchering",
