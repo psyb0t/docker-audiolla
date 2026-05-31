@@ -1,0 +1,81 @@
+[project]
+name = "audiolla"
+version = "0.1.0"
+description = "Self-hosted music-production REST API — stem separation, mastering, MIR analysis, DSP transform, loudness normalization"
+license = { text = "WTFPL" }
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "psyb0t" }]
+keywords = ["audio", "music", "stem-separation", "mastering", "mir", "demucs", "matchering", "fastapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+# Lightweight runtime deps only — heavy ML stack (demucs, matchering,
+# pedalboard, librosa, etc.) installed via Dockerfile because:
+#   1. torch flavor (CPU vs CUDA) is chosen by --index-url at install time
+#   2. demucs/matchering transitive resolution is fragile; explicit pins in Dockerfile
+dependencies = [
+    "fastapi==0.115.12",
+    "uvicorn==0.34.2",
+    "pydantic==2.11.4",
+    "python-multipart==0.0.20",
+    "httpx==0.28.1",
+    "mcp==1.27.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/psyb0t/docker-audiolla"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audiolla"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Coverage gate is wired via Makefile's test-unit-cov-gate; pytest-cov
+# defaults stay sensible without forcing fail-under here.
+
+[tool.uv]
+# Supply-chain defense: only install pkg versions older than `exclude-newer`.
+# Bumped by `make pkg-*` targets (pkg-add / pkg-update / pkg-upgrade /
+# pkg-remove) before any dep mutation via scripts/bump_exclude_newer.sh,
+# which rewrites this line to today's UTC midnight. NEVER drift forward
+# automatically — the whole point is to catch newly-published wheels in the
+# supply-chain attack window (hours-to-days post-release). Manual edits to
+# this line are fine but go through the make targets for normal mutations.
+exclude-newer = "2026-05-24T00:00:00Z"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+follow_imports = "silent"
+
+# ML / DSP libs aren't installed in the dev image — only the prod images
+# carry them. Stub them out for type-checking without complaint.
+[[tool.mypy.overrides]]
+module = [
+    "demucs.*",
+    "matchering",
+    "matchering.*",
+    "pedalboard",
+    "pedalboard.*",
+    "pyloudnorm",
+    "librosa",
+    "librosa.*",
+    "soundfile",
+    "sox",
+    "torch",
+    "torchaudio",
+    "numpy",
+    "numpy.*",
+]
+ignore_missing_imports = true

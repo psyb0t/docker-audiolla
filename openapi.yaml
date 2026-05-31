@@ -1,0 +1,685 @@
+openapi: "3.1.0"
+
+info:
+  title: audiolla
+  version: "0.1.0"
+  description: |
+    Self-hosted music-production REST API.
+    OpenAPI 3.1-spec'd, FastAPI server, generated Pydantic models.
+    Not OpenAI-compatible — OpenAI has no music-side audio endpoints.
+
+    ## License note
+    matchering and pedalboard are GPL v3. For internal / self-hosted use this
+    is fine. Distributing the Docker image as a product requires GPL compliance review.
+
+servers:
+  - url: http://localhost:8000
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    ErrorBody:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          description: Human-readable error description.
+
+    AudioBlob:
+      type: string
+      format: binary
+      description: Raw audio bytes in the requested output format.
+
+    EngineInfo:
+      type: object
+      required: [slug, executor]
+      properties:
+        slug:
+          type: string
+          description: Unique engine identifier (key in engines.json).
+        executor:
+          type: string
+          description: Backend type (demucs, matchering, pedalboard_chain, librosa_analyze, sox_transform).
+        variant:
+          type: string
+          nullable: true
+          description: Demucs model variant (htdemucs, htdemucs_ft, etc.). Null for non-demucs engines.
+        stems:
+          type: array
+          items:
+            type: string
+          description: Available stem names. Populated for demucs engines only.
+        presets:
+          type: array
+          items:
+            type: string
+          description: Available preset names. Populated for pedalboard-chain only.
+        description:
+          type: string
+
+    AnalyzeResult:
+      type: object
+      properties:
+        bpm:
+          type: number
+          nullable: true
+          description: Estimated tempo in beats per minute.
+        key:
+          type: string
+          nullable: true
+          description: Estimated musical key (e.g. "C major", "A minor").
+        loudness_lufs:
+          type: number
+          nullable: true
+          description: Integrated loudness in LUFS (ITU-R BS.1770-4).
+        duration:
+          type: number
+          nullable: true
+          description: Duration in seconds.
+        spectral_centroid:
+          type: number
+          nullable: true
+          description: Mean spectral centroid in Hz.
+        rms:
+          type: number
+          nullable: true
+          description: Root mean square energy.
+        zcr:
+          type: number
+          nullable: true
+          description: Mean zero-crossing rate.
+
+    LoudnessResult:
+      type: object
+      required: [loudness_lufs]
+      properties:
+        loudness_lufs:
+          type: number
+          description: Measured integrated loudness in LUFS.
+        target_lufs:
+          type: number
+          nullable: true
+          description: The requested target_lufs (echoed back). Null if analyze-only.
+        normalized:
+          type: boolean
+          description: True if normalization was applied, false for analyze-only.
+
+    SoxOperation:
+      type: object
+      required: [op]
+      properties:
+        op:
+          type: string
+          enum: [gain, equalizer, compand, reverb, pitch, tempo, rate, channels, trim, pad]
+          description: SoX effect name.
+        params:
+          type: object
+          additionalProperties: true
+          description: Effect-specific parameters. See SoX documentation for each effect's options.
+
+    HealthResponse:
+      type: object
+      required: [ok, device, engines]
+      properties:
+        ok:
+          type: boolean
+        device:
+          type: string
+          description: Active compute device (cpu, cuda, cuda:N).
+        engines:
+          type: array
+          items:
+            type: string
+          description: Configured engine slugs.
+
+    PsEntry:
+      type: object
+      required: [slug, executor, loaded]
+      properties:
+        slug:
+          type: string
+        executor:
+          type: string
+        loaded:
+          type: boolean
+        idle_seconds:
+          type: number
+          nullable: true
+
+  responses:
+    400:
+      description: Bad request — invalid input or missing required field.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    401:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    404:
+      description: Engine or file not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    413:
+      description: Upload too large.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    415:
+      description: Unsupported media type or output format.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    422:
+      description: Validation error — schema mismatch in request body or query params.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    500:
+      description: Internal server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      description: Always unauthenticated. Used by k8s / Docker probes.
+      operationId: healthz
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/engines:
+    get:
+      summary: List configured engines
+      description: Returns all engines defined in engines.json with their capabilities.
+      operationId: listEngines
+      responses:
+        "200":
+          description: Engine list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object:
+                    type: string
+                    enum: [list]
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EngineInfo"
+        "401":
+          $ref: "#/components/responses/401"
+
+  /api/ps:
+    get:
+      summary: List currently loaded engines
+      description: Returns engines that have model weights resident in memory.
+      operationId: listLoaded
+      responses:
+        "200":
+          description: Loaded engines.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [engines]
+                properties:
+                  engines:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PsEntry"
+        "401":
+          $ref: "#/components/responses/401"
+
+  /api/ps/{engine}:
+    delete:
+      summary: Evict one engine from memory
+      operationId: unloadOne
+      parameters:
+        - in: path
+          name: engine
+          required: true
+          schema:
+            type: string
+          description: Engine slug (URL-encoded).
+      responses:
+        "200":
+          description: Engine evicted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unloaded:
+                    type: string
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+
+  /unload:
+    post:
+      summary: Evict all loaded engines
+      operationId: unloadAll
+      responses:
+        "200":
+          description: All engines evicted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unloaded:
+                    type: array
+                    items:
+                      type: string
+        "401":
+          $ref: "#/components/responses/401"
+
+  /v1/audio/separate:
+    post:
+      summary: Stem separation
+      description: |
+        Separate an audio file into individual stems using Demucs.
+        If exactly one stem is requested the response is the raw audio bytes
+        (Content-Disposition: attachment; filename=<stem>.<format>).
+        Multiple stems → ZIP archive containing one file per stem.
+      operationId: separate
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, engine]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Audio file to separate.
+                engine:
+                  type: string
+                  description: Engine slug (must have executor=demucs).
+                stems:
+                  type: array
+                  items:
+                    type: string
+                  description: Stem names to include in output. Defaults to all stems for the variant.
+                output_format:
+                  type: string
+                  default: wav
+                  enum: [wav, mp3, flac, opus, aac, pcm]
+      responses:
+        "200":
+          description: |
+            Audio bytes (single stem) or ZIP archive (multiple stems).
+          content:
+            audio/wav:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            audio/mpeg:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            audio/flac:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            application/zip:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "413":
+          $ref: "#/components/responses/413"
+        "415":
+          $ref: "#/components/responses/415"
+        "422":
+          $ref: "#/components/responses/422"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/audio/master:
+    post:
+      summary: Audio mastering
+      description: |
+        Master an audio file. Two modes:
+        - `reference`: match loudness, EQ, and dynamics to a reference track (matchering).
+        - `chain`: apply a named pedalboard preset (EQ → compress → limit → LUFS normalize).
+
+        `target_lufs` adjusts final integrated loudness in both modes. If omitted, matchering
+        targets the reference file's loudness; chain presets use their own built-in target.
+      operationId: master
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, mode]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Audio file to master.
+                mode:
+                  type: string
+                  enum: [reference, chain]
+                reference:
+                  type: string
+                  format: binary
+                  description: Reference audio file. Required when mode=reference.
+                preset:
+                  type: string
+                  description: Pedalboard preset name. Required when mode=chain.
+                target_lufs:
+                  type: number
+                  description: Target integrated loudness in LUFS. Optional.
+                output_format:
+                  type: string
+                  default: wav
+                  enum: [wav, mp3, flac, opus, aac, pcm]
+      responses:
+        "200":
+          description: Mastered audio bytes.
+          content:
+            audio/wav:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            audio/mpeg:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            audio/flac:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "413":
+          $ref: "#/components/responses/413"
+        "415":
+          $ref: "#/components/responses/415"
+        "422":
+          $ref: "#/components/responses/422"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/audio/analyze:
+    post:
+      summary: MIR analysis
+      description: |
+        Extract music information retrieval features from an audio file using librosa.
+        Specify `features` to limit which are computed; omit to compute all.
+      operationId: analyze
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                features:
+                  type: array
+                  items:
+                    type: string
+                    enum: [bpm, key, loudness, duration, spectral_centroid, rms, zcr]
+                  description: Feature subset to compute. Defaults to all.
+      responses:
+        "200":
+          description: Analysis results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyzeResult"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "413":
+          $ref: "#/components/responses/413"
+        "422":
+          $ref: "#/components/responses/422"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/audio/transform:
+    post:
+      summary: DSP transform chain
+      description: |
+        Apply a sequence of SoX effects to an audio file.
+        `operations` is an ordered array of `{op, params}` objects; each op is a
+        SoX effect name and params are passed directly to pysox. The chain is applied
+        in order — output of each effect feeds the next.
+      operationId: transform
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, operations]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                operations:
+                  type: string
+                  description: JSON-encoded array of SoxOperation objects.
+                output_format:
+                  type: string
+                  default: wav
+                  enum: [wav, mp3, flac, opus, aac, pcm]
+      responses:
+        "200":
+          description: Transformed audio bytes.
+          content:
+            audio/wav:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "413":
+          $ref: "#/components/responses/413"
+        "422":
+          $ref: "#/components/responses/422"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/audio/loudness:
+    post:
+      summary: Loudness measurement and normalization
+      description: |
+        Measure integrated loudness (LUFS) of an audio file.
+        If `target_lufs` is supplied, normalize the file to that target and return
+        audio bytes. If omitted, return a JSON analysis result only.
+      operationId: loudness
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                target_lufs:
+                  type: number
+                  description: Target integrated loudness in LUFS. Omit to analyze only.
+                output_format:
+                  type: string
+                  default: wav
+                  enum: [wav, mp3, flac, opus, aac, pcm]
+                  description: Output format. Only used when target_lufs is supplied.
+      responses:
+        "200":
+          description: |
+            JSON loudness result (analyze-only) or audio bytes (when target_lufs supplied).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoudnessResult"
+            audio/wav:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "413":
+          $ref: "#/components/responses/413"
+        "422":
+          $ref: "#/components/responses/422"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/files:
+    get:
+      summary: List staged files
+      description: List all files currently in the server-side staging area.
+      operationId: filesList
+      responses:
+        "200":
+          description: File listing.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        size:
+                          type: integer
+                        modified:
+                          type: string
+                          format: date-time
+        "401":
+          $ref: "#/components/responses/401"
+
+  /v1/files/{path}:
+    put:
+      summary: Stage a file
+      description: Upload a file to the server-side staging area at the given path.
+      operationId: filesPut
+      parameters:
+        - in: path
+          name: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: File staged.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:
+                    type: string
+                  size:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "413":
+          $ref: "#/components/responses/413"
+
+    get:
+      summary: Retrieve a staged file
+      operationId: filesGet
+      parameters:
+        - in: path
+          name: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File bytes.
+          content:
+            application/octet-stream:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+
+    delete:
+      summary: Delete a staged file
+      operationId: filesDelete
+      parameters:
+        - in: path
+          name: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: File deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: string
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "500":
+          $ref: "#/components/responses/500"

@@ -1,0 +1,14 @@
+[flake8]
+max-line-length = 99
+extend-ignore =
+    # whitespace before ':' (conflicts with black slicing)
+    E203,
+    # line break before binary operator (modern style)
+    W503,
+exclude =
+    .git,
+    .e2e-cache,
+    .pytest_cache,
+    .mypy_cache,
+    __pycache__,
+    src/audiolla/schema/_generated.py

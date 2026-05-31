@@ -1,0 +1,50 @@
+{
+  "engines": {
+    "htdemucs": {
+      "executor": "demucs",
+      "variant": "htdemucs",
+      "stems": ["drums", "bass", "other", "vocals"],
+      "prefetch": "demucs",
+      "description": "Hybrid Transformer Demucs — 4 stems, best balance of speed and quality"
+    },
+    "htdemucs_ft": {
+      "executor": "demucs",
+      "variant": "htdemucs_ft",
+      "stems": ["drums", "bass", "other", "vocals"],
+      "prefetch": "demucs",
+      "cuda_only": true,
+      "description": "htdemucs fine-tuned — 4 stems, highest quality, ~4x slower (CUDA-only at usable speed)"
+    },
+    "htdemucs_6s": {
+      "executor": "demucs",
+      "variant": "htdemucs_6s",
+      "stems": ["drums", "bass", "other", "vocals", "guitar", "piano"],
+      "prefetch": "demucs",
+      "description": "htdemucs 6-stem variant — adds guitar and piano tracks (experimental)"
+    },
+    "mdx_extra": {
+      "executor": "demucs",
+      "variant": "mdx_extra",
+      "stems": ["drums", "bass", "other", "vocals"],
+      "prefetch": "demucs",
+      "description": "MDX-Net extra — 4 stems, strong on vocal isolation, MUSDB-trained"
+    },
+    "matchering": {
+      "executor": "matchering",
+      "description": "Reference-based automatic mastering (matchering 2.0.6, GPL v3)"
+    },
+    "pedalboard-chain": {
+      "executor": "pedalboard_chain",
+      "presets": ["transparent", "loud"],
+      "description": "Pedalboard DSP mastering chain — preset-based EQ + compression + limiting (pedalboard 0.9.20, GPL v3)"
+    },
+    "librosa-analyze": {
+      "executor": "librosa_analyze",
+      "description": "librosa MIR analysis — BPM, key, loudness, duration, spectral features (librosa 0.10.2, ISC)"
+    },
+    "sox-transform": {
+      "executor": "sox_transform",
+      "description": "SoX-based DSP transform chain — gain, EQ, compressor, reverb, pitch, tempo (pysox 1.4.1, BSD-3-Clause)"
+    }
+  }
+}

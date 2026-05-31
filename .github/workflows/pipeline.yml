@@ -1,0 +1,22 @@
+name: pipeline
+
+on: [push]
+
+jobs:
+  call-docker-image-workflow:
+    uses: psyb0t/reusable-github-workflows/.github/workflows/docker-image-workflow.yml@master
+
+    with:
+      repository_name: psyb0t/audiolla
+      target_platforms: "linux/amd64"
+      scan_severity: "high"
+      cache_mode: "min"
+      build_targets: |
+        [
+          {"file": "Dockerfile",      "tag_suffix": "",      "platforms": "linux/amd64"},
+          {"file": "Dockerfile.cuda", "tag_suffix": "-cuda", "platforms": "linux/amd64"}
+        ]
+
+    secrets:
+      dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}

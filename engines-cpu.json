@@ -1,0 +1,28 @@
+{
+  "engines": {
+    "htdemucs": {
+      "executor": "demucs",
+      "variant": "htdemucs",
+      "stems": ["drums", "bass", "other", "vocals"],
+      "prefetch": "demucs",
+      "description": "Hybrid Transformer Demucs — 4 stems, CPU-only build (slow on long tracks)"
+    },
+    "matchering": {
+      "executor": "matchering",
+      "description": "Reference-based automatic mastering (matchering 2.0.6, GPL v3)"
+    },
+    "pedalboard-chain": {
+      "executor": "pedalboard_chain",
+      "presets": ["transparent", "loud"],
+      "description": "Pedalboard DSP mastering chain — preset-based EQ + compression + limiting (pedalboard 0.9.20, GPL v3)"
+    },
+    "librosa-analyze": {
+      "executor": "librosa_analyze",
+      "description": "librosa MIR analysis — BPM, key, loudness, duration, spectral features (librosa 0.10.2, ISC)"
+    },
+    "sox-transform": {
+      "executor": "sox_transform",
+      "description": "SoX-based DSP transform chain — gain, EQ, compressor, reverb, pitch, tempo (pysox 1.4.1, BSD-3-Clause)"
+    }
+  }
+}

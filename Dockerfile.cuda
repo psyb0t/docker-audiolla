@@ -1,0 +1,103 @@
+# syntax=docker/dockerfile:1.7
+#
+# CUDA image — NVIDIA CUDA 12.6 runtime base + PyTorch CUDA + Demucs GPU +
+# matchering + pedalboard + pyloudnorm + librosa + pysox.
+#
+# Demucs GPU run: htdemucs / htdemucs_ft / htdemucs_6s / mdx_extra need 3-7GB
+# VRAM depending on the model and segment length. Other engines (matchering,
+# pedalboard, librosa, sox) are CPU-only; they coexist fine with a GPU build.
+#
+# Note on GPL: matchering and pedalboard are GPL v3. See Dockerfile note.
+#
+# Supply chain: same posture as the CPU image. Lightweight deps via
+# `uv sync --frozen --no-dev` against uv.lock; heavy ML/DSP deps via
+# `uv pip install --require-hashes -r requirements-heavy-cuda.txt`.
+
+FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.15@sha256:e590846f4776907b254ac0f44b5b380347af5d90d668138ca7938d1b0c2f98d3 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# 1) Lightweight runtime deps from the lockfile.
+COPY pyproject.toml uv.lock ./
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-editable
+
+# 2) Heavy ML / DSP deps — CUDA torch (cu126 channel, matches base CUDA 12.6.3),
+#    hash-locked. See scripts/heavy-deps-cuda.in for the human spec. Pins:
+#    torch/torchaudio 2.5.1, demucs 4.0.1, matchering 2.0.6, pedalboard 0.9.20,
+#    pyloudnorm 0.1.1, librosa 0.10.2, sox 1.4.1, numpy 1.26.4,
+#    soundfile 0.12.1, huggingface-hub 0.30.2.
+COPY requirements-heavy-cuda.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /opt/venv/bin/python --no-config \
+        --extra-index-url https://download.pytorch.org/whl/cu126 \
+        --index-strategy unsafe-best-match \
+        --require-hashes \
+        -r requirements-heavy-cuda.txt
+
+# -----------------------------------------------------------------------------
+# Runtime — CUDA 12.6 runtime on ubuntu24.04 (python3.12 in base repos).
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04@sha256:92906d87596d638d35015c6353053121bd299d25943b875763321653884ba924 AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH=/app/src \
+    TZ=UTC \
+    AUDIOLLA_DEVICE=cuda \
+    AUDIOLLA_ENGINES_FILE=/app/engines.json \
+    AUDIOLLA_DATA_DIR=/data \
+    HF_HOME=/data/hf \
+    HF_HUB_OFFLINE=1 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3-pip \
+        ffmpeg \
+        sox \
+        libsndfile1 \
+        libgomp1 \
+        libatomic1 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && (userdel -r ubuntu 2>/dev/null || true) \
+    && useradd -u 1000 --create-home --shell /bin/bash audiolla \
+    && mkdir -p /data \
+    && chown audiolla:audiolla /data \
+    && ln -sf /usr/bin/python3.12 /usr/local/bin/python3 \
+    && ln -sf /usr/bin/python3.12 /usr/local/bin/python
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --chown=audiolla:audiolla src ./src
+COPY --chown=audiolla:audiolla pyproject.toml ./
+COPY --chown=audiolla:audiolla engines.json /app/engines.json
+COPY --chown=audiolla:audiolla entrypoint.sh /usr/local/bin/audiolla-entrypoint
+RUN chmod +x /usr/local/bin/audiolla-entrypoint
+
+USER audiolla
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)" || exit 1
+
+ENTRYPOINT ["/usr/local/bin/audiolla-entrypoint"]

@@ -1,0 +1,98 @@
+.git/
+.gitignore
+.dockerignore
+.github/
+.vscode/
+.idea/
+
+# Secrets
+.env
+.env.*
+*.env
+.envrc
+.direnv/
+secrets/
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python caches / build artifacts
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.ipynb_checkpoints/
+
+# Editor / OS clutter
+*.bak
+*.orig
+*.rej
+*.log
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Dev-level markdown — never enters image
+CLAUDE.md
+ANUSTIMES*.md
+implplan.md
+NOTES.md
+.brutal-review.md
+.brutal-review-*.md
+*.scratch.md
+
+# Local tooling / personal config
+git-update.sh
+about.txt
+pyrightconfig.json
+mypy.ini
+.flake8
+.research_files/
+
+# Test artifacts / integration scaffolding (not needed in prod image)
+tests/
+tests/integration/.fixtures/
+.e2e-cache/
+
+# Docs / spec — not COPYed by prod Dockerfiles; dev container bind-mounts at runtime
+docs/
+openapi.yaml
+
+# Dev-only Dockerfile + scripts (dev container bind-mounts scripts/ at runtime)
+Dockerfile.dev
+scripts/
+
+# Repo metadata not needed in image
+README.md
+CHANGELOG.md
+LICENSE
+Makefile
+
+# Local compose / Makefile overrides
+Makefile.local
+compose.override.yaml
+compose.override.yml
+docker-compose.override.yaml
+docker-compose.override.yml
+docker-compose.dev.yaml
+docker-compose.dev.yml
+
+# Local model snapshots
+/models/
+*.safetensors
+*.bin
