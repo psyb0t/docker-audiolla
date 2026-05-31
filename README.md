@@ -23,6 +23,7 @@ Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. 
   - [Transform](#transform)
   - [Loudness](#loudness)
   - [Stage files](#stage-files)
+  - [Remote URLs](#remote-urls)
 - [Engines](#engines)
 - [Endpoints](#endpoints)
 - [MCP](#mcp)
@@ -58,6 +59,18 @@ Demucs weights download on first use and cache in `/data/torch_cache/` — same 
 ## What it can do
 
 Output defaults to `wav`. Any endpoint that returns audio accepts `-F "output_format=mp3"` (also `flac`, `opus`, `aac`, `pcm`).
+
+**Input modes** — every audio endpoint accepts exactly one of:
+
+- `file` — multipart upload (the default in the examples below)
+- `file_path` — relative path under the `/v1/files` staging area
+- `file_url` — remote URL the server fetches (off by default — see [Remote URLs](#remote-urls))
+
+**Output modes** — audio-producing endpoints optionally accept one of:
+
+- `output_path` — server writes the result to `/v1/files/<path>`, response is JSON
+- `output_url` — server PUTs the result to a presigned URL, response is JSON
+- neither → audio bytes inline (the default)
 
 ### Split stems
 
@@ -152,7 +165,61 @@ curl http://localhost:8000/v1/files/mytrack.wav -o copy.wav
 curl -X DELETE http://localhost:8000/v1/files/mytrack.wav
 ```
 
-Use it to keep big files on the server, share input/output between clients, or feed staged paths to MCP tools (`put_file` / `separate file_path=...` etc.). The REST audio endpoints take the file inline — they don't reference staged paths.
+Once staged, reference the file by path on any audio endpoint via `file_path`:
+
+```bash
+# Analyze a staged file
+curl -X POST http://localhost:8000/v1/audio/analyze \
+  -F "file_path=mytrack.wav" \
+  -F "features=bpm"
+
+# Separate stems and write the result back to staging
+curl -X POST http://localhost:8000/v1/audio/separate \
+  -F "file_path=mytrack.wav" \
+  -F "engine=htdemucs" \
+  -F "stems=vocals" \
+  -F "output_path=stems/mytrack-vocals.wav"
+# → {"path":"stems/mytrack-vocals.wav","size":...,"output_format":"wav",...}
+```
+
+### Remote URLs
+
+Disabled by default. To allow the server to fetch `file_url` or PUT to
+`output_url`, set the policy at container start:
+
+```bash
+docker run ... \
+  -e AUDIOLLA_FETCH_MODE=allowlist \
+  -e AUDIOLLA_FETCH_HOSTS="*.s3.amazonaws.com,*.r2.cloudflarestorage.com" \
+  psyb0t/audiolla:latest
+```
+
+Then:
+
+```bash
+# Fetch from S3, master, PUT result back to a presigned S3 URL
+curl -X POST http://localhost:8000/v1/audio/master \
+  -F "file_url=https://my-bucket.s3.amazonaws.com/in.wav" \
+  -F "reference_url=https://my-bucket.s3.amazonaws.com/ref.wav" \
+  -F "mode=reference" \
+  -F "output_url=https://my-bucket.s3.amazonaws.com/out.wav?X-Amz-Signature=..."
+# → {"url":"...","size":...,"output_format":"wav",...}
+```
+
+Policy modes:
+
+- `disabled` (default) — `file_url` / `output_url` rejected with 400
+- `allowlist` — only hosts matching `AUDIOLLA_FETCH_HOSTS` allowed
+- `denylist` — anything except listed hosts allowed (pair with `AUDIOLLA_FETCH_ALLOW_PRIVATE=false` to block private IPs / metadata services)
+
+Always-on protections:
+- DNS-resolved private / loopback / link-local IPs rejected (toggleable)
+- Only `https` by default; `http` opt-in via `AUDIOLLA_FETCH_SCHEMES`
+- Redirects re-validated through the same policy
+- Hard timeout + size cap = `AUDIOLLA_MAX_UPLOAD_BYTES`
+- Every fetch / upload URL logged
+
+See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 
 ---
 
@@ -181,11 +248,16 @@ Full wire contract: [`openapi.yaml`](openapi.yaml).
 
 ### Audio processing
 
-| Method | Path | Returns |
-|--------|------|---------|
+Every endpoint accepts exactly one of `file` / `file_path` / `file_url`.
+Audio-producing endpoints additionally accept optional `output_path` /
+`output_url` — when either is set, the response is JSON instead of audio
+bytes.
+
+| Method | Path | Default returns |
+|--------|------|-----------------|
 | `POST` | `/v1/audio/separate` | ZIP (multiple stems) or audio bytes (single stem) |
 | `POST` | `/v1/audio/master` | audio bytes |
-| `POST` | `/v1/audio/analyze` | JSON |
+| `POST` | `/v1/audio/analyze` | JSON (no audio output, so no `output_path` / `output_url`) |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
 
@@ -249,7 +321,13 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
 | `AUDIOLLA_SWEEPER_INTERVAL` | `60` | how often the idle sweeper checks, in seconds |
-| `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (200 MB) |
+| `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (200 MB) — also caps URL fetch body size |
+| `AUDIOLLA_FETCH_MODE` | `disabled` | `disabled`, `allowlist`, or `denylist` — controls server-side fetching for file_url / output_url |
+| `AUDIOLLA_FETCH_HOSTS` | _(none)_ | comma-separated host patterns (`bucket.s3.amazonaws.com`, `*.s3.amazonaws.com`). Required when mode=allowlist. |
+| `AUDIOLLA_FETCH_SCHEMES` | `https` | comma-separated schemes — `https`, `http` (http opt-in only) |
+| `AUDIOLLA_FETCH_ALLOW_PRIVATE` | `false` | allow URLs that resolve to private / loopback / link-local IPs |
+| `AUDIOLLA_FETCH_TIMEOUT` | `30` | hard timeout per fetch/upload, in seconds (also accepts `30s`, `1m`) |
+| `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each Location re-validated through the policy |
 
 ---
 

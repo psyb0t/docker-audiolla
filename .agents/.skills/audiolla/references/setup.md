@@ -49,7 +49,13 @@ All config is via environment variables passed at `docker run`:
 | `AUDIOLLA_PRELOAD` | _(none)_ | comma-separated slugs to load into memory at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
 | `AUDIOLLA_SWEEPER_INTERVAL` | `60` | how often the idle-engine sweeper runs, in seconds |
-| `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (default 200 MB) |
+| `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (default 200 MB); also caps remote URL fetch body size |
+| `AUDIOLLA_FETCH_MODE` | `disabled` | `disabled` / `allowlist` / `denylist` — server-side fetch policy for `file_url` and `output_url` |
+| `AUDIOLLA_FETCH_HOSTS` | _(none)_ | comma-separated host patterns (`bucket.s3.amazonaws.com`, `*.s3.amazonaws.com`) — required when mode=allowlist |
+| `AUDIOLLA_FETCH_SCHEMES` | `https` | comma-separated schemes; add `http` only for trusted local networks |
+| `AUDIOLLA_FETCH_ALLOW_PRIVATE` | `false` | allow URLs resolving to private / loopback / link-local IPs (e.g. internal MinIO) |
+| `AUDIOLLA_FETCH_TIMEOUT` | `30` | per-fetch/upload timeout (seconds; also accepts `30s`, `1m`) |
+| `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each `Location` re-validated through the policy |
 
 ### Authentication
 
@@ -66,6 +72,46 @@ docker run -d --rm --name audiolla \
 Every endpoint except `/healthz` then requires `Authorization: Bearer <token>`. Without it the server returns 401.
 
 > **`AUDIOLLA_AUTH_TOKEN` must be set to a strong random value before audiolla is reachable by anything other than localhost.** Without a token, anyone who can hit port 8000 can run arbitrary audio processing on your hardware (Demucs is CPU/GPU-heavy — a hostile caller can keep your machine saturated indefinitely). They can also upload up to `AUDIOLLA_MAX_UPLOAD_BYTES` per request to your staging area. Generate a token with `openssl rand -hex 32` and keep it out of git.
+
+### Remote URL fetching (file_url / output_url)
+
+Audiolla can fetch input files from a URL and PUT outputs to presigned URLs (S3, R2, etc.). This is **disabled by default** because the fetch path is a classic SSRF surface — without guardrails, an attacker can use it to read your cloud metadata service or probe internal hosts.
+
+Pick a mode that matches your setup:
+
+```bash
+# Default — no URL I/O.
+-e AUDIOLLA_FETCH_MODE=disabled
+
+# Allowlist — preferred. Only listed hosts can be fetched/PUT to.
+-e AUDIOLLA_FETCH_MODE=allowlist
+-e AUDIOLLA_FETCH_HOSTS="*.s3.amazonaws.com,*.r2.cloudflarestorage.com,my-bucket.example.com"
+
+# Denylist — anything goes except listed hosts. Leaky by design — only
+# safe with AUDIOLLA_FETCH_ALLOW_PRIVATE=false (the default), which
+# already blocks private IPs and the metadata service. Use this only
+# if you control the network or have a strong reason.
+-e AUDIOLLA_FETCH_MODE=denylist
+-e AUDIOLLA_FETCH_HOSTS="*.internal,localhost"
+```
+
+Host pattern syntax — exact match or single-wildcard subdomain. `*.s3.amazonaws.com` matches `bucket.s3.amazonaws.com` but NOT `s3.amazonaws.com` itself (add that explicitly if needed).
+
+Always-on protections regardless of mode:
+
+- DNS-resolved private / loopback / link-local IPs rejected. The AWS/GCP/Azure metadata service at `169.254.169.254` falls into this. Toggle off only if you genuinely need internal S3-compatible storage on a private network.
+- Schemes restricted to `AUDIOLLA_FETCH_SCHEMES` (default `https`). `file://`, `gopher://`, etc. are always rejected.
+- Each HTTP redirect's `Location` re-validated through the full policy before following.
+- Body size capped at `AUDIOLLA_MAX_UPLOAD_BYTES` — streamed, abort on overrun.
+- Every fetch / upload URL logged at INFO.
+
+For internal MinIO / S3-compatible storage:
+
+```bash
+-e AUDIOLLA_FETCH_MODE=allowlist \
+-e AUDIOLLA_FETCH_HOSTS=minio.internal.example.com \
+-e AUDIOLLA_FETCH_ALLOW_PRIVATE=true
+```
 
 ### Engine selection
 

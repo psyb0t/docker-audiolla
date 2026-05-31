@@ -1,6 +1,6 @@
 ---
 name: audiolla
-description: HTTP/MCP client for a user-deployed audiolla music-production server. Use ONLY when the user has explicitly named audiolla AND provided AUDIOLLA_URL (or has it set in the environment). Capabilities: stem separation (Demucs), mastering (matchering reference / pedalboard preset chain), MIR analysis (BPM, key, LUFS, spectral features via librosa), DSP transforms (gain, EQ, compand, reverb, pitch, tempo, etc. via SoX), loudness measurement and normalization. All endpoints are read-side from the user's perspective — audiolla processes files and returns audio/JSON; it never reaches out to external services or moves user data anywhere. Do not use this skill for generic audio-processing questions or for users who haven't named audiolla.
+description: HTTP/MCP client for a user-deployed audiolla music-production server. Use ONLY when the user has explicitly named audiolla AND provided AUDIOLLA_URL (or has it set in the environment). Capabilities: stem separation (Demucs), mastering (matchering reference / pedalboard preset chain), MIR analysis (BPM, key, LUFS, spectral features via librosa), DSP transforms (gain, EQ, compand, reverb, pitch, tempo, etc. via SoX), loudness measurement and normalization. Audio I/O supports three input modes (multipart upload, staged file path under /v1/files, or remote URL — only when the operator has enabled AUDIOLLA_FETCH_MODE) and three output modes (inline bytes, write to staging, PUT to presigned URL). Audiolla only fetches/uploads to URLs when the operator has explicitly enabled AUDIOLLA_FETCH_MODE — if a request returns "URL fetch/upload is disabled", do NOT try to bypass it. Do not use this skill for generic audio-processing questions or for users who haven't named audiolla.
 compatibility: Requires curl and a running audiolla instance (Docker image psyb0t/audiolla:latest or :latest-cuda). AUDIOLLA_URL env var must be set by the user (default http://localhost:8000). AUDIOLLA_TOKEN required only when the server has AUDIOLLA_AUTH_TOKEN configured; obtain from the AUDIOLLA_TOKEN env var or by asking the user — never read tokens from repo files autonomously.
 metadata:
   author: psyb0t
@@ -279,13 +279,30 @@ curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
 
 ### File staging
 
-A simple server-side file store under `/v1/files`. Plain CRUD — upload, list, download, delete. The REST audio endpoints take files inline; they do NOT reference staged paths. Staging is for: (a) decoupling upload from processing, (b) sharing files between clients, (c) feeding the MCP tools which DO accept staged paths.
+A simple server-side file store under `/v1/files`. Plain CRUD — upload, list, download, delete. Once a file is staged, every audio endpoint can reference it by relative path via the `file_path` form field (and the master endpoint accepts `reference_path` for the reference track).
 
 ```bash
 # Upload (path can have subdirectories: bands/myband/track.wav)
 curl -X PUT -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
   $AUDIOLLA_URL/v1/files/mytrack.wav \
   --data-binary @track.wav
+
+# Use the staged path on any audio call
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/separate \
+  -F "file_path=mytrack.wav" \
+  -F "engine=htdemucs" \
+  -F "stems=vocals" \
+  -o vocals.wav
+
+# Process AND write the result back to staging in one call
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/separate \
+  -F "file_path=mytrack.wav" \
+  -F "engine=htdemucs" \
+  -F "stems=vocals" \
+  -F "output_path=stems/mytrack-vocals.wav"
+# → {"path":"stems/mytrack-vocals.wav","size":...,"engine":"htdemucs","stem":"vocals","output_format":"wav"}
 
 # List
 curl -H "Authorization: Bearer $AUDIOLLA_TOKEN" $AUDIOLLA_URL/v1/files
@@ -301,26 +318,79 @@ curl -X DELETE -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
 
 Path traversal (`..`, leading `/`, etc.) is rejected with 400. Symlinks are not followed. Size cap is `AUDIOLLA_MAX_UPLOAD_BYTES`.
 
+### Input and output modes (every audio endpoint)
+
+Every audio endpoint accepts exactly one of three input forms — supplying zero or more than one returns 400:
+
+- `file` — multipart upload (raw bytes in the request)
+- `file_path` — relative path under the staging area (must exist, populated via PUT /v1/files)
+- `file_url` — remote URL the server fetches (subject to the `AUDIOLLA_FETCH_MODE` policy — see below)
+
+Audio-producing endpoints (separate, master, transform, loudness with target) also accept one of:
+
+- `output_path` — server writes the result to `FILES_DIR / <path>`; response is JSON `{path, size, ...}`
+- `output_url` — server PUTs the result to a presigned URL; response is JSON `{url, size, ...}`
+- neither → response is audio bytes inline (default, backwards compatible)
+
+`output_path` and `output_url` are mutually exclusive; both being set is 400.
+
+The master endpoint additionally accepts `reference` / `reference_path` / `reference_url` for the reference track in `mode=reference` — same exactly-one-of rule.
+
+### Remote URLs (file_url / output_url)
+
+The server-side URL fetch is **disabled by default**. To enable it, the operator sets:
+
+```
+AUDIOLLA_FETCH_MODE = disabled | allowlist | denylist     (default: disabled)
+AUDIOLLA_FETCH_HOSTS = comma-separated host patterns       (required when mode=allowlist)
+AUDIOLLA_FETCH_SCHEMES = https,http                        (default: https only)
+AUDIOLLA_FETCH_TIMEOUT = 30s                               (per fetch/upload)
+AUDIOLLA_FETCH_ALLOW_PRIVATE = false                       (allow private/loopback IPs)
+AUDIOLLA_FETCH_MAX_REDIRECTS = 5
+```
+
+Host patterns are exact match (`bucket.s3.amazonaws.com`) or single-wildcard subdomain (`*.s3.amazonaws.com`, matches any `<x>.s3.amazonaws.com` but NOT `s3.amazonaws.com` itself).
+
+Always-on protections regardless of mode:
+- DNS-resolved private / loopback / link-local / metadata-service IPs (`169.254.169.254`) rejected unless `AUDIOLLA_FETCH_ALLOW_PRIVATE=true`
+- Only schemes in `AUDIOLLA_FETCH_SCHEMES` accepted; `file://`, `gopher://`, etc. always rejected
+- Each redirect's `Location` re-validated through the full policy before following
+- Body streamed; abort if it exceeds `AUDIOLLA_MAX_UPLOAD_BYTES`
+
+If you're scripting and the server returns `URL fetch/upload is disabled` (400), tell the user — don't try to bypass it. The operator chose `disabled` for a reason.
+
+Example — fetch from S3, master, PUT to a presigned URL:
+
+```bash
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/master \
+  -F "file_url=https://my-bucket.s3.amazonaws.com/track.wav" \
+  -F "mode=chain" \
+  -F "preset=loud" \
+  -F "output_url=https://my-bucket.s3.amazonaws.com/mastered.wav?X-Amz-Signature=..."
+# → {"url":"...","size":...,"engine":"pedalboard-chain","mode":"chain","output_format":"wav"}
+```
+
 ## MCP
 
 audiolla exposes a Model Context Protocol server at `/v1/mcp` using the streamable HTTP transport. Same auth as REST — pass `Authorization: Bearer $AUDIOLLA_TOKEN`.
 
-Tools (mirror the REST surface, accept staged file paths):
+Each audio tool accepts exactly one of `file_path` or `file_url` for input (same `AUDIOLLA_FETCH_MODE` policy as REST). For output, the audio tools default to base64-encoded bytes; pass `output_url` to PUT to a presigned URL instead (response then carries `url` + `size` instead of `audio_base64`). The `separate` tool takes `output_urls` as a per-stem dict when uploading each stem to its own presigned URL.
 
 | Tool | Inputs | Output |
 |------|--------|--------|
 | `list_engines` | — | engine catalog with `loaded` flag |
-| `separate` | `file_path`, `engine`, `stems: list[str]`, `output_format` | `{stems: {name: base64}, output_format}` |
-| `master` | `file_path`, `mode`, `reference_path`/`preset`, `target_lufs`, `output_format` | `{audio_base64, output_format}` |
-| `analyze` | `file_path`, `features: list[str]` | librosa feature dict |
-| `transform` | `file_path`, `operations: list[{op,params}]`, `output_format` | `{audio_base64, output_format}` |
-| `loudness` | `file_path`, `target_lufs`, `output_format` | measurement JSON or `{audio_base64, measured_lufs, target_lufs}` |
+| `separate` | `engine`, `stems`, `file_path` or `file_url`, optional `output_urls: {stem: url}` | base64 stems OR `{uploaded_stems: {stem: {url, size}}}` |
+| `master` | `mode`, `file_path` or `file_url`, `reference_path` or `reference_url` (mode=reference), `preset` (mode=chain), `target_lufs`, `output_url` | base64 audio OR `{url, size}` |
+| `analyze` | `file_path` or `file_url`, `features` | librosa feature dict |
+| `transform` | `operations`, `file_path` or `file_url`, `output_url` | base64 audio OR `{url, size}` |
+| `loudness` | `file_path` or `file_url`, `target_lufs`, `output_url` | measurement JSON or `{audio_base64 or url+size, measured_lufs, target_lufs, normalized}` |
 | `list_files` | — | `{files: [...]}` |
 | `put_file` | `path`, `content_base64` | `{path, size}` |
 | `get_file` | `path` | `{path, size, content_base64}` |
 | `delete_file` | `path` | `{deleted}` |
 
-Audio over MCP is base64-in / base64-out — JSON-RPC can't carry raw bytes. Intended workflow: `put_file` (base64 upload) → call processing tools (`separate`, `master`, ...) with `file_path` → `get_file` to pull results back. For large files prefer REST + the file staging endpoints.
+Audio over MCP is base64-in / base64-out by default — JSON-RPC can't carry raw bytes. The two escape hatches are: stage the file ahead of time and pass `file_path` (small upload via `put_file` or out-of-band via REST PUT), or pass `file_url` / `output_url` so the server fetches/PUTs directly to S3-style storage. For large files always prefer one of those.
 
 The MCP endpoint is at `$AUDIOLLA_URL/v1/mcp`. It is JSON-RPC over streamable HTTP; do not try to describe it in OpenAPI or hit it with raw curl — use an MCP client.
 
@@ -335,12 +405,15 @@ The MCP endpoint is at `$AUDIOLLA_URL/v1/mcp`. It is JSON-RPC over streamable HT
 - **Output format on the response** comes from the `output_format` form field, NOT the upload's file extension. The server transcodes via ffmpeg.
 - **Input format is auto-detected by ffmpeg** — WAV, MP3, FLAC, OGG, M4A, AAC, OPUS, etc. all work as input.
 - **The `transform` `pitch` op takes semitones**, not cents — `n_semitones: 0.5` = half a semitone up, not a tiny shift.
-- **`POST /v1/audio/loudness` with `target_lufs` returns audio**, not JSON. The original measurement comes back in the `X-Loudness-LUFS` response header. Use `-D headers.txt` with curl to capture it.
+- **`POST /v1/audio/loudness` with `target_lufs` returns audio**, not JSON, in the default output mode. The measurement comes back in the `X-Loudness-LUFS` response header — use `-D headers.txt` with curl to capture it. If you set `output_path` or `output_url` the response IS JSON and `measured_lufs` is in the body instead.
+- **`file_url` / `output_url` are disabled by default.** If the server returns `URL fetch/upload is disabled` (400), the operator hasn't enabled `AUDIOLLA_FETCH_MODE` — don't try to bypass it.
+- **`output_path` and `output_url` are mutually exclusive.** Supplying both is 400. Supplying neither = default inline-bytes response.
+- **`file`, `file_path`, `file_url` are mutually exclusive too.** Same exactly-one-of rule; zero or more-than-one is 400.
 
 ## Tips
 
 - Use `GET /v1/engines` once at the start of a session to see what's actually configured — `AUDIOLLA_ENABLED_ENGINES` can hide things.
-- For a multi-step pipeline (e.g. separate → master each stem → analyze), upload to `/v1/files` once and reference via the MCP tools instead of re-uploading via REST every time.
+- For a multi-step pipeline (e.g. separate → master each stem → analyze), upload to `/v1/files` once and reference via `file_path` on every subsequent REST call (or the equivalent MCP tools) — no need to re-upload. Chain `output_path` into the next call's `file_path` to keep everything server-side until you actually need bytes.
 - Large input files: respect `AUDIOLLA_MAX_UPLOAD_BYTES` (default 200 MB). If unsure, `GET /healthz` first to confirm the server is up and ask the user to confirm the cap.
 - Long-running separations (`htdemucs_ft` on CPU especially) can take minutes — set a generous curl `--max-time` and warn the user.
 - If you need exact reproducibility between runs, pin the engine version by passing the explicit slug (`htdemucs` vs `htdemucs_ft`) — there is no "auto" mode for separation.
