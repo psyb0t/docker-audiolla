@@ -56,6 +56,7 @@ All config is via environment variables passed at `docker run`:
 | `AUDIOLLA_FETCH_ALLOW_PRIVATE` | `false` | allow URLs resolving to private / loopback / link-local IPs (e.g. internal MinIO) |
 | `AUDIOLLA_FETCH_TIMEOUT` | `30` | per-fetch/upload timeout (seconds; also accepts `30s`, `1m`) |
 | `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each `Location` re-validated through the policy |
+| `AUDIOLLA_SOUNDFONT` | `/usr/share/sounds/sf2/FluidR3_GM.sf2` (prod images) | Default SoundFont (`.sf2`) path used by `/v1/midi/render`. Empty = midi-render refuses unless `soundfont_path` is passed on the request. Prod images install FluidR3_GM via `apt install fluid-soundfont-gm`. |
 
 ### Authentication
 

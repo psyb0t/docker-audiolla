@@ -42,4 +42,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         python-multipart==0.0.20 \
         httpx==0.28.1 \
         mcp==1.27.1 \
+        mido==1.3.3 \
         datamodel-code-generator==0.31.1

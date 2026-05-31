@@ -361,6 +361,147 @@ def build_mcp_server(
         emitted["normalized"] = True
         return emitted
 
+    # ── effects-chain tool ──────────────────────────────────────────────────
+
+    @mcp.tool()
+    async def fx(
+        effects: list[dict[str, Any]],
+        file_path: str | None = None,
+        file_url: str | None = None,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Generic effects chain.
+
+        Provide exactly one of `file_path` or `file_url`. `effects` is an
+        ordered list of {type, params} — type names match pedalboard
+        classes (Compressor, Reverb, Chorus, Delay, PitchShift,
+        HighShelfFilter, ...). Returns base64 audio unless `output_url`
+        is set (presigned PUT).
+        """
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("fx-chain")
+        if eng is None or not hasattr(eng, "fx"):
+            raise ValueError("fx-chain engine not configured")
+        try:
+            audio = await eng.fx(
+                raw, name, effects=effects, output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio, output_format, output_url)
+
+    # ── MIDI tools ──────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    async def midi_compose(
+        spec: dict[str, Any],
+        output_path: str | None = None,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Compose MIDI bytes from a song spec.
+
+        `spec` is the same JSON shape accepted by /v1/midi/compose:
+        ``{tempo_bpm, time_signature, tracks: [{program, channel,
+        notes: [{pitch, start_beats, duration_beats, velocity}]}]}``.
+
+        Returns base64 MIDI by default, or writes to staging if
+        `output_path` is set, or PUTs to a presigned URL if `output_url`
+        is set. The returned dict carries `size` and either
+        `midi_base64` / `path` / `url`.
+        """
+        eng = engines.get("midi-compose")
+        if eng is None or not hasattr(eng, "compose"):
+            raise ValueError("midi-compose engine not configured")
+        try:
+            midi = await eng.compose(spec)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if output_path:
+            try:
+                rel = files_mod.sanitize_path(output_path)
+                dest = files_mod.resolve_under(config.FILES_DIR, rel)
+            except files_mod.FilePathError as exc:
+                raise ValueError(str(exc)) from exc
+            files_mod.write_atomic(dest, midi)
+            return {"path": str(rel), "size": len(midi)}
+        if output_url:
+            try:
+                await fetch.upload_bytes(output_url, midi, "audio/midi")
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {"url": output_url, "size": len(midi)}
+        return {
+            "midi_base64": base64.b64encode(midi).decode("ascii"),
+            "size": len(midi),
+        }
+
+    @mcp.tool()
+    async def midi_render(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        soundfont_path: str | None = None,
+        output_format: str = "wav",
+        gain: float = 0.5,
+        samplerate: int = 44100,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Render a MIDI file to audio via fluidsynth + SoundFont.
+
+        Provide exactly one of `file_path` (staged MIDI) or `file_url`
+        (remote MIDI — subject to fetch policy). `soundfont_path`
+        optionally overrides the server's default SoundFont with a
+        staged ``.sf2``. Returns base64 audio unless `output_url` is set.
+        """
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("midi-render")
+        if eng is None or not hasattr(eng, "render"):
+            raise ValueError("midi-render engine not configured")
+        try:
+            audio = await eng.render(
+                raw, name,
+                soundfont_path=soundfont_path,
+                output_format=output_format,
+                gain=gain,
+                samplerate=samplerate,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio, output_format, output_url)
+
+    @mcp.tool()
+    async def midi_generate(
+        spec: dict[str, Any],
+        soundfont_path: str | None = None,
+        output_format: str = "wav",
+        gain: float = 0.5,
+        samplerate: int = 44100,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Compose AND render a song spec in one call — JSON in, audio
+        out. Convenience wrapper around midi_compose + midi_render."""
+        compose_eng = engines.get("midi-compose")
+        render_eng = engines.get("midi-render")
+        if compose_eng is None or render_eng is None:
+            raise ValueError(
+                "midi-compose and midi-render must both be configured"
+            )
+        try:
+            midi = await compose_eng.compose(spec)
+            audio = await render_eng.render(
+                midi, "composed.mid",
+                soundfont_path=soundfont_path,
+                output_format=output_format,
+                gain=gain,
+                samplerate=samplerate,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        result = await _emit_audio(audio, output_format, output_url)
+        result["midi_size"] = len(midi)
+        return result
+
     # ── file staging tools ──────────────────────────────────────────────────
 
     @mcp.tool()

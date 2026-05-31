@@ -721,6 +721,303 @@ paths:
         "500":
           $ref: "#/components/responses/500"
 
+  /v1/audio/fx:
+    post:
+      summary: Generic effects chain (full pedalboard catalog)
+      description: |
+        Apply an ordered chain of effects to an audio file. Each entry
+        in `effects` is a `{type, params}` object — `type` is a
+        pedalboard class name (Compressor, Limiter, Gain, Reverb,
+        Chorus, Delay, Phaser, Distortion, Bitcrush, PitchShift,
+        HighShelfFilter, LowShelfFilter, PeakFilter, HighpassFilter,
+        LowpassFilter, LadderFilter, IIRFilter, NoiseGate, Clipping,
+        Convolution, GSMFullRateCompressor, MP3Compressor, Resample,
+        Invert). Effect-loading classes (VST3Plugin, AudioUnitPlugin,
+        ExternalPlugin) are rejected — they load arbitrary native code.
+
+        Input/output mode rules same as /v1/audio/separate.
+      operationId: fx
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [effects]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
+                file_path:
+                  type: string
+                  description: Path under the staging area. Mutually exclusive with file / file_url.
+                file_url:
+                  type: string
+                  format: uri
+                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
+                output_path:
+                  type: string
+                  description: Optional. Write the processed audio to FILES_DIR / path; JSON response.
+                output_url:
+                  type: string
+                  format: uri
+                  description: Optional. PUT the processed audio to a presigned URL; JSON response.
+                effects:
+                  type: string
+                  description: JSON-encoded array of {type, params} objects.
+                output_format:
+                  type: string
+                  default: wav
+                  enum: [wav, mp3, flac, opus, aac, pcm]
+      responses:
+        "200":
+          description: Processed audio bytes (or JSON descriptor with output_path / output_url).
+          content:
+            audio/wav:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "413":
+          $ref: "#/components/responses/413"
+        "415":
+          $ref: "#/components/responses/415"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/midi/compose:
+    post:
+      summary: JSON spec → MIDI bytes
+      description: |
+        Transcode a song spec to a Standard MIDI File. Body is
+        application/json with the shape:
+
+        ```
+        {
+          "tempo_bpm": 120,
+          "time_signature": [4, 4],
+          "key_signature": "C",
+          "ticks_per_beat": 480,
+          "tracks": [
+            {
+              "name": "Lead",
+              "program": 0,
+              "channel": 0,
+              "volume": 100,
+              "pan": 64,
+              "notes": [
+                {"pitch": 60, "start_beats": 0.0, "duration_beats": 0.5, "velocity": 100}
+              ]
+            }
+          ]
+        }
+        ```
+
+        Time is in beats; the engine converts to ticks. Channel 9 (zero-indexed) is the GM drum channel.
+
+        Pass `output_path` or `output_url` as query parameters to write
+        the MIDI to staging or PUT it to a presigned URL respectively.
+        Default returns raw MIDI bytes (Content-Type: audio/midi).
+      operationId: midiCompose
+      parameters:
+        - in: query
+          name: output_path
+          schema:
+            type: string
+          required: false
+          description: Optional. Stage the resulting MIDI at this path under FILES_DIR; JSON response.
+        - in: query
+          name: output_url
+          schema:
+            type: string
+            format: uri
+          required: false
+          description: Optional. PUT the resulting MIDI to a presigned URL; JSON response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Song spec — see the description for the full shape.
+      responses:
+        "200":
+          description: |
+            Raw MIDI bytes (default), or JSON descriptor with output_path / output_url.
+          content:
+            audio/midi:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/midi/render:
+    post:
+      summary: MIDI → audio via fluidsynth + SoundFont
+      description: |
+        Synthesise a MIDI file to audio. By default uses the prod image's
+        bundled FluidR3_GM SoundFont (MIT, ships via fluid-soundfont-gm).
+        Override per request with `soundfont_path` pointing at a staged
+        `.sf2` file, or globally via the `AUDIOLLA_SOUNDFONT` env var.
+
+        Input/output mode rules same as /v1/audio/separate.
+      operationId: midiRender
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: MIDI file (multipart). Mutually exclusive with file_path / file_url.
+                file_path:
+                  type: string
+                  description: Path under the staging area. Mutually exclusive with file / file_url.
+                file_url:
+                  type: string
+                  format: uri
+                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
+                output_path:
+                  type: string
+                  description: Optional. Stage the rendered audio at this path.
+                output_url:
+                  type: string
+                  format: uri
+                  description: Optional. PUT the rendered audio to a presigned URL.
+                soundfont_path:
+                  type: string
+                  description: Optional. Path to a staged .sf2 SoundFont under FILES_DIR. Defaults to AUDIOLLA_SOUNDFONT.
+                gain:
+                  type: number
+                  default: 0.5
+                  description: fluidsynth output gain in [0.0, 5.0]. The default (0.5) is calibrated to not clip on percussive MIDI.
+                samplerate:
+                  type: integer
+                  default: 44100
+                  enum: [22050, 44100, 48000, 88200, 96000]
+                output_format:
+                  type: string
+                  default: wav
+                  enum: [wav, mp3, flac, opus, aac, pcm]
+      responses:
+        "200":
+          description: Rendered audio bytes (or JSON descriptor with output_path / output_url).
+          content:
+            audio/wav:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "413":
+          $ref: "#/components/responses/413"
+        "415":
+          $ref: "#/components/responses/415"
+        "500":
+          $ref: "#/components/responses/500"
+
+  /v1/midi/generate:
+    post:
+      summary: Compose + render — JSON spec → audio bytes in one call
+      description: |
+        Convenience wrapper around /v1/midi/compose + /v1/midi/render.
+        Body is the same song spec as /v1/midi/compose. Audio rendering
+        knobs are passed as query parameters.
+      operationId: midiGenerate
+      parameters:
+        - in: query
+          name: output_format
+          schema:
+            type: string
+            default: wav
+            enum: [wav, mp3, flac, opus, aac, pcm]
+        - in: query
+          name: soundfont_path
+          schema:
+            type: string
+        - in: query
+          name: gain
+          schema:
+            type: number
+            default: 0.5
+        - in: query
+          name: samplerate
+          schema:
+            type: integer
+            default: 44100
+            enum: [22050, 44100, 48000, 88200, 96000]
+        - in: query
+          name: output_path
+          schema:
+            type: string
+        - in: query
+          name: output_url
+          schema:
+            type: string
+            format: uri
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Song spec — same shape as /v1/midi/compose.
+      responses:
+        "200":
+          description: Generated audio bytes (or JSON descriptor).
+          content:
+            audio/wav:
+              schema:
+                $ref: "#/components/schemas/AudioBlob"
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "400":
+          $ref: "#/components/responses/400"
+        "401":
+          $ref: "#/components/responses/401"
+        "404":
+          $ref: "#/components/responses/404"
+        "415":
+          $ref: "#/components/responses/415"
+        "500":
+          $ref: "#/components/responses/500"
+
   /v1/files:
     get:
       summary: List staged files

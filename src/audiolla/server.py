@@ -50,6 +50,7 @@ from .audio import (
 from .auth import BearerAuthMiddleware
 from .engines import build_engines, is_separation_engine, is_mastering_engine
 from .engines import is_analysis_engine, is_transform_engine, is_loudness_engine
+from .engines import is_fx_engine, is_midi_compose_engine, is_midi_render_engine
 from .input_resolver import resolve_input
 from .mcp_server import build_mcp_server
 from .output_writer import write_output
@@ -661,6 +662,308 @@ async def loudness(
             "measured_lufs": lufs,
             "target_lufs": target_lufs,
             "output_format": output_format,
+        },
+    )
+
+
+# ── /v1/audio/fx — generic pedalboard chain ─────────────────────────────────
+
+
+@app.post("/v1/audio/fx")
+async def fx(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    effects: str = Form(...),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    _validate_output_format(output_format)
+
+    try:
+        chain = json.loads(effects)
+        if not isinstance(chain, list):
+            raise ValueError("effects must be a JSON array")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"invalid effects JSON: {exc}",
+        ) from exc
+
+    engine_slug = "fx-chain"
+    eng = ENGINES.get(engine_slug)
+    if eng is None:
+        raise HTTPException(
+            status_code=404, detail="fx-chain engine not configured",
+        )
+    if not is_fx_engine(eng):
+        raise HTTPException(
+            status_code=400, detail="fx-chain engine does not support fx",
+        )
+
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+
+    try:
+        audio_bytes = await eng.fx(
+            raw, filename, effects=chain, output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"fx.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine_slug,
+            "effects": chain,
+            "output_format": output_format,
+        },
+    )
+
+
+# ── /v1/midi/compose — JSON spec → MIDI bytes ───────────────────────────────
+
+
+@app.post("/v1/midi/compose")
+async def midi_compose(
+    request: Request,
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+) -> Response:
+    """JSON-to-MIDI transcoder.
+
+    Body is application/json with the song spec (see midi_compose engine
+    docstring). The two output mode form fields are accepted as query
+    params too — Form() reads multipart; we also accept the JSON body
+    when Content-Type is application/json. To pass output_path/url with
+    a JSON body, set them as query parameters: ?output_path=...
+    """
+    # Accept either JSON body (recommended) or multipart form with a
+    # `spec` field. JSON body is the natural shape for LLM agents.
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        try:
+            spec = await request.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid JSON body: {exc}",
+            ) from exc
+        # Query params override Form defaults when the body is JSON.
+        output_path = request.query_params.get("output_path") or output_path
+        output_url = request.query_params.get("output_url") or output_url
+    else:
+        form = await request.form()
+        spec_raw = form.get("spec")
+        if not spec_raw:
+            raise HTTPException(
+                status_code=400,
+                detail="POST application/json with the spec body, "
+                "or multipart with a `spec` field carrying JSON.",
+            )
+        try:
+            spec = json.loads(str(spec_raw))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid `spec` JSON: {exc}",
+            ) from exc
+        output_path = (form.get("output_path") or output_path or None)  # type: ignore[assignment]
+        output_url = (form.get("output_url") or output_url or None)  # type: ignore[assignment]
+        if output_path is not None:
+            output_path = str(output_path) or None
+        if output_url is not None:
+            output_url = str(output_url) or None
+
+    engine_slug = "midi-compose"
+    eng = ENGINES.get(engine_slug)
+    if eng is None:
+        raise HTTPException(
+            status_code=404, detail="midi-compose engine not configured",
+        )
+    if not is_midi_compose_engine(eng):
+        raise HTTPException(
+            status_code=400, detail="midi-compose engine missing compose()",
+        )
+
+    try:
+        midi_bytes = await eng.compose(spec)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        midi_bytes,
+        media_type="audio/midi",
+        filename="composed.mid",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine_slug,
+            "size": len(midi_bytes),
+        },
+    )
+
+
+# ── /v1/midi/render — MIDI → audio via fluidsynth ───────────────────────────
+
+
+@app.post("/v1/midi/render")
+async def midi_render(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    soundfont_path: str | None = Form(default=None),
+    gain: float = Form(default=0.5),
+    samplerate: int = Form(default=44100),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    _validate_output_format(output_format)
+
+    engine_slug = "midi-render"
+    eng = ENGINES.get(engine_slug)
+    if eng is None:
+        raise HTTPException(
+            status_code=404, detail="midi-render engine not configured",
+        )
+    if not is_midi_render_engine(eng):
+        raise HTTPException(
+            status_code=400, detail="midi-render engine missing render()",
+        )
+
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+
+    try:
+        audio_bytes = await eng.render(
+            raw, filename,
+            soundfont_path=soundfont_path,
+            output_format=output_format,
+            gain=gain,
+            samplerate=samplerate,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"rendered.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine_slug,
+            "output_format": output_format,
+            "soundfont_path": soundfont_path,
+        },
+    )
+
+
+# ── /v1/midi/generate — compose + render in one call ────────────────────────
+
+
+@app.post("/v1/midi/generate")
+async def midi_generate(
+    request: Request,
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+    soundfont_path: str | None = Form(default=None),
+    gain: float = Form(default=0.5),
+    samplerate: int = Form(default=44100),
+) -> Response:
+    """Compose MIDI from a JSON spec, then immediately render it to audio.
+
+    Body shape is the same as ``/v1/midi/compose`` (the song spec). The
+    `output_format`, `soundfont_path`, `gain`, `samplerate`, `output_path`,
+    `output_url` knobs come from the query string when the body is JSON,
+    or from multipart Form fields when it isn't.
+    """
+    _validate_output_format(output_format)
+
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        try:
+            spec = await request.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid JSON body: {exc}",
+            ) from exc
+        # Query-param overrides for the side knobs.
+        q = request.query_params
+        if q.get("output_format"):
+            output_format = q["output_format"]
+            _validate_output_format(output_format)
+        if q.get("soundfont_path"):
+            soundfont_path = q["soundfont_path"]
+        if q.get("gain"):
+            try:
+                gain = float(q["gain"])
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=f"gain must be a number: {q['gain']!r}",
+                )
+        if q.get("samplerate"):
+            try:
+                samplerate = int(q["samplerate"])
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"samplerate must be an int: {q['samplerate']!r}",
+                )
+        output_path = q.get("output_path") or output_path
+        output_url = q.get("output_url") or output_url
+    else:
+        form = await request.form()
+        spec_raw = form.get("spec")
+        if not spec_raw:
+            raise HTTPException(
+                status_code=400,
+                detail="POST application/json with the spec body, "
+                "or multipart with a `spec` field carrying JSON.",
+            )
+        try:
+            spec = json.loads(str(spec_raw))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid `spec` JSON: {exc}",
+            ) from exc
+
+    compose_eng = ENGINES.get("midi-compose")
+    render_eng = ENGINES.get("midi-render")
+    if compose_eng is None or render_eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail="midi-compose and midi-render must both be configured",
+        )
+
+    try:
+        midi_bytes = await compose_eng.compose(spec)
+        audio_bytes = await render_eng.render(
+            midi_bytes, "composed.mid",
+            soundfont_path=soundfont_path,
+            output_format=output_format,
+            gain=gain,
+            samplerate=samplerate,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"generated.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": "midi-generate",
+            "output_format": output_format,
+            "midi_size": len(midi_bytes),
         },
     )
 

@@ -64,6 +64,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AUDIOLLA_DEVICE=cpu \
     AUDIOLLA_ENGINES_FILE=/app/engines.json \
     AUDIOLLA_DATA_DIR=/data \
+    AUDIOLLA_SOUNDFONT=/usr/share/sounds/sf2/FluidR3_GM.sf2 \
     HF_HUB_OFFLINE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -72,6 +73,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
         libgomp1 \
         libatomic1 \
+        fluidsynth \
+        fluid-soundfont-gm \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -u 1000 --create-home --shell /bin/bash audiolla \
     && mkdir -p /data \

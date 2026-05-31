@@ -45,6 +45,18 @@
     "sox-transform": {
       "executor": "sox_transform",
       "description": "SoX-based DSP transform chain — gain, EQ, compressor, reverb, pitch, tempo (pysox 1.4.1, BSD-3-Clause)"
+    },
+    "fx-chain": {
+      "executor": "fx_chain",
+      "description": "Generic effects chain — full pedalboard catalog (Compressor, Reverb, Chorus, Delay, Distortion, PitchShift, filters, ...) as an ordered chain of {type, params}"
+    },
+    "midi-compose": {
+      "executor": "midi_compose",
+      "description": "JSON-to-MIDI transcoder — emit a Standard MIDI File from a tracks+notes spec (mido 1.3.3, MIT)"
+    },
+    "midi-render": {
+      "executor": "midi_render",
+      "description": "MIDI-to-audio synthesis via fluidsynth + FluidR3_GM SoundFont (GM patches 0–127 plus drum kit on channel 10)"
     }
   }
 }

@@ -7,7 +7,7 @@
 
 > POST a track. Get stems, a master, analysis, or a processed file back. No cloud, no accounts, runs wherever Docker runs.
 
-HTTP API + MCP server for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain. Extract BPM and key with librosa. Chain sox transforms. All from curl, any HTTP client, or an LLM agent over MCP.
+HTTP API + MCP server for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain — full catalog, your order and params. Extract BPM and key with librosa. Chain sox transforms. Compose a song spec in JSON and render it to audio via fluidsynth + a General MIDI SoundFont. All from curl, any HTTP client, or an LLM agent over MCP.
 
 Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. OpenAPI spec included.
 
@@ -22,6 +22,10 @@ Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. 
   - [Analyze](#analyze)
   - [Transform](#transform)
   - [Loudness](#loudness)
+  - [Effects chain](#effects-chain)
+  - [Compose MIDI](#compose-midi)
+  - [Render MIDI to audio](#render-midi-to-audio)
+  - [Generate music from a spec](#generate-music-from-a-spec)
   - [Stage files](#stage-files)
   - [Remote URLs](#remote-urls)
 - [Engines](#engines)
@@ -146,6 +150,90 @@ curl -X POST http://localhost:8000/v1/audio/loudness \
   -o normalized.wav
 ```
 
+### Effects chain
+
+Apply an ordered chain of pedalboard effects — full catalog, you pick the order and params. Different from `/v1/audio/master` (which runs preset mastering chains).
+
+```bash
+# Compress, then add reverb, then drop -3 dB
+curl -X POST http://localhost:8000/v1/audio/fx \
+  -F "file=@track.wav" \
+  -F 'effects=[
+    {"type":"Compressor","params":{"threshold_db":-18,"ratio":4.0}},
+    {"type":"Reverb","params":{"room_size":0.5,"wet_level":0.3}},
+    {"type":"Gain","params":{"gain_db":-3.0}}
+  ]' \
+  -o out.wav
+```
+
+Allowed effects: `Compressor`, `Limiter`, `NoiseGate`, `Gain`, `Clipping`, `Distortion`, `Bitcrush`, `Reverb`, `Chorus`, `Delay`, `Phaser`, `PitchShift`, `HighShelfFilter`, `LowShelfFilter`, `PeakFilter`, `HighpassFilter`, `LowpassFilter`, `LadderFilter`, `IIRFilter`, `GSMFullRateCompressor`, `MP3Compressor`, `Resample`, `Invert`, `Convolution`.
+
+VST3 / AudioUnit / external plugins are NOT in the allowlist — they load arbitrary native code.
+
+### Compose MIDI
+
+LLMs and agents build songs by POSTing a JSON spec; the server returns Standard MIDI File bytes. No AI runs server-side — the agent does the writing.
+
+```bash
+# 4-beat C major arpeggio at 120 BPM, piano + kick drum
+curl -X POST http://localhost:8000/v1/midi/compose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "tempo_bpm": 120,
+    "tracks": [
+      {"name":"Lead","program":0,"channel":0,"notes":[
+        {"pitch":60,"start_beats":0.0,"duration_beats":0.5,"velocity":100},
+        {"pitch":64,"start_beats":0.5,"duration_beats":0.5,"velocity":100},
+        {"pitch":67,"start_beats":1.0,"duration_beats":0.5,"velocity":100},
+        {"pitch":72,"start_beats":1.5,"duration_beats":0.5,"velocity":100}
+      ]},
+      {"name":"Kick","program":0,"channel":9,"notes":[
+        {"pitch":36,"start_beats":0.0,"duration_beats":0.1,"velocity":110},
+        {"pitch":36,"start_beats":1.0,"duration_beats":0.1,"velocity":110},
+        {"pitch":36,"start_beats":2.0,"duration_beats":0.1,"velocity":110},
+        {"pitch":36,"start_beats":3.0,"duration_beats":0.1,"velocity":110}
+      ]}
+    ]
+  }' \
+  -o song.mid
+
+# Stage the MIDI for later via query-string output_path
+curl -X POST 'http://localhost:8000/v1/midi/compose?output_path=midi/song.mid' \
+  -H 'Content-Type: application/json' \
+  -d @spec.json
+```
+
+Spec fields: `tempo_bpm` (default 120), `time_signature` (default `[4,4]`), `key_signature` (optional, e.g. `"C"`, `"Am"`), `ticks_per_beat` (default 480), `tracks[].{name, program, channel, volume, pan, notes[].{pitch, start_beats, duration_beats, velocity}}`. Time is in beats. `program` is GM program 0-127. Channel 9 is the GM drum channel — pitches there map to the drum kit (36 = kick, 38 = snare, 42 = closed hi-hat, etc.).
+
+### Render MIDI to audio
+
+```bash
+# Synthesise via the bundled FluidR3_GM SoundFont
+curl -X POST http://localhost:8000/v1/midi/render \
+  -F "file=@song.mid" \
+  -F "output_format=wav" \
+  -o song.wav
+
+# Use your own SoundFont (must be staged first)
+curl -X PUT http://localhost:8000/v1/files/sf/orchestral.sf2 --data-binary @my.sf2
+curl -X POST http://localhost:8000/v1/midi/render \
+  -F "file=@song.mid" \
+  -F "soundfont_path=sf/orchestral.sf2" \
+  -F "output_format=flac" \
+  -o orch.flac
+```
+
+### Generate music from a spec
+
+Compose + render in one call — your agent writes a spec, gets WAV back.
+
+```bash
+curl -X POST 'http://localhost:8000/v1/midi/generate?output_format=wav' \
+  -H 'Content-Type: application/json' \
+  -d @spec.json \
+  -o song.wav
+```
+
 ### Stage files
 
 A simple server-side file store under `/v1/files`. Upload, list, download, delete.
@@ -235,6 +323,9 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `pedalboard-chain` | Fixed DSP chain via pedalboard: compression, EQ, limiting. |
 | `librosa-analyze` | BPM, key, LUFS, duration, spectral features via librosa. |
 | `sox-transform` | Gain, EQ, compression, reverb, pitch shift, tempo via pysox. |
+| `fx-chain` | Arbitrary pedalboard effects chain — full catalog, your order and params. Backs `/v1/audio/fx`. |
+| `midi-compose` | JSON spec → MIDI bytes. Backs `/v1/midi/compose` and `/v1/midi/generate`. |
+| `midi-render` | MIDI → audio via fluidsynth + SoundFont. Backs `/v1/midi/render` and `/v1/midi/generate`. |
 
 Demucs variants all pull from the same `facebook/demucs` checkpoint. Weights get prefetched into `/data/torch_cache/` at startup so your first separation request doesn't sit there downloading.
 
@@ -260,6 +351,15 @@ bytes.
 | `POST` | `/v1/audio/analyze` | JSON (no audio output, so no `output_path` / `output_url`) |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
+| `POST` | `/v1/audio/fx` | audio bytes (or JSON with output_path / output_url) |
+
+### MIDI
+
+| Method | Path | Default returns |
+|--------|------|-----------------|
+| `POST` | `/v1/midi/compose` | MIDI bytes (`audio/midi`) — body is `application/json` song spec |
+| `POST` | `/v1/midi/render` | audio bytes — input MIDI via `file` / `file_path` / `file_url` |
+| `POST` | `/v1/midi/generate` | audio bytes — body is `application/json` song spec (compose + render in one) |
 
 ### File staging
 
@@ -328,6 +428,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_FETCH_ALLOW_PRIVATE` | `false` | allow URLs that resolve to private / loopback / link-local IPs |
 | `AUDIOLLA_FETCH_TIMEOUT` | `30` | hard timeout per fetch/upload, in seconds (also accepts `30s`, `1m`) |
 | `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each Location re-validated through the policy |
+| `AUDIOLLA_SOUNDFONT` | `/usr/share/sounds/sf2/FluidR3_GM.sf2` (prod images) | Default SoundFont path for `/v1/midi/render`. Override per request via `soundfont_path`. |
 
 ---
 

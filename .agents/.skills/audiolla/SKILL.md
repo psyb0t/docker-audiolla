@@ -1,6 +1,6 @@
 ---
 name: audiolla
-description: HTTP/MCP client for a user-deployed audiolla music-production server. Use ONLY when the user has explicitly named audiolla AND provided AUDIOLLA_URL (or has it set in the environment). Capabilities: stem separation (Demucs), mastering (matchering reference / pedalboard preset chain), MIR analysis (BPM, key, LUFS, spectral features via librosa), DSP transforms (gain, EQ, compand, reverb, pitch, tempo, etc. via SoX), loudness measurement and normalization. Audio I/O supports three input modes (multipart upload, staged file path under /v1/files, or remote URL — only when the operator has enabled AUDIOLLA_FETCH_MODE) and three output modes (inline bytes, write to staging, PUT to presigned URL). Audiolla only fetches/uploads to URLs when the operator has explicitly enabled AUDIOLLA_FETCH_MODE — if a request returns "URL fetch/upload is disabled", do NOT try to bypass it. Do not use this skill for generic audio-processing questions or for users who haven't named audiolla.
+description: HTTP/MCP client for a user-deployed audiolla music-production server. Use ONLY when the user has explicitly named audiolla AND provided AUDIOLLA_URL (or has it set in the environment). Capabilities: stem separation (Demucs), mastering (matchering reference / pedalboard preset chain), MIR analysis (BPM, key, LUFS, spectral features via librosa), DSP transforms (gain, EQ, compand, reverb, pitch, tempo, etc. via SoX), loudness measurement and normalization, generic effects chains (full pedalboard catalog as ordered chain), and MIDI composition + rendering. The MIDI compose endpoint accepts a JSON song spec the agent writes itself (no AI runs server-side) and returns Standard MIDI File bytes; midi/render synthesises MIDI to audio via fluidsynth + a bundled General MIDI SoundFont; midi/generate chains both. Audio I/O supports three input modes (multipart upload, staged file path under /v1/files, or remote URL — only when the operator has enabled AUDIOLLA_FETCH_MODE) and three output modes (inline bytes, write to staging, PUT to presigned URL). Audiolla only fetches/uploads to URLs when the operator has explicitly enabled AUDIOLLA_FETCH_MODE — if a request returns "URL fetch/upload is disabled", do NOT try to bypass it. Do not use this skill for generic audio-processing questions or for users who haven't named audiolla.
 compatibility: Requires curl and a running audiolla instance (Docker image psyb0t/audiolla:latest or :latest-cuda). AUDIOLLA_URL env var must be set by the user (default http://localhost:8000). AUDIOLLA_TOKEN required only when the server has AUDIOLLA_AUTH_TOKEN configured; obtain from the AUDIOLLA_TOKEN env var or by asking the user — never read tokens from repo files autonomously.
 metadata:
   author: psyb0t
@@ -76,6 +76,9 @@ Status codes follow REST conventions:
 | `pedalboard-chain` | Preset DSP mastering chain | presets: `transparent`, `loud` — GPL v3 |
 | `librosa-analyze` | MIR analysis + loudness | also backs the `/v1/audio/loudness` endpoint |
 | `sox-transform` | SoX DSP chain | gain, EQ, compand, reverb, pitch, tempo, rate, channels, trim, pad |
+| `fx-chain` | Arbitrary pedalboard chain | full pedalboard catalog as `[{type, params}, ...]` — backs `/v1/audio/fx`. VST3 / AU / external-plugin classes deliberately blocked |
+| `midi-compose` | JSON → MIDI bytes | song-spec transcoder; no AI server-side, the agent writes the spec |
+| `midi-render` | MIDI → audio | fluidsynth + FluidR3_GM SoundFont (GM patches 0-127, drum kit on channel 9) |
 
 Engines lazy-load on first use and auto-unload after `AUDIOLLA_ENGINE_TTL` seconds of idle (default 600s). Demucs weights prefetch into `/data/torch_cache/` at container start so the first separation request doesn't pay the cold-download cost.
 
@@ -277,6 +280,115 @@ curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
 
 `target_lufs` must be in `[-70.0, -0.1]` — outside that range returns 400 (anything closer to 0 will clip catastrophically; anything below -70 silences the audio).
 
+### Effects chain (`/v1/audio/fx`)
+
+Arbitrary pedalboard effect chain — full catalog. Different from `/v1/audio/master` (which runs presets).
+
+```bash
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/fx \
+  -F "file=@track.wav" \
+  -F 'effects=[
+    {"type":"Compressor","params":{"threshold_db":-18,"ratio":4.0}},
+    {"type":"Reverb","params":{"room_size":0.5,"wet_level":0.3}},
+    {"type":"PitchShift","params":{"semitones":2}},
+    {"type":"Gain","params":{"gain_db":-3}}
+  ]' \
+  -o out.wav
+```
+
+Allowed `type` values: `Compressor`, `Limiter`, `NoiseGate`, `Gain`, `Clipping`, `Distortion`, `Bitcrush`, `Reverb`, `Chorus`, `Delay`, `Phaser`, `PitchShift`, `HighShelfFilter`, `LowShelfFilter`, `PeakFilter`, `HighpassFilter`, `LowpassFilter`, `LadderFilter`, `IIRFilter`, `GSMFullRateCompressor`, `MP3Compressor`, `Resample`, `Invert`, `Convolution`.
+
+`VST3Plugin`, `AudioUnitPlugin`, `ExternalPlugin` are deliberately blocked — they load arbitrary native code from arbitrary filesystem paths. Server returns 400 if asked.
+
+### MIDI composition (`/v1/midi/compose`)
+
+Transcode a JSON song spec to a Standard MIDI File. **No AI runs server-side** — your agent writes the spec, audiolla turns it into MIDI bytes.
+
+```bash
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  -H 'Content-Type: application/json' \
+  $AUDIOLLA_URL/v1/midi/compose \
+  -d '{
+    "tempo_bpm": 120,
+    "time_signature": [4, 4],
+    "key_signature": "C",
+    "tracks": [
+      {"name":"Lead","program":0,"channel":0,"notes":[
+        {"pitch":60,"start_beats":0.0,"duration_beats":0.5,"velocity":100},
+        {"pitch":64,"start_beats":0.5,"duration_beats":0.5,"velocity":100},
+        {"pitch":67,"start_beats":1.0,"duration_beats":0.5,"velocity":100}
+      ]},
+      {"name":"Drums","program":0,"channel":9,"notes":[
+        {"pitch":36,"start_beats":0.0,"duration_beats":0.1,"velocity":110}
+      ]}
+    ]
+  }' \
+  -o song.mid
+```
+
+Spec fields:
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `tempo_bpm` | float | 120 | 1.0 ≤ bpm ≤ 999.0 |
+| `time_signature` | `[num, den]` | `[4, 4]` | denominator must be 1/2/4/8/16/32 |
+| `key_signature` | string | none | `"C"`, `"Am"`, `"F#"`, `"Bbm"` — letter [+ #/b] [+ m for minor] |
+| `ticks_per_beat` | int | 480 | 24 ≤ tpb ≤ 1920 |
+| `tracks[].name` | string | none | optional, writes a `track_name` meta event |
+| `tracks[].program` | int 0-127 | 0 | General MIDI program (Acoustic Grand Piano = 0, Distortion Guitar = 30, Synth Brass 1 = 62, etc.) |
+| `tracks[].channel` | int 0-15 | 0 | **Channel 9 is the GM drum channel** — pitch maps to drum kit, not piano |
+| `tracks[].volume` | int 0-127 | 100 | MIDI CC#7 — initial volume |
+| `tracks[].pan` | int 0-127 | 64 | MIDI CC#10 — initial pan (64 = centre) |
+| `tracks[].notes[].pitch` | int 0-127 | required | 60 = middle C |
+| `tracks[].notes[].start_beats` | float ≥ 0 | 0 | beat-based absolute position |
+| `tracks[].notes[].duration_beats` | float > 0 | required | must be > 1/64 beat (≈ a 256th note) |
+| `tracks[].notes[].velocity` | int 1-127 | 100 | |
+
+GM drum kit reference for channel 9: 35 acoustic bass drum, 36 kick, 38 snare, 39 hand clap, 40 electric snare, 42 closed hi-hat, 46 open hi-hat, 49 crash, 51 ride, 57 crash 2.
+
+Spec validation is fail-loud — bad pitch / negative duration / unknown program returns a 400 with the offending path in the message (e.g. `tracks[1].notes[3].pitch must be in [0, 127], got 200`).
+
+Pass `?output_path=midi/song.mid` to stage the MIDI in `/v1/files` instead of getting bytes inline.
+
+### MIDI rendering (`/v1/midi/render`)
+
+Synthesise MIDI to audio via fluidsynth. Default SoundFont is FluidR3_GM (bundled in the prod image). Override per-request with a staged `.sf2`.
+
+```bash
+# Render a freshly-composed MIDI inline
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/midi/render \
+  -F "file=@song.mid" \
+  -F "output_format=wav" \
+  -o song.wav
+
+# Render with a custom SoundFont (must be staged first)
+curl -X PUT -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/files/sf/orchestral.sf2 --data-binary @my.sf2
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/midi/render \
+  -F "file_path=midi/song.mid" \
+  -F "soundfont_path=sf/orchestral.sf2" \
+  -F "output_format=flac" \
+  -F "gain=0.3" \
+  -F "samplerate=48000" \
+  -o orch.flac
+```
+
+`gain` range `[0.0, 5.0]` — default `0.5` is calibrated to avoid clipping on percussive MIDI. `samplerate` must be 22050 / 44100 / 48000 / 88200 / 96000.
+
+### MIDI generate (`/v1/midi/generate`)
+
+One-shot compose + render. Body is the same JSON song spec as `/v1/midi/compose`; output is audio. Audio knobs (`output_format`, `soundfont_path`, `gain`, `samplerate`, `output_path`, `output_url`) go on the query string.
+
+```bash
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  -H 'Content-Type: application/json' \
+  "$AUDIOLLA_URL/v1/midi/generate?output_format=wav&output_path=songs/v1.wav" \
+  -d @spec.json
+```
+
 ### File staging
 
 A simple server-side file store under `/v1/files`. Plain CRUD — upload, list, download, delete. Once a file is staged, every audio endpoint can reference it by relative path via the `file_path` form field (and the master endpoint accepts `reference_path` for the reference track).
@@ -385,6 +497,10 @@ Each audio tool accepts exactly one of `file_path` or `file_url` for input (same
 | `analyze` | `file_path` or `file_url`, `features` | librosa feature dict |
 | `transform` | `operations`, `file_path` or `file_url`, `output_url` | base64 audio OR `{url, size}` |
 | `loudness` | `file_path` or `file_url`, `target_lufs`, `output_url` | measurement JSON or `{audio_base64 or url+size, measured_lufs, target_lufs, normalized}` |
+| `fx` | `effects`, `file_path` or `file_url`, `output_format`, `output_url` | base64 audio OR `{url, size}` |
+| `midi_compose` | `spec` (song JSON), `output_path`, `output_url` | `{midi_base64, size}` OR `{path, size}` OR `{url, size}` |
+| `midi_render` | `file_path` or `file_url` (MIDI), `soundfont_path`, `gain`, `samplerate`, `output_format`, `output_url` | base64 audio OR `{url, size}` |
+| `midi_generate` | `spec`, `soundfont_path`, `gain`, `samplerate`, `output_format`, `output_url` | base64 audio + `midi_size`, OR `{url, size, midi_size}` |
 | `list_files` | — | `{files: [...]}` |
 | `put_file` | `path`, `content_base64` | `{path, size}` |
 | `get_file` | `path` | `{path, size, content_base64}` |

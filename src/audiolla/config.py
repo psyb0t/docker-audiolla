@@ -147,12 +147,22 @@ FETCH_TIMEOUT_SECONDS: float = _duration_env("AUDIOLLA_FETCH_TIMEOUT", 30.0)
 FETCH_ALLOW_PRIVATE: bool = _bool_env("AUDIOLLA_FETCH_ALLOW_PRIVATE", False)
 FETCH_MAX_REDIRECTS: int = _int_env("AUDIOLLA_FETCH_MAX_REDIRECTS", 5)
 
+
+# ── Default SoundFont for /v1/midi/render ────────────────────────────────────
+# Empty/unset = midi-render is unconfigured and reports as such at startup.
+# Prod images ship FluidR3_GM at /usr/share/sounds/sf2/FluidR3_GM.sf2 via the
+# fluid-soundfont-gm Debian package.
+SOUNDFONT_PATH: str = os.environ.get("AUDIOLLA_SOUNDFONT", "").strip()
+
 _VALID_EXECUTORS = frozenset({
     "demucs",
     "matchering",
     "pedalboard_chain",
     "librosa_analyze",
     "sox_transform",
+    "fx_chain",
+    "midi_compose",
+    "midi_render",
 })
 
 
