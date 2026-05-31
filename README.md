@@ -7,7 +7,7 @@
 
 > POST a track. Get stems, a master, analysis, or a processed file back. No cloud, no accounts, runs wherever Docker runs.
 
-HTTP API for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain. Extract BPM and key with librosa. Chain sox transforms. All from curl or any HTTP client.
+HTTP API + MCP server for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain. Extract BPM and key with librosa. Chain sox transforms. All from curl, any HTTP client, or an LLM agent over MCP.
 
 Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. OpenAPI spec included.
 
@@ -25,6 +25,7 @@ Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. 
   - [Stage files](#stage-files)
 - [Engines](#engines)
 - [Endpoints](#endpoints)
+- [MCP](#mcp)
 - [Configuration](#configuration)
 - [What's not in here](#whats-not-in-here)
 - [Build & dev](#build--dev)
@@ -85,32 +86,35 @@ curl -X POST http://localhost:8000/v1/audio/master \
   -F "reference=@ref.wav" \
   -o mastered.wav
 
-# run the built-in pedalboard chain (compression, EQ, limiting)
+# run a built-in pedalboard chain (presets: transparent, loud)
 curl -X POST http://localhost:8000/v1/audio/master \
   -F "file=@track.wav" \
   -F "mode=chain" \
+  -F "preset=loud" \
   -o mastered.wav
 ```
 
 ### Analyze
 
 ```bash
-# returns JSON — BPM, key, LUFS, duration, spectral features
+# returns JSON. features: bpm, key, loudness, duration,
+# spectral_centroid, rms, zcr. Omit features= to get them all.
 curl -X POST http://localhost:8000/v1/audio/analyze \
   -F "file=@track.wav" \
   -F "features=bpm" \
   -F "features=key" \
-  -F "features=lufs"
+  -F "features=loudness"
 ```
 
 ### Transform
 
 ```bash
-# compress + reverb, export mp3
+# pitch shift up 2 semitones + add reverb, export mp3.
+# operations is a JSON array — ops: gain, equalizer, compand, reverb,
+# pitch, tempo, rate, channels, trim, pad.
 curl -X POST http://localhost:8000/v1/audio/transform \
   -F "file=@track.wav" \
-  -F "effects=compand" \
-  -F "effects=reverb" \
+  -F 'operations=[{"op":"pitch","params":{"n_semitones":2}},{"op":"reverb","params":{"reverberance":50}}]' \
   -F "output_format=mp3" \
   -o out.mp3
 ```
@@ -131,22 +135,24 @@ curl -X POST http://localhost:8000/v1/audio/loudness \
 
 ### Stage files
 
-Upload once, reference by path across multiple requests. Useful when you're running a track through several steps or the file is large.
+A simple server-side file store under `/v1/files`. Upload, list, download, delete.
 
 ```bash
-curl -X PUT http://localhost:8000/v1/files/mytrack.wav --data-binary @track.wav
+# upload
+curl -X PUT http://localhost:8000/v1/files/mytrack.wav \
+  --data-binary @track.wav
 
-curl -X POST http://localhost:8000/v1/audio/analyze \
-  -F "file_path=mytrack.wav" \
-  -F "features=bpm"
+# list
+curl http://localhost:8000/v1/files
 
-curl -X POST http://localhost:8000/v1/audio/separate \
-  -F "file_path=mytrack.wav" \
-  -F "engine=htdemucs" \
-  -o stems.zip
+# download
+curl http://localhost:8000/v1/files/mytrack.wav -o copy.wav
 
+# delete
 curl -X DELETE http://localhost:8000/v1/files/mytrack.wav
 ```
+
+Use it to keep big files on the server, share input/output between clients, or feed staged paths to MCP tools (`put_file` / `separate file_path=...` etc.). The REST audio endpoints take the file inline — they don't reference staged paths.
 
 ---
 
@@ -201,6 +207,33 @@ Full wire contract: [`openapi.yaml`](openapi.yaml).
 | `GET` | `/api/ps` | list engines in memory right now |
 | `DELETE` | `/api/ps/{engine}` | evict one engine |
 | `POST` | `/unload` | evict everything |
+
+---
+
+## MCP
+
+audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp` using the streamable HTTP transport. Point any MCP client there and an LLM agent can drive the full audio processing surface — separate stems, master tracks, analyze, transform, normalize — without touching the REST API directly.
+
+Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The intended workflow is: `put_file` to stage a file, call whatever tools you need, `get_file` to pull results back.
+
+**Endpoint:** `http://localhost:8000/v1/mcp`
+
+**Tools:**
+
+| Tool | What it does |
+|------|--------------|
+| `list_engines` | List configured engines and whether they're loaded |
+| `separate` | Demucs stem separation on a staged file — returns base64 stems |
+| `master` | Reference mastering (matchering) or preset chain (pedalboard) |
+| `analyze` | BPM, key, LUFS, spectral features via librosa |
+| `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
+| `loudness` | Measure LUFS or normalize to a target |
+| `list_files` | List staged files |
+| `put_file` | Upload a file (base64) to the staging area |
+| `get_file` | Read a staged file back (base64) |
+| `delete_file` | Remove a staged file |
+
+Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints — pass the bearer token in the `Authorization` header.
 
 ---
 
