@@ -7,7 +7,7 @@
 
 > POST a track. Get stems, a master, analysis, or a processed file back. No cloud, no accounts, runs wherever Docker runs.
 
-HTTP API for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain — full catalog, your order and params. Extract BPM and key with librosa. Chain sox transforms. Compose a song from a JSON spec and render it through fluidsynth + a General MIDI SoundFont. Use it from curl, a shell script, a Makefile, a Python notebook, a DAW pipeline, or — if that's your thing — an LLM agent over the MCP server at `/v1/mcp`. It's HTTP and JSON. The wire format doesn't care who's typing.
+HTTP API for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain — full catalog, your order and params. Extract BPM and key with librosa. Find beats, onsets, melody, and structural segments. Detect and trim silence. Generate a spectrogram or waveform PNG, or render an animated visualisation video. Compute a Chromaprint acoustic fingerprint. Chain sox transforms. Compose a song from a JSON spec, inspect or transform an existing MIDI file, and render it through fluidsynth + a General MIDI SoundFont. Use it from curl, a shell script, a Makefile, a Python notebook, a DAW pipeline, or an LLM agent over the MCP server at `/v1/mcp`. It's HTTP and JSON. The wire format doesn't care who's typing.
 
 Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. OpenAPI spec included.
 
@@ -20,10 +20,16 @@ Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. 
   - [Split stems](#split-stems)
   - [Master](#master)
   - [Analyze](#analyze)
+  - [Beats, onsets, melody, segments](#beats-onsets-melody-segments)
+  - [Silence detection and trimming](#silence-detection-and-trimming)
+  - [Spectrogram, waveform, visualise](#spectrogram-waveform-visualise)
+  - [Acoustic fingerprint](#acoustic-fingerprint)
   - [Transform](#transform)
   - [Loudness](#loudness)
   - [Effects chain](#effects-chain)
   - [Compose MIDI](#compose-midi)
+  - [Inspect MIDI](#inspect-midi)
+  - [Transform MIDI](#transform-midi)
   - [Render MIDI to audio](#render-midi-to-audio)
   - [Generate music from a spec](#generate-music-from-a-spec)
   - [Stage files](#stage-files)
@@ -123,6 +129,103 @@ curl -X POST http://localhost:8000/v1/audio/analyze \
   -F "features=loudness"
 ```
 
+### Beats, onsets, melody, segments
+
+```bash
+# beat grid — returns bpm + beat timestamps
+curl -X POST http://localhost:8000/v1/audio/beats \
+  -F "file=@track.wav"
+
+# onset timestamps — note attacks, transients
+curl -X POST http://localhost:8000/v1/audio/onsets \
+  -F "file=@track.wav"
+
+# dominant melody contour — pitch in Hz per frame
+curl -X POST http://localhost:8000/v1/audio/melody \
+  -F "file=@track.wav"
+
+# structural segmentation — labels recurring sections A, B, C...
+curl -X POST http://localhost:8000/v1/audio/segments \
+  -F "file=@track.wav" \
+  -F "num_segments=4"
+```
+
+Beat detection also generates a click-track file when `click_track=true` — handy for aligning a mix to a grid. Melody can be exported as a single-track MIDI file via `as_midi=true`.
+
+### Silence detection and trimming
+
+```bash
+# find silent gaps in a recording
+curl -X POST http://localhost:8000/v1/audio/silence \
+  -F "file=@track.wav" \
+  -F "threshold_db=-30" \
+  -F "min_duration_sec=1.0"
+
+# trim all silence and get a shorter file back
+curl -X POST http://localhost:8000/v1/audio/silence \
+  -F "file=@track.wav" \
+  -F "threshold_db=-30" \
+  -F "min_duration_sec=0.5" \
+  -F "trim_mode=all" \
+  -o trimmed.wav
+
+# trim only leading/trailing silence, write to staging
+curl -X POST http://localhost:8000/v1/audio/silence \
+  -F "file=@track.wav" \
+  -F "threshold_db=-40" \
+  -F "min_duration_sec=0.3" \
+  -F "trim_mode=edges" \
+  -F "output_path=processed/trimmed.wav"
+```
+
+`trim_mode=edges` — chop leading + trailing silence only. `trim_mode=all` — remove every detected gap (compress a talk recording, tighten a loop). Without `trim_mode`, the response is JSON only: `silent_ranges`, `non_silent_ranges`, `duration`.
+
+### Spectrogram, waveform, visualise
+
+```bash
+# static PNG spectrogram
+curl -X POST http://localhost:8000/v1/audio/spectrogram \
+  -F "file=@track.wav" \
+  -F "width=1280" \
+  -F "height=720" \
+  -o spec.png
+
+# static PNG waveform
+curl -X POST http://localhost:8000/v1/audio/waveform \
+  -F "file=@track.wav" \
+  -F "width=1280" \
+  -F "height=240" \
+  -o wave.png
+
+# animated MP4 spectrum analyser
+curl -X POST http://localhost:8000/v1/audio/visualize \
+  -F "file=@track.wav" \
+  -F "mode=spectrum" \
+  -F "width=1280" \
+  -F "height=720" \
+  -F "fps=30" \
+  -F "container=mp4" \
+  -o viz.mp4
+```
+
+`visualize` modes: `spectrum` (scrolling FFT), `waves` (oscilloscope), `cqt` (constant-Q transform), `freqs` (bar-graph analyzer), `volume` (VU meter), `vectorscope` (stereo X/Y scope), `phasemeter`, `histogram`. Containers: `mp4`, `webm`.
+
+### Acoustic fingerprint
+
+```bash
+# Chromaprint fingerprint — identifies a recording regardless of encoding
+curl -X POST http://localhost:8000/v1/audio/fingerprint \
+  -F "file=@track.wav"
+# → {"duration": 215.34, "fingerprint": "AQADtEqRRIuQ..."}
+
+# include the raw integer array (for custom similarity scoring)
+curl -X POST http://localhost:8000/v1/audio/fingerprint \
+  -F "file=@track.wav" \
+  -F "return_raw=true"
+```
+
+The base64 fingerprint string is compatible with the [AcoustID](https://acoustid.org) lookup service.
+
 ### Transform
 
 ```bash
@@ -204,6 +307,53 @@ curl -X POST 'http://localhost:8000/v1/midi/compose?output_path=midi/song.mid' \
 ```
 
 Spec fields: `tempo_bpm` (default 120), `time_signature` (default `[4,4]`), `key_signature` (optional, e.g. `"C"`, `"Am"`), `ticks_per_beat` (default 480), `tracks[].{name, program, channel, volume, pan, notes[].{pitch, start_beats, duration_beats, velocity}}`. Time is in beats. `program` is GM program 0-127. Channel 9 is the GM drum channel — pitches there map to the drum kit (36 = kick, 38 = snare, 42 = closed hi-hat, etc.).
+
+### Inspect MIDI
+
+```bash
+# read the structure of any Standard MIDI File
+curl -X POST http://localhost:8000/v1/midi/inspect \
+  -F "file=@song.mid"
+# → {type, ticks_per_beat, tempo_changes, time_signatures,
+#    tracks[{name, note_on_count, channels, programs, length_beats}], ...}
+```
+
+### Transform MIDI
+
+```bash
+# transpose all non-drum tracks up an octave
+curl -X POST http://localhost:8000/v1/midi/transform \
+  -F "file=@song.mid" \
+  -F "transpose_semitones=12" \
+  -o transposed.mid
+
+# override tempo to 140 BPM and save to staging
+curl -X POST http://localhost:8000/v1/midi/transform \
+  -F "file=@song.mid" \
+  -F "tempo_bpm=140" \
+  -F "output_path=midi/fast.mid"
+
+# drop the drum track (channel 9)
+curl -X POST http://localhost:8000/v1/midi/transform \
+  -F "file=@song.mid" \
+  -F "drop_channels=9" \
+  -o no-drums.mid
+
+# keep only channels 0 and 1
+curl -X POST http://localhost:8000/v1/midi/transform \
+  -F "file=@song.mid" \
+  -F "keep_channels=0" \
+  -F "keep_channels=1" \
+  -o two-ch.mid
+
+# quantize to 1/16th notes
+curl -X POST http://localhost:8000/v1/midi/transform \
+  -F "file=@song.mid" \
+  -F "quantize=0.25" \
+  -o quantized.mid
+```
+
+`transpose_semitones` ±48. `quantize` is in beats (0.25 = 1/16th at 4/4). `keep_channels` and `drop_channels` accept multiple values; only one can be set per request.
 
 ### Render MIDI to audio
 
@@ -321,11 +471,14 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `mdx_extra` | Strong on vocal isolation. MUSDB-trained, different architecture. |
 | `matchering` | Reference-based mastering: EQ + loudness matched to a reference track. |
 | `pedalboard-chain` | Preset mastering chains via pedalboard — `transparent` (light) or `loud` (4:1 squash). Backs `/v1/audio/master` with `mode=chain`. For arbitrary chains use `fx-chain` / `/v1/audio/fx`. |
-| `librosa-analyze` | BPM, key, LUFS, duration, spectral features via librosa. |
+| `librosa-analyze` | BPM, key, LUFS, duration, spectral features, beat grid, onset detection, melody (pyin), structural segmentation via librosa. |
 | `sox-transform` | Gain, EQ, compression, reverb, pitch shift, tempo via pysox. |
 | `fx-chain` | Arbitrary pedalboard effects chain — full catalog, your order and params. Backs `/v1/audio/fx`. |
-| `midi-compose` | JSON spec → MIDI bytes. Backs `/v1/midi/compose` and `/v1/midi/generate`. |
+| `midi-compose` | JSON spec → MIDI bytes. Also inspects and transforms existing MIDI files. Backs `/v1/midi/{compose,inspect,transform,generate}`. |
 | `midi-render` | MIDI → audio via fluidsynth + SoundFont. Backs `/v1/midi/render` and `/v1/midi/generate`. |
+| `silence-detect` | Locate silent gaps via ffmpeg `silencedetect`. Optional auto-trim. Backs `/v1/audio/silence`. |
+| `ffmpeg-render` | Static PNG spectrogram/waveform + 8-mode animated MP4/WebM video via ffmpeg filters. Backs `/v1/audio/{spectrogram,waveform,visualize}`. |
+| `audio-fingerprint` | Chromaprint acoustic fingerprint via `fpcalc`. Backs `/v1/audio/fingerprint`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
@@ -348,16 +501,27 @@ bytes.
 |--------|------|-----------------|
 | `POST` | `/v1/audio/separate` | ZIP (multiple stems) or audio bytes (single stem) |
 | `POST` | `/v1/audio/master` | audio bytes |
-| `POST` | `/v1/audio/analyze` | JSON (no audio output, so no `output_path` / `output_url`) |
+| `POST` | `/v1/audio/analyze` | JSON — BPM, key, LUFS, spectral features |
+| `POST` | `/v1/audio/beats` | JSON — BPM + beat timestamps; optional click-track WAV |
+| `POST` | `/v1/audio/onsets` | JSON — onset timestamps |
+| `POST` | `/v1/audio/melody` | JSON — dominant melody contour; optional MIDI export |
+| `POST` | `/v1/audio/segments` | JSON — structural segment labels (A, B, C…) |
+| `POST` | `/v1/audio/silence` | JSON — silent/non-silent ranges; optional trimmed audio |
+| `POST` | `/v1/audio/spectrogram` | PNG bytes |
+| `POST` | `/v1/audio/waveform` | PNG bytes |
+| `POST` | `/v1/audio/visualize` | MP4 or WebM bytes — 8 animation modes |
+| `POST` | `/v1/audio/fingerprint` | JSON — Chromaprint fingerprint string |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
-| `POST` | `/v1/audio/fx` | audio bytes (or JSON with output_path / output_url) |
+| `POST` | `/v1/audio/fx` | audio bytes |
 
 ### MIDI
 
 | Method | Path | Default returns |
 |--------|------|-----------------|
 | `POST` | `/v1/midi/compose` | MIDI bytes (`audio/midi`) — body is `application/json` song spec |
+| `POST` | `/v1/midi/inspect` | JSON — tempo, tracks, channels, note counts, time/key signatures |
+| `POST` | `/v1/midi/transform` | MIDI bytes — transpose, quantize, tempo override, channel filter |
 | `POST` | `/v1/midi/render` | audio bytes — input MIDI via `file` / `file_path` / `file_url` |
 | `POST` | `/v1/midi/generate` | audio bytes — body is `application/json` song spec (compose + render in one) |
 
@@ -398,10 +562,21 @@ Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). Th
 | `separate` | Demucs stem separation — base64 stems back, or per-stem PUT via `output_urls` |
 | `master` | Reference mastering (matchering) or preset chain (pedalboard) |
 | `analyze` | BPM, key, LUFS, spectral features via librosa |
+| `beats` | Beat grid — BPM + timestamps; optional click-track audio |
+| `onsets` | Note onset timestamps |
+| `melody` | Dominant melody contour in Hz; optional MIDI export |
+| `segments` | Structural segmentation — recurring section labels (A, B, C…) |
+| `silence` | Detect silent gaps; optional auto-trim (edges or all) |
+| `spectrogram` | Static PNG spectrogram via ffmpeg |
+| `waveform` | Static PNG waveform via ffmpeg |
+| `visualize` | Animated MP4/WebM — spectrum, waves, CQT, freqs, volume, vectorscope, phasemeter, histogram |
+| `fingerprint` | Chromaprint acoustic fingerprint (AcoustID-compatible) |
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
 | `loudness` | Measure LUFS or normalize to a target |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
 | `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
+| `midi_inspect` | Read MIDI structure — tempo, tracks, channels, note counts |
+| `midi_transform` | Transpose, quantize, tempo override, channel filter on an existing MIDI file |
 | `midi_render` | MIDI → audio via fluidsynth + SoundFont |
 | `midi_generate` | One-shot compose + render — spec in, audio out |
 | `list_files` | List staged files |
