@@ -163,6 +163,9 @@ _VALID_EXECUTORS = frozenset({
     "fx_chain",
     "midi_compose",
     "midi_render",
+    "silence_detect",
+    "ffmpeg_render",
+    "audio_fingerprint",
 })
 
 

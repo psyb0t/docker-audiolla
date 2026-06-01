@@ -79,6 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         fluidsynth \
         fluid-soundfont-gm \
+        libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/* \
     && (userdel -r ubuntu 2>/dev/null || true) \
     && useradd -u 1000 --create-home --shell /bin/bash audiolla \

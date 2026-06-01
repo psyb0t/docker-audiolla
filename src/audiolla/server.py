@@ -51,6 +51,11 @@ from .auth import BearerAuthMiddleware
 from .engines import build_engines, is_separation_engine, is_mastering_engine
 from .engines import is_analysis_engine, is_transform_engine, is_loudness_engine
 from .engines import is_fx_engine, is_midi_compose_engine, is_midi_render_engine
+from .engines import is_beats_engine, is_onsets_engine, is_melody_engine
+from .engines import is_segments_engine, is_silence_engine, is_ffmpeg_render_engine
+from .engines import is_fingerprint_engine, is_midi_inspect_engine
+from .engines import is_midi_transform_engine
+from .engines.ffmpeg_render import visualize_modes
 from .input_resolver import resolve_input
 from .mcp_server import build_mcp_server
 from .output_writer import write_output
@@ -964,6 +969,449 @@ async def midi_generate(
             "engine": "midi-generate",
             "output_format": output_format,
             "midi_size": len(midi_bytes),
+        },
+    )
+
+
+# ── /v1/audio/beats — librosa beat tracking + optional click track ──────────
+
+
+@app.post("/v1/audio/beats")
+async def beats(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    click_track: bool = Form(default=False),
+    output_format: str = Form(default="wav"),
+) -> Any:
+    """Returns JSON with tempo + beat positions. With ``click_track=true``
+    also synthesises a metronome-mixed audio render and includes a
+    base64-encoded copy in the JSON.
+    """
+    _validate_output_format(output_format)
+    eng = ENGINES.get("librosa-analyze")
+    if eng is None or not is_beats_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="librosa-analyze engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        result = await eng.beats(
+            raw, filename,
+            click_track=click_track,
+            output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if click_track and (output_path or output_url):
+        # Caller wants the audio routed out-of-band; pull it from the
+        # engine response and use write_output. JSON still carries
+        # beats / tempo so the caller gets both.
+        import base64 as _b64
+        audio_bytes = _b64.b64decode(result.pop("click_track_base64"))
+        return await write_output(
+            audio_bytes,
+            media_type=content_type_for(output_format),
+            filename=f"clicks.{output_format}",
+            output_path=output_path,
+            output_url=output_url,
+            extra_json=result,
+        )
+    return result
+
+
+# ── /v1/audio/onsets — librosa onset detection ──────────────────────────────
+
+
+@app.post("/v1/audio/onsets")
+async def onsets(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+) -> dict[str, Any]:
+    eng = ENGINES.get("librosa-analyze")
+    if eng is None or not is_onsets_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="librosa-analyze engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        return await eng.onsets(raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── /v1/audio/melody — pyin pitch contour + optional MIDI quantize ──────────
+
+
+@app.post("/v1/audio/melody")
+async def melody(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    fmin: float = Form(default=65.0),
+    fmax: float = Form(default=2093.0),
+    as_midi: bool = Form(default=False),
+) -> Any:
+    eng = ENGINES.get("librosa-analyze")
+    if eng is None or not is_melody_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="librosa-analyze engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        result = await eng.melody(
+            raw, filename, fmin=fmin, fmax=fmax, as_midi=as_midi,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if as_midi and (output_path or output_url):
+        import base64 as _b64
+        midi_bytes = _b64.b64decode(result.pop("midi_base64"))
+        result.pop("midi_size", None)
+        return await write_output(
+            midi_bytes,
+            media_type="audio/midi",
+            filename="melody.mid",
+            output_path=output_path,
+            output_url=output_url,
+            extra_json=result,
+        )
+    return result
+
+
+# ── /v1/audio/segments — music-structure segmentation ──────────────────────
+
+
+@app.post("/v1/audio/segments")
+async def segments(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    num_segments: int = Form(default=6),
+) -> dict[str, Any]:
+    eng = ENGINES.get("librosa-analyze")
+    if eng is None or not is_segments_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="librosa-analyze engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        return await eng.segments(raw, filename, num_segments=num_segments)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── /v1/audio/silence — ffmpeg silencedetect + optional auto-trim ──────────
+
+
+@app.post("/v1/audio/silence")
+async def silence(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    threshold_db: float = Form(default=-30.0),
+    min_duration_sec: float = Form(default=0.5),
+    trim_mode: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+) -> Any:
+    _validate_output_format(output_format)
+    eng = ENGINES.get("silence-detect")
+    if eng is None or not is_silence_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="silence-detect engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        result = await eng.detect(
+            raw, filename,
+            threshold_db=threshold_db,
+            min_duration_sec=min_duration_sec,
+            trim_mode=trim_mode,
+            output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if trim_mode and (output_path or output_url):
+        import base64 as _b64
+        audio_bytes = _b64.b64decode(result.pop("trimmed_audio_base64"))
+        return await write_output(
+            audio_bytes,
+            media_type=content_type_for(output_format),
+            filename=f"trimmed.{output_format}",
+            output_path=output_path,
+            output_url=output_url,
+            extra_json=result,
+        )
+    return result
+
+
+# ── /v1/audio/spectrogram — static PNG via ffmpeg showspectrumpic ──────────
+
+
+@app.post("/v1/audio/spectrogram")
+async def spectrogram(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    width: int = Form(default=1920),
+    height: int = Form(default=1080),
+    color: str = Form(default="intensity"),
+    scale: str = Form(default="log"),
+) -> Response:
+    eng = ENGINES.get("ffmpeg-render")
+    if eng is None or not is_ffmpeg_render_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="ffmpeg-render engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        png = await eng.spectrogram(
+            raw, filename, width=width, height=height, color=color, scale=scale,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        png,
+        media_type="image/png",
+        filename="spectrogram.png",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"engine": "ffmpeg-render", "kind": "spectrogram"},
+    )
+
+
+# ── /v1/audio/waveform — static PNG via ffmpeg showwavespic ────────────────
+
+
+@app.post("/v1/audio/waveform")
+async def waveform(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    width: int = Form(default=1920),
+    height: int = Form(default=320),
+    color: str = Form(default="lime"),
+) -> Response:
+    eng = ENGINES.get("ffmpeg-render")
+    if eng is None or not is_ffmpeg_render_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="ffmpeg-render engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        png = await eng.waveform(
+            raw, filename, width=width, height=height, color=color,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        png,
+        media_type="image/png",
+        filename="waveform.png",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"engine": "ffmpeg-render", "kind": "waveform"},
+    )
+
+
+# ── /v1/audio/visualize — animated MP4/WebM video ──────────────────────────
+
+
+@app.post("/v1/audio/visualize")
+async def visualize(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    mode: str = Form(default="spectrum"),
+    width: int = Form(default=1280),
+    height: int = Form(default=720),
+    fps: int = Form(default=30),
+    container: str = Form(default="mp4"),
+) -> Response:
+    eng = ENGINES.get("ffmpeg-render")
+    if eng is None or not is_ffmpeg_render_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="ffmpeg-render engine not configured",
+        )
+    if mode not in visualize_modes():
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown visualize mode {mode!r}; supported: {visualize_modes()}",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        video = await eng.visualize(
+            raw, filename,
+            mode=mode, width=width, height=height, fps=fps, container=container,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    media_type = "video/mp4" if container == "mp4" else "video/webm"
+    return await write_output(
+        video,
+        media_type=media_type,
+        filename=f"visualize.{container}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": "ffmpeg-render",
+            "mode": mode,
+            "container": container,
+            "width": width,
+            "height": height,
+            "fps": fps,
+        },
+    )
+
+
+# ── /v1/audio/fingerprint — Chromaprint via fpcalc ─────────────────────────
+
+
+@app.post("/v1/audio/fingerprint")
+async def fingerprint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    analyze_seconds: float = Form(default=120.0),
+    return_raw: bool = Form(default=False),
+) -> dict[str, Any]:
+    eng = ENGINES.get("audio-fingerprint")
+    if eng is None or not is_fingerprint_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="audio-fingerprint engine not configured",
+        )
+    raw, filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        return await eng.compute(
+            raw, filename,
+            analyze_seconds=analyze_seconds, return_raw=return_raw,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── /v1/midi/inspect — SMF bytes → JSON structure ──────────────────────────
+
+
+@app.post("/v1/midi/inspect")
+async def midi_inspect(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+) -> dict[str, Any]:
+    eng = ENGINES.get("midi-compose")
+    if eng is None or not is_midi_inspect_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="midi-compose engine not configured",
+        )
+    raw, _filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        return await eng.inspect(raw)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── /v1/midi/transform — quantize / transpose / re-tempo / channel filter ──
+
+
+@app.post("/v1/midi/transform")
+async def midi_transform(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    transpose_semitones: int = Form(default=0),
+    quantize_grid_beats: float | None = Form(default=None),
+    tempo_bpm: float | None = Form(default=None),
+    keep_channels: str | None = Form(default=None),
+    drop_channels: str | None = Form(default=None),
+) -> Response:
+    eng = ENGINES.get("midi-compose")
+    if eng is None or not is_midi_transform_engine(eng):
+        raise HTTPException(
+            status_code=404, detail="midi-compose engine not configured",
+        )
+
+    def _parse_chan_list(raw_str: str | None) -> list[int] | None:
+        if raw_str is None or not raw_str.strip():
+            return None
+        try:
+            return [int(x.strip()) for x in raw_str.split(",") if x.strip()]
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid channel list {raw_str!r}: {exc}",
+            ) from exc
+
+    keep = _parse_chan_list(keep_channels)
+    drop = _parse_chan_list(drop_channels)
+
+    raw, _filename = await resolve_input(
+        file=file, file_path=file_path, file_url=file_url,
+    )
+    try:
+        out_bytes = await eng.transform(
+            raw,
+            transpose_semitones=transpose_semitones,
+            quantize_grid_beats=quantize_grid_beats,
+            tempo_bpm=tempo_bpm,
+            keep_channels=keep,
+            drop_channels=drop,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        out_bytes,
+        media_type="audio/midi",
+        filename="transformed.mid",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": "midi-compose",
+            "size": len(out_bytes),
+            "transpose_semitones": transpose_semitones,
+            "quantize_grid_beats": quantize_grid_beats,
+            "tempo_bpm": tempo_bpm,
         },
     )
 

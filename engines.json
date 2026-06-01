@@ -57,6 +57,18 @@
     "midi-render": {
       "executor": "midi_render",
       "description": "MIDI-to-audio synthesis via fluidsynth + FluidR3_GM SoundFont (GM patches 0–127 plus drum kit on channel 10)"
+    },
+    "silence-detect": {
+      "executor": "silence_detect",
+      "description": "ffmpeg silencedetect filter — locate silent ranges + optional auto-trim"
+    },
+    "ffmpeg-render": {
+      "executor": "ffmpeg_render",
+      "description": "ffmpeg-based audio visualisations — static spectrogram/waveform PNGs + animated video (showspectrum/showwaves/showcqt/showfreqs/showvolume/avectorscope/aphasemeter/ahistogram)"
+    },
+    "audio-fingerprint": {
+      "executor": "audio_fingerprint",
+      "description": "Chromaprint audio fingerprint via fpcalc — recording identity hash for dedup / lookup"
     }
   }
 }

@@ -240,3 +240,266 @@ class MidiComposeEngine(EngineBase):
         buf = io.BytesIO()
         mid.save(file=buf)
         return buf.getvalue()
+
+    # ── inspect: SMF bytes → JSON describing the file ──────────────────────
+
+    async def inspect(self, midi_bytes: bytes) -> dict[str, Any]:
+        """Parse a Standard MIDI File and return JSON describing its
+        structure — tempo events, time signature, per-track note counts,
+        program changes, total duration in beats + seconds."""
+        async with self._lock:
+            result = await asyncio.to_thread(self._inspect_sync, midi_bytes)
+            self._touch()
+            return result
+
+    def _inspect_sync(self, midi_bytes: bytes) -> dict[str, Any]:
+        import io as _io
+
+        import mido
+
+        if not midi_bytes:
+            raise MidiComposeError("MIDI input is empty")
+        if not midi_bytes.startswith(b"MThd"):
+            raise MidiComposeError(
+                "input does not look like a Standard MIDI File (missing 'MThd')"
+            )
+        try:
+            mid = mido.MidiFile(file=_io.BytesIO(midi_bytes))
+        except (ValueError, EOFError, IndexError, OSError) as exc:
+            raise MidiComposeError(f"failed to parse MIDI: {exc}") from exc
+
+        # Collect global meta events (tempo + time signature + key sig)
+        # — they can live on any track in type-0 files but conventionally
+        # are in track 0 in type-1.
+        tempo_changes: list[dict[str, Any]] = []
+        time_signatures: list[dict[str, Any]] = []
+        key_signatures: list[dict[str, Any]] = []
+        for trk in mid.tracks:
+            t_ticks = 0
+            for msg in trk:
+                t_ticks += msg.time
+                if msg.type == "set_tempo":
+                    tempo_changes.append({
+                        "tick": t_ticks,
+                        "bpm": float(mido.tempo2bpm(msg.tempo)),
+                    })
+                elif msg.type == "time_signature":
+                    time_signatures.append({
+                        "tick": t_ticks,
+                        "numerator": int(msg.numerator),
+                        "denominator": int(msg.denominator),
+                    })
+                elif msg.type == "key_signature":
+                    key_signatures.append({
+                        "tick": t_ticks,
+                        "key": str(msg.key),
+                    })
+
+        # Per-track stats — note counts per channel, programs used,
+        # name, length in ticks + beats.
+        track_summaries: list[dict[str, Any]] = []
+        for tidx, trk in enumerate(mid.tracks):
+            t_ticks = 0
+            note_on = 0
+            note_off = 0
+            channels: set[int] = set()
+            programs: set[int] = set()
+            track_name = None
+            for msg in trk:
+                t_ticks += msg.time
+                if msg.type == "track_name":
+                    track_name = str(msg.name)
+                elif msg.type == "note_on":
+                    if msg.velocity > 0:
+                        note_on += 1
+                    else:
+                        note_off += 1
+                    channels.add(int(msg.channel))
+                elif msg.type == "note_off":
+                    note_off += 1
+                    channels.add(int(msg.channel))
+                elif msg.type == "program_change":
+                    programs.add(int(msg.program))
+                    channels.add(int(msg.channel))
+            track_summaries.append({
+                "index": tidx,
+                "name": track_name,
+                "length_ticks": t_ticks,
+                "length_beats": (t_ticks / mid.ticks_per_beat) if mid.ticks_per_beat else 0.0,
+                "note_on_count": note_on,
+                "note_off_count": note_off,
+                "channels": sorted(channels),
+                "programs": sorted(programs),
+            })
+
+        return {
+            "type": int(mid.type),
+            "ticks_per_beat": int(mid.ticks_per_beat),
+            "length_seconds": float(mid.length),
+            "tempo_changes": tempo_changes,
+            "time_signatures": time_signatures,
+            "key_signatures": key_signatures,
+            "tracks": track_summaries,
+            "track_count": len(mid.tracks),
+            "size_bytes": len(midi_bytes),
+        }
+
+    # ── transform: SMF bytes → modified SMF bytes ──────────────────────────
+
+    async def transform(
+        self,
+        midi_bytes: bytes,
+        *,
+        transpose_semitones: int = 0,
+        quantize_grid_beats: float | None = None,
+        tempo_bpm: float | None = None,
+        keep_channels: list[int] | None = None,
+        drop_channels: list[int] | None = None,
+    ) -> bytes:
+        """Apply a sequence of transformations to a MIDI file.
+
+        - ``transpose_semitones``: shift every note on a non-drum channel
+          by N semitones (drums = channel 9, never transposed).
+        - ``quantize_grid_beats``: snap every note-on event to the nearest
+          multiple of this many beats (e.g. ``0.25`` = 16th-note grid).
+          Note durations are preserved.
+        - ``tempo_bpm``: replace every set_tempo event with this BPM.
+        - ``keep_channels`` / ``drop_channels``: filter notes by MIDI
+          channel. ``keep_channels`` is whitelist; ``drop_channels`` is
+          blacklist; supply only one.
+        """
+        if keep_channels is not None and drop_channels is not None:
+            raise MidiComposeError(
+                "supply either keep_channels or drop_channels, not both"
+            )
+        if quantize_grid_beats is not None and quantize_grid_beats <= 0:
+            raise MidiComposeError(
+                f"quantize_grid_beats must be > 0, got {quantize_grid_beats}"
+            )
+        if tempo_bpm is not None and not (1.0 <= tempo_bpm <= 999.0):
+            raise MidiComposeError(
+                f"tempo_bpm must be in [1, 999], got {tempo_bpm}"
+            )
+        if not (-48 <= transpose_semitones <= 48):
+            raise MidiComposeError(
+                f"transpose_semitones must be in [-48, 48], got {transpose_semitones}"
+            )
+        async with self._lock:
+            result = await asyncio.to_thread(
+                self._transform_sync,
+                midi_bytes,
+                transpose_semitones,
+                quantize_grid_beats,
+                tempo_bpm,
+                keep_channels,
+                drop_channels,
+            )
+            self._touch()
+            return result
+
+    def _transform_sync(
+        self,
+        midi_bytes: bytes,
+        transpose: int,
+        quantize: float | None,
+        tempo_bpm: float | None,
+        keep_channels: list[int] | None,
+        drop_channels: list[int] | None,
+    ) -> bytes:
+        import io as _io
+
+        import mido
+
+        if not midi_bytes:
+            raise MidiComposeError("MIDI input is empty")
+        if not midi_bytes.startswith(b"MThd"):
+            raise MidiComposeError(
+                "input does not look like a Standard MIDI File (missing 'MThd')"
+            )
+        try:
+            mid = mido.MidiFile(file=_io.BytesIO(midi_bytes))
+        except (ValueError, EOFError, IndexError, OSError) as exc:
+            raise MidiComposeError(f"failed to parse MIDI: {exc}") from exc
+
+        tpb = mid.ticks_per_beat
+        new_tempo = mido.bpm2tempo(tempo_bpm) if tempo_bpm is not None else None
+        keep_set = set(keep_channels) if keep_channels is not None else None
+        drop_set = set(drop_channels) if drop_channels is not None else None
+
+        def channel_allowed(ch: int) -> bool:
+            if keep_set is not None:
+                return ch in keep_set
+            if drop_set is not None:
+                return ch not in drop_set
+            return True
+
+        new_tracks: list["mido.MidiTrack"] = []
+        for trk in mid.tracks:
+            # Flatten to absolute ticks for easier quantisation.
+            t_ticks = 0
+            absolute: list[tuple[int, "mido.Message"]] = []
+            for msg in trk:
+                t_ticks += msg.time
+                absolute.append((t_ticks, msg.copy(time=0)))
+
+            transformed: list[tuple[int, "mido.Message"]] = []
+            # Track pending note_on starts per (channel, original-pitch)
+            # so quantising both ends preserves duration.
+            for tick, msg in absolute:
+                # Filter by channel — drop any per-channel message
+                # (note events, program change, control change, etc.)
+                # not just note events, so inspect doesn't see the channel at all.
+                if hasattr(msg, "channel") and not channel_allowed(int(msg.channel)):
+                    continue
+                # Transpose (skip drums on channel 9).
+                is_note = msg.type in ("note_on", "note_off")
+                if is_note and int(msg.channel) != 9 and transpose != 0:
+                    new_note = int(msg.note) + transpose
+                    if 0 <= new_note <= 127:
+                        msg = msg.copy(note=new_note)
+                    else:
+                        # Out-of-range note after transpose — drop it
+                        # rather than wrap or clip silently.
+                        continue
+                # Tempo override.
+                if msg.type == "set_tempo" and new_tempo is not None:
+                    msg = msg.copy(tempo=new_tempo)
+                # Quantise note_on times (note_off shifts by the same
+                # delta so duration is preserved).
+                if quantize is not None and msg.type == "note_on" and msg.velocity > 0:
+                    grid_ticks = max(1, int(round(quantize * tpb)))
+                    q_tick = round(tick / grid_ticks) * grid_ticks
+                    delta = q_tick - tick
+                    transformed.append((q_tick, msg))
+                    # Find and shift the matching note_off by the same delta.
+                    for i in range(len(absolute)):
+                        atick, amsg = absolute[i]
+                        if atick <= tick:
+                            continue
+                        is_off = (
+                            amsg.type == "note_off"
+                            or (amsg.type == "note_on" and amsg.velocity == 0)
+                        )
+                        if (
+                            is_off
+                            and int(amsg.channel) == int(msg.channel)
+                            and int(amsg.note) == int(msg.note)
+                        ):
+                            absolute[i] = (atick + delta, amsg)
+                            break
+                    continue
+                transformed.append((tick, msg))
+
+            transformed.sort(key=lambda x: (x[0], 0 if x[1].type == "note_off" else 1))
+            new_trk = mido.MidiTrack()
+            prev = 0
+            for tick, msg in transformed:
+                new_trk.append(msg.copy(time=max(0, tick - prev)))
+                prev = tick
+            new_tracks.append(new_trk)
+
+        out = mido.MidiFile(type=mid.type, ticks_per_beat=tpb)
+        out.tracks.extend(new_tracks)
+        buf = io.BytesIO()
+        out.save(file=buf)
+        return buf.getvalue()

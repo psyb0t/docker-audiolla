@@ -502,6 +502,309 @@ def build_mcp_server(
         result["midi_size"] = len(midi)
         return result
 
+    # ── MIR analysis tools (librosa) ────────────────────────────────────────
+
+    @mcp.tool()
+    async def beats(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        click_track: bool = False,
+        output_format: str = "wav",
+    ) -> dict[str, Any]:
+        """Beat tracking. Returns tempo + beat positions in seconds.
+        With ``click_track=True`` also returns base64 audio of input
+        mixed with a metronome click on each beat."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("librosa-analyze")
+        if eng is None or not hasattr(eng, "beats"):
+            raise ValueError("librosa-analyze engine not configured")
+        try:
+            return await eng.beats(
+                raw, name, click_track=click_track, output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def onsets(
+        file_path: str | None = None,
+        file_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Onset (transient) detection. Returns time + relative strength
+        for each detected attack."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("librosa-analyze")
+        if eng is None or not hasattr(eng, "onsets"):
+            raise ValueError("librosa-analyze engine not configured")
+        try:
+            return await eng.onsets(raw, name)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def melody(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        fmin: float = 65.0,
+        fmax: float = 2093.0,
+        as_midi: bool = False,
+    ) -> dict[str, Any]:
+        """Monophonic pitch tracking via pyin. Returns the pitch contour
+        and (with ``as_midi=True``) a base64 MIDI file of quantised
+        notes."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("librosa-analyze")
+        if eng is None or not hasattr(eng, "melody"):
+            raise ValueError("librosa-analyze engine not configured")
+        try:
+            return await eng.melody(
+                raw, name, fmin=fmin, fmax=fmax, as_midi=as_midi,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def segments(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        num_segments: int = 6,
+    ) -> dict[str, Any]:
+        """Music structure segmentation via recurrence-matrix clustering.
+        Returns N labelled ranges; structurally similar regions share a
+        label so verse/chorus repetition is easy to spot."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("librosa-analyze")
+        if eng is None or not hasattr(eng, "segments"):
+            raise ValueError("librosa-analyze engine not configured")
+        try:
+            return await eng.segments(raw, name, num_segments=num_segments)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    # ── silence detection (ffmpeg) ──────────────────────────────────────────
+
+    @mcp.tool()
+    async def silence(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        threshold_db: float = -30.0,
+        min_duration_sec: float = 0.5,
+        trim_mode: str | None = None,
+        output_format: str = "wav",
+    ) -> dict[str, Any]:
+        """Find silent ranges + optionally auto-trim. ``trim_mode='edges'``
+        removes leading/trailing silence; ``'all'`` removes every detected
+        silence. Output is base64 audio under ``trimmed_audio_base64``."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("silence-detect")
+        if eng is None or not hasattr(eng, "detect"):
+            raise ValueError("silence-detect engine not configured")
+        try:
+            return await eng.detect(
+                raw, name,
+                threshold_db=threshold_db,
+                min_duration_sec=min_duration_sec,
+                trim_mode=trim_mode,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    # ── visualisations (ffmpeg) ─────────────────────────────────────────────
+
+    @mcp.tool()
+    async def spectrogram(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        width: int = 1920,
+        height: int = 1080,
+        color: str = "intensity",
+        scale: str = "log",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Render a static PNG spectrogram. Returns base64 PNG by default,
+        or PUTs to ``output_url`` if set."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("ffmpeg-render")
+        if eng is None or not hasattr(eng, "spectrogram"):
+            raise ValueError("ffmpeg-render engine not configured")
+        try:
+            png = await eng.spectrogram(
+                raw, name,
+                width=width, height=height, color=color, scale=scale,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(output_url, png, "image/png")
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {"url": output_url, "size": len(png), "kind": "spectrogram"}
+        return {
+            "image_base64": base64.b64encode(png).decode("ascii"),
+            "size": len(png),
+            "kind": "spectrogram",
+        }
+
+    @mcp.tool()
+    async def waveform(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        width: int = 1920,
+        height: int = 320,
+        color: str = "lime",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Render a static PNG waveform. Returns base64 PNG by default."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("ffmpeg-render")
+        if eng is None or not hasattr(eng, "waveform"):
+            raise ValueError("ffmpeg-render engine not configured")
+        try:
+            png = await eng.waveform(
+                raw, name, width=width, height=height, color=color,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(output_url, png, "image/png")
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {"url": output_url, "size": len(png), "kind": "waveform"}
+        return {
+            "image_base64": base64.b64encode(png).decode("ascii"),
+            "size": len(png),
+            "kind": "waveform",
+        }
+
+    @mcp.tool()
+    async def visualize(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        mode: str = "spectrum",
+        width: int = 1280,
+        height: int = 720,
+        fps: int = 30,
+        container: str = "mp4",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Render an animated audio-reactive video. ``mode`` selects the
+        ffmpeg filter: spectrum / waves / cqt / freqs / volume /
+        vectorscope / phasemeter / histogram. Returns base64 video by
+        default, or PUTs to ``output_url`` if set."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("ffmpeg-render")
+        if eng is None or not hasattr(eng, "visualize"):
+            raise ValueError("ffmpeg-render engine not configured")
+        try:
+            video = await eng.visualize(
+                raw, name,
+                mode=mode, width=width, height=height, fps=fps,
+                container=container,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        media_type = "video/mp4" if container == "mp4" else "video/webm"
+        if output_url:
+            try:
+                await fetch.upload_bytes(output_url, video, media_type)
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {
+                "url": output_url, "size": len(video),
+                "mode": mode, "container": container,
+            }
+        return {
+            "video_base64": base64.b64encode(video).decode("ascii"),
+            "size": len(video),
+            "mode": mode,
+            "container": container,
+        }
+
+    # ── fingerprint (Chromaprint) ──────────────────────────────────────────
+
+    @mcp.tool()
+    async def fingerprint(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        analyze_seconds: float = 120.0,
+        return_raw: bool = False,
+    ) -> dict[str, Any]:
+        """Chromaprint audio fingerprint via fpcalc. Returns
+        ``{duration, fingerprint}`` (+ ``fingerprint_raw`` int array if
+        ``return_raw=True``)."""
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("audio-fingerprint")
+        if eng is None or not hasattr(eng, "compute"):
+            raise ValueError("audio-fingerprint engine not configured")
+        try:
+            return await eng.compute(
+                raw, name,
+                analyze_seconds=analyze_seconds, return_raw=return_raw,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    # ── MIDI inspect + transform (mido) ────────────────────────────────────
+
+    @mcp.tool()
+    async def midi_inspect(
+        file_path: str | None = None,
+        file_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Parse a Standard MIDI File and return JSON describing tempo,
+        time signature, key signature, and per-track stats. Counterpart
+        to midi_compose."""
+        raw, _name = await _load_input(file_path, file_url)
+        eng = engines.get("midi-compose")
+        if eng is None or not hasattr(eng, "inspect"):
+            raise ValueError("midi-compose engine not configured")
+        try:
+            return await eng.inspect(raw)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def midi_transform(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        transpose_semitones: int = 0,
+        quantize_grid_beats: float | None = None,
+        tempo_bpm: float | None = None,
+        keep_channels: list[int] | None = None,
+        drop_channels: list[int] | None = None,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Transform a MIDI file: transpose / quantize / change tempo /
+        filter channels. Returns base64 MIDI by default."""
+        raw, _name = await _load_input(file_path, file_url)
+        eng = engines.get("midi-compose")
+        if eng is None or not hasattr(eng, "transform"):
+            raise ValueError("midi-compose engine not configured")
+        try:
+            out = await eng.transform(
+                raw,
+                transpose_semitones=transpose_semitones,
+                quantize_grid_beats=quantize_grid_beats,
+                tempo_bpm=tempo_bpm,
+                keep_channels=keep_channels,
+                drop_channels=drop_channels,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(output_url, out, "audio/midi")
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {"url": output_url, "size": len(out)}
+        return {
+            "midi_base64": base64.b64encode(out).decode("ascii"),
+            "size": len(out),
+        }
+
     # ── file staging tools ──────────────────────────────────────────────────
 
     @mcp.tool()

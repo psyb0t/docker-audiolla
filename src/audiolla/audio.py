@@ -29,7 +29,7 @@ _FORMAT_CONTENT_TYPE = {
 }
 
 _FORMAT_FFMPEG_CODEC = {
-    "wav": ["-f", "wav"],
+    "wav": ["-f", "wav", "-c:a", "pcm_s16le"],
     "mp3": ["-f", "mp3", "-b:a", "192k"],
     "flac": ["-f", "flac"],
     "opus": ["-f", "ogg", "-c:a", "libopus", "-b:a", "128k"],

@@ -155,6 +155,393 @@ class LibrosaAnalyzeEngine(EngineBase):
             self._touch()
             return result
 
+    # ── beats ──────────────────────────────────────────────────────────────
+
+    async def beats(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        click_track: bool = False,
+        output_format: str = "wav",
+    ) -> dict[str, Any]:
+        """Full beat tracking — returns BPM + per-beat times. With
+        ``click_track=True``, also returns a base64-encoded audio rendering
+        of the input mixed with a metronome click on each beat."""
+        async with self._lock:
+            result = await asyncio.to_thread(
+                self._beats_sync, raw, filename, click_track, output_format,
+            )
+            self._touch()
+            return result
+
+    def _beats_sync(
+        self,
+        raw: bytes,
+        filename: str,
+        click_track: bool,
+        output_format: str,
+    ) -> dict[str, Any]:
+        import base64
+
+        import librosa
+        import numpy as np
+        import soundfile as sf
+
+        wav_path = to_wav_float32(raw, filename)
+        try:
+            y, sr = librosa.load(wav_path, sr=None, mono=True)
+            tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+            tempo_val = float(np.atleast_1d(tempo)[0])
+            beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+            result: dict[str, Any] = {
+                "tempo_bpm": tempo_val,
+                "beats": [float(t) for t in beat_times],
+                "beat_count": len(beat_times),
+                "duration": float(len(y) / sr),
+            }
+            if not click_track:
+                return result
+
+            # Mix librosa's synthesized click with the original at -6 dB
+            # so the input is still audible underneath. librosa.clicks
+            # returns the click pattern at the same sample rate.
+            clicks = librosa.clicks(
+                frames=beat_frames, sr=sr, length=len(y),
+            )
+            mixed = (y * 0.5) + (clicks * 0.5)
+            np.clip(mixed, -1.0, 1.0, out=mixed)
+
+            out_fd, out_wav = tempfile.mkstemp(prefix="audiolla-click-", suffix=".wav")
+            os.close(out_fd)
+            try:
+                sf.write(out_wav, mixed, sr, subtype="PCM_16")
+                audio_bytes, _ct = encode_audio(out_wav, output_format)
+            finally:
+                try:
+                    os.unlink(out_wav)
+                except OSError:
+                    pass
+            result["click_track_base64"] = base64.b64encode(audio_bytes).decode("ascii")
+            result["output_format"] = output_format
+            return result
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+    # ── onsets ─────────────────────────────────────────────────────────────
+
+    async def onsets(self, raw: bytes, filename: str) -> dict[str, Any]:
+        """Onset (transient) detection — returns time + relative strength
+        for each detected attack. Useful for sample slicing, drum hit
+        detection, and rhythm analysis."""
+        async with self._lock:
+            result = await asyncio.to_thread(self._onsets_sync, raw, filename)
+            self._touch()
+            return result
+
+    def _onsets_sync(self, raw: bytes, filename: str) -> dict[str, Any]:
+        import librosa
+        import numpy as np
+
+        wav_path = to_wav_float32(raw, filename)
+        try:
+            y, sr = librosa.load(wav_path, sr=None, mono=True)
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+            onset_frames = librosa.onset.onset_detect(
+                onset_envelope=onset_env, sr=sr,
+            )
+            onset_times = librosa.frames_to_time(onset_frames, sr=sr)
+            # Strength at each onset frame, normalised to [0, 1] for
+            # easier downstream filtering ("strong onsets only").
+            if len(onset_env) > 0:
+                env_max = float(np.max(onset_env)) or 1.0
+                strengths = (onset_env[onset_frames] / env_max).tolist()
+            else:
+                strengths = []
+            return {
+                "onsets": [
+                    {"time": float(t), "strength": float(s)}
+                    for t, s in zip(onset_times.tolist(), strengths)
+                ],
+                "count": int(len(onset_frames)),
+                "duration": float(len(y) / sr),
+            }
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+    # ── melody (pyin pitch contour) ────────────────────────────────────────
+
+    async def melody(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        fmin: float = 65.0,    # C2 — typical vocal/instrument low
+        fmax: float = 2093.0,  # C7 — typical vocal/instrument high
+        as_midi: bool = False,
+    ) -> dict[str, Any]:
+        """Monophonic pitch tracking via pYIN. Returns a contour of
+        ``(time, hz, voiced)`` triples by default. With ``as_midi=True``,
+        also quantises the voiced segments into MIDI notes (note_on
+        when pitch becomes voiced, note_off when it goes unvoiced or
+        the rounded MIDI note changes) and returns base64 MIDI."""
+        async with self._lock:
+            result = await asyncio.to_thread(
+                self._melody_sync, raw, filename, fmin, fmax, as_midi,
+            )
+            self._touch()
+            return result
+
+    def _melody_sync(
+        self,
+        raw: bytes,
+        filename: str,
+        fmin: float,
+        fmax: float,
+        as_midi: bool,
+    ) -> dict[str, Any]:
+        import base64
+        import io
+
+        import librosa
+        import mido
+        import numpy as np
+
+        if fmin >= fmax:
+            raise AudioConversionError(
+                f"fmin ({fmin}) must be less than fmax ({fmax})"
+            )
+
+        wav_path = to_wav_float32(raw, filename)
+        try:
+            y, sr = librosa.load(wav_path, sr=None, mono=True)
+            f0, voiced_flag, voiced_prob = librosa.pyin(
+                y, fmin=fmin, fmax=fmax, sr=sr,
+            )
+            times = librosa.times_like(f0, sr=sr)
+            # Replace NaNs (unvoiced frames) with None so the JSON is
+            # cleanly serialisable. Typed Any so mypy doesn't infer the
+            # narrowest common value type across the heterogeneous dict.
+            contour: list[dict[str, Any]] = []
+            for t, hz, v in zip(times.tolist(), f0.tolist(), voiced_flag.tolist()):
+                contour.append({
+                    "time": float(t),
+                    "hz": (float(hz) if (hz is not None and not np.isnan(hz)) else None),
+                    "voiced": bool(v),
+                })
+
+            result: dict[str, Any] = {
+                "fmin": fmin,
+                "fmax": fmax,
+                "frame_seconds": float(times[1] - times[0]) if len(times) > 1 else None,
+                "contour": contour,
+                "duration": float(len(y) / sr),
+            }
+
+            if not as_midi:
+                return result
+
+            # Quantise to MIDI notes — emit a note for each contiguous
+            # voiced run with the same rounded MIDI pitch.
+            midi_notes: list[dict[str, Any]] = []
+            cur_pitch: int | None = None
+            cur_start: float = 0.0
+            for entry in contour:
+                entry_time = float(entry["time"])  # always finite; only hz can be None
+                entry_hz = entry["hz"]
+                if not entry["voiced"] or entry_hz is None:
+                    if cur_pitch is not None:
+                        midi_notes.append({
+                            "pitch": cur_pitch,
+                            "start_sec": cur_start,
+                            "end_sec": entry_time,
+                        })
+                        cur_pitch = None
+                    continue
+                p = int(round(librosa.hz_to_midi(entry_hz)))
+                if cur_pitch is None:
+                    cur_pitch = p
+                    cur_start = entry_time
+                elif p != cur_pitch:
+                    midi_notes.append({
+                        "pitch": cur_pitch,
+                        "start_sec": cur_start,
+                        "end_sec": entry_time,
+                    })
+                    cur_pitch = p
+                    cur_start = entry_time
+            # Flush trailing note.
+            if cur_pitch is not None and len(contour) > 0:
+                midi_notes.append({
+                    "pitch": cur_pitch,
+                    "start_sec": cur_start,
+                    "end_sec": contour[-1]["time"],
+                })
+            # Filter out sub-30 ms blips — usually pyin noise.
+            midi_notes = [n for n in midi_notes if n["end_sec"] - n["start_sec"] >= 0.03]
+
+            # Serialise to a 1-track MIDI at 120 BPM (caller can
+            # re-tempo via /v1/midi/transform).
+            tpq = 480
+            bpm = 120.0
+            seconds_per_tick = 60.0 / bpm / tpq
+            mid = mido.MidiFile(type=1, ticks_per_beat=tpq)
+            tempo_track = mido.MidiTrack()
+            tempo_track.append(mido.MetaMessage(
+                "set_tempo", tempo=mido.bpm2tempo(bpm), time=0,
+            ))
+            mid.tracks.append(tempo_track)
+            mel_track = mido.MidiTrack()
+            mel_track.append(mido.Message("program_change", channel=0, program=0, time=0))
+            events: list[tuple[int, "mido.Message"]] = []
+            for n in midi_notes:
+                on_tick = int(round(n["start_sec"] / seconds_per_tick))
+                off_tick = int(round(n["end_sec"] / seconds_per_tick))
+                if off_tick <= on_tick:
+                    off_tick = on_tick + 1
+                events.append((on_tick, mido.Message(
+                    "note_on", channel=0, note=n["pitch"], velocity=100, time=0,
+                )))
+                events.append((off_tick, mido.Message(
+                    "note_off", channel=0, note=n["pitch"], velocity=0, time=0,
+                )))
+            events.sort(key=lambda x: (x[0], 0 if x[1].type == "note_off" else 1))
+            prev = 0
+            for tick, msg in events:
+                msg.time = tick - prev
+                mel_track.append(msg)
+                prev = tick
+            mid.tracks.append(mel_track)
+
+            buf = io.BytesIO()
+            mid.save(file=buf)
+            midi_bytes = buf.getvalue()
+            result["midi_base64"] = base64.b64encode(midi_bytes).decode("ascii")
+            result["midi_size"] = len(midi_bytes)
+            result["midi_notes"] = midi_notes
+            return result
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+    # ── segments (music structure) ─────────────────────────────────────────
+
+    async def segments(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        num_segments: int = 6,
+    ) -> dict[str, Any]:
+        """Music structure segmentation via spectral clustering of the
+        recurrence matrix. Returns ``num_segments`` non-overlapping ranges
+        labelled A/B/C/... by cluster, so structurally similar regions
+        share a label (good for spotting verse/chorus repetition)."""
+        async with self._lock:
+            result = await asyncio.to_thread(
+                self._segments_sync, raw, filename, num_segments,
+            )
+            self._touch()
+            return result
+
+    def _segments_sync(
+        self,
+        raw: bytes,
+        filename: str,
+        num_segments: int,
+    ) -> dict[str, Any]:
+        import librosa
+        import numpy as np
+
+        if num_segments < 2 or num_segments > 32:
+            raise AudioConversionError(
+                f"num_segments must be in [2, 32], got {num_segments}"
+            )
+
+        wav_path = to_wav_float32(raw, filename)
+        try:
+            y, sr = librosa.load(wav_path, sr=None, mono=True)
+            # Mel spectrogram + log scaling, beat-synchronous summary —
+            # this matches the librosa "Laplacian segmentation" tutorial.
+            BINS_PER_OCTAVE = 12 * 3
+            N_OCTAVES = 7
+            cqt = np.abs(librosa.cqt(
+                y=y, sr=sr,
+                bins_per_octave=BINS_PER_OCTAVE,
+                n_bins=N_OCTAVES * BINS_PER_OCTAVE,
+            ))
+            C = librosa.amplitude_to_db(cqt, ref=np.max)
+            tempo, beats = librosa.beat.beat_track(y=y, sr=sr, trim=False)
+            # Need enough beats to build a meaningful recurrence matrix —
+            # recurrence_matrix needs at least width+1 frames after sync.
+            min_beats = max(num_segments, 6)
+            if len(beats) < min_beats:
+                # Short or featureless input — return one undifferentiated
+                # "A" segment spanning the whole file rather than crash.
+                return {
+                    "segments": [{
+                        "start_sec": 0.0,
+                        "end_sec": float(len(y) / sr),
+                        "label": "A",
+                        "cluster_id": 0,
+                    }],
+                    "tempo_bpm": float(np.atleast_1d(tempo)[0]),
+                    "duration": float(len(y) / sr),
+                    "note": (
+                        f"input too short for {num_segments}-segment "
+                        f"clustering (only {len(beats)} beats detected); "
+                        "returning a single span"
+                    ),
+                }
+            Csync = librosa.util.sync(C, beats, aggregate=np.median)
+            R = librosa.segment.recurrence_matrix(
+                Csync, width=3, mode="affinity", sym=True,
+            )
+            seg_ids = librosa.segment.agglomerative(R, num_segments)
+            beat_times = librosa.frames_to_time(beats, sr=sr)
+            # Group consecutive beats with the same cluster id into ranges.
+            ranges: list[dict[str, Any]] = []
+            if len(seg_ids) == 0:
+                return {"segments": [], "duration": float(len(y) / sr)}
+            cur_label = int(seg_ids[0])
+            cur_start = float(beat_times[0]) if len(beat_times) > 0 else 0.0
+            for i in range(1, len(seg_ids)):
+                if int(seg_ids[i]) != cur_label:
+                    end = float(beat_times[i])
+                    ranges.append({
+                        "start_sec": cur_start,
+                        "end_sec": end,
+                        "label": chr(ord("A") + cur_label % 26),
+                        "cluster_id": cur_label,
+                    })
+                    cur_label = int(seg_ids[i])
+                    cur_start = end
+            # Trailing range to end of audio.
+            ranges.append({
+                "start_sec": cur_start,
+                "end_sec": float(len(y) / sr),
+                "label": chr(ord("A") + cur_label % 26),
+                "cluster_id": cur_label,
+            })
+            return {
+                "segments": ranges,
+                "tempo_bpm": float(np.atleast_1d(tempo)[0]),
+                "duration": float(len(y) / sr),
+            }
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
     def _normalize_sync(
         self,
         raw: bytes,
