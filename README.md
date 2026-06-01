@@ -7,7 +7,7 @@
 
 > POST a track. Get stems, a master, analysis, or a processed file back. No cloud, no accounts, runs wherever Docker runs.
 
-HTTP API + MCP server for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain — full catalog, your order and params. Extract BPM and key with librosa. Chain sox transforms. Compose a song spec in JSON and render it to audio via fluidsynth + a General MIDI SoundFont. All from curl, any HTTP client, or an LLM agent over MCP.
+HTTP API for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain — full catalog, your order and params. Extract BPM and key with librosa. Chain sox transforms. Compose a song from a JSON spec and render it through fluidsynth + a General MIDI SoundFont. Use it from curl, a shell script, a Makefile, a Python notebook, a DAW pipeline, or — if that's your thing — an LLM agent over the MCP server at `/v1/mcp`. It's HTTP and JSON. The wire format doesn't care who's typing.
 
 Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. OpenAPI spec included.
 
@@ -56,7 +56,7 @@ docker run --rm -it --gpus all \
   psyb0t/audiolla:latest-cuda
 ```
 
-Demucs weights download on first use and cache in `/data/torch_cache/` — same `-v` mount next time and they're already there.
+Demucs weights prefetch at container startup (for whichever variants are enabled) and cache in `/data/torch_cache/`. First boot downloads them; same `-v` mount next time and they're already there. Other engines (matchering, pedalboard, librosa, sox, fx, midi) have no weights — they're ready as soon as `/healthz` is green.
 
 ---
 
@@ -172,7 +172,7 @@ VST3 / AudioUnit / external plugins are NOT in the allowlist — they load arbit
 
 ### Compose MIDI
 
-LLMs and agents build songs by POSTing a JSON spec; the server returns Standard MIDI File bytes. No AI runs server-side — the agent does the writing.
+POST a JSON song spec, get Standard MIDI File bytes back. Write the spec by hand, generate it from a tracker / DAW / sequencer, script it out of a Python notebook, or have an LLM produce it — audiolla doesn't care. No AI runs server-side; the spec is the music.
 
 ```bash
 # 4-beat C major arpeggio at 120 BPM, piano + kick drum
@@ -225,7 +225,7 @@ curl -X POST http://localhost:8000/v1/midi/render \
 
 ### Generate music from a spec
 
-Compose + render in one call — your agent writes a spec, gets WAV back.
+Compose + render in one call — spec in, WAV out.
 
 ```bash
 curl -X POST 'http://localhost:8000/v1/midi/generate?output_format=wav' \
@@ -316,18 +316,18 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | Slug | What it does |
 |------|--------------|
 | `htdemucs` | 4-stem separation: drums, bass, other, vocals. Best speed/quality tradeoff. |
-| `htdemucs_ft` | Same 4 stems, fine-tuned weights. Higher quality, ~4x slower. |
+| `htdemucs_ft` | Same 4 stems, fine-tuned weights. Higher quality, ~4x slower. **CUDA-only** — rejected with 400 on the CPU image. |
 | `htdemucs_6s` | 6 stems — also splits guitar and piano. Experimental. |
 | `mdx_extra` | Strong on vocal isolation. MUSDB-trained, different architecture. |
 | `matchering` | Reference-based mastering: EQ + loudness matched to a reference track. |
-| `pedalboard-chain` | Fixed DSP chain via pedalboard: compression, EQ, limiting. |
+| `pedalboard-chain` | Preset mastering chains via pedalboard — `transparent` (light) or `loud` (4:1 squash). Backs `/v1/audio/master` with `mode=chain`. For arbitrary chains use `fx-chain` / `/v1/audio/fx`. |
 | `librosa-analyze` | BPM, key, LUFS, duration, spectral features via librosa. |
 | `sox-transform` | Gain, EQ, compression, reverb, pitch shift, tempo via pysox. |
 | `fx-chain` | Arbitrary pedalboard effects chain — full catalog, your order and params. Backs `/v1/audio/fx`. |
 | `midi-compose` | JSON spec → MIDI bytes. Backs `/v1/midi/compose` and `/v1/midi/generate`. |
 | `midi-render` | MIDI → audio via fluidsynth + SoundFont. Backs `/v1/midi/render` and `/v1/midi/generate`. |
 
-Demucs variants all pull from the same `facebook/demucs` checkpoint. Weights get prefetched into `/data/torch_cache/` at startup so your first separation request doesn't sit there downloading.
+Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
 `AUDIOLLA_ENABLED_ENGINES` — restrict which engines are available. `AUDIOLLA_PRELOAD` — load specific engines into memory at startup instead of waiting for the first request.
 
@@ -384,7 +384,7 @@ bytes.
 
 ## MCP
 
-audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp` using the streamable HTTP transport. Point any MCP client there and an LLM agent can drive the full audio processing surface — separate stems, master tracks, analyze, transform, normalize — without touching the REST API directly.
+audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp` using the streamable HTTP transport. Any MCP client gets the full audio processing surface — separate stems, master tracks, analyze, transform, normalize, compose / render / generate MIDI — over JSON-RPC. Convenient if you're driving things from an LLM agent, but the underlying REST API is doing the work either way.
 
 Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The intended workflow is: `put_file` to stage a file, call whatever tools you need, `get_file` to pull results back.
 
@@ -395,11 +395,15 @@ Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). Th
 | Tool | What it does |
 |------|--------------|
 | `list_engines` | List configured engines and whether they're loaded |
-| `separate` | Demucs stem separation on a staged file — returns base64 stems |
+| `separate` | Demucs stem separation — base64 stems back, or per-stem PUT via `output_urls` |
 | `master` | Reference mastering (matchering) or preset chain (pedalboard) |
 | `analyze` | BPM, key, LUFS, spectral features via librosa |
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
 | `loudness` | Measure LUFS or normalize to a target |
+| `fx` | Generic pedalboard effects chain — full catalog, your order and params |
+| `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
+| `midi_render` | MIDI → audio via fluidsynth + SoundFont |
+| `midi_generate` | One-shot compose + render — spec in, audio out |
 | `list_files` | List staged files |
 | `put_file` | Upload a file (base64) to the staging area |
 | `get_file` | Read a staged file back (base64) |
