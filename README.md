@@ -499,7 +499,7 @@ bytes.
 
 | Method | Path | Default returns |
 |--------|------|-----------------|
-| `POST` | `/v1/audio/separate` | ZIP (multiple stems) or audio bytes (single stem) |
+| `POST` | `/v1/audio/separate` | audio bytes for one stem; ZIP when requesting multiple (or all) stems |
 | `POST` | `/v1/audio/master` | audio bytes |
 | `POST` | `/v1/audio/analyze` | JSON — BPM, key, LUFS, spectral features |
 | `POST` | `/v1/audio/beats` | JSON — BPM + beat timestamps; optional click-track WAV |
@@ -509,7 +509,7 @@ bytes.
 | `POST` | `/v1/audio/silence` | JSON — silent/non-silent ranges; optional trimmed audio |
 | `POST` | `/v1/audio/spectrogram` | PNG bytes |
 | `POST` | `/v1/audio/waveform` | PNG bytes |
-| `POST` | `/v1/audio/visualize` | MP4 or WebM bytes — 8 animation modes |
+| `POST` | `/v1/audio/visualize` | MP4 bytes (default `container=mp4`); pass `container=webm` for WebM — 8 animation modes |
 | `POST` | `/v1/audio/fingerprint` | JSON — Chromaprint fingerprint string |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
@@ -540,9 +540,9 @@ bytes.
 |--------|------|-|
 | `GET` | `/healthz` | liveness — always unauthenticated |
 | `GET` | `/v1/engines` | list configured engines |
-| `GET` | `/api/ps` | list engines in memory right now |
-| `DELETE` | `/api/ps/{engine}` | evict one engine |
-| `POST` | `/unload` | evict everything |
+| `GET` | `/v1/ps` | list engines in memory right now |
+| `DELETE` | `/v1/ps/{engine}` | evict one engine |
+| `POST` | `/v1/unload` | evict everything |
 
 ---
 

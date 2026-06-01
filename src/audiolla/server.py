@@ -3,9 +3,9 @@
 Endpoints:
   GET    /healthz                    unauthenticated liveness
   GET    /v1/engines                 list configured engines
-  GET    /api/ps                     list currently loaded engines
-  DELETE /api/ps/{engine}            evict one engine from memory
-  POST   /unload                     evict all loaded engines
+  GET    /v1/ps                      list currently loaded engines
+  DELETE /v1/ps/{engine}             evict one engine from memory
+  POST   /v1/unload                  evict all loaded engines
   POST   /v1/audio/separate          Demucs stem separation
   POST   /v1/audio/master            matchering / pedalboard-chain mastering
   POST   /v1/audio/analyze           librosa MIR analysis
@@ -219,7 +219,7 @@ def list_engines() -> dict[str, Any]:
     return {"object": "list", "data": data}
 
 
-@app.get("/api/ps")
+@app.get("/v1/ps")
 def list_loaded() -> dict[str, Any]:
     return {
         "engines": [
@@ -235,7 +235,7 @@ def list_loaded() -> dict[str, Any]:
     }
 
 
-@app.delete("/api/ps/{engine:path}")
+@app.delete("/v1/ps/{engine:path}")
 async def unload_one(engine: str) -> JSONResponse:
     decoded = unquote(engine)
     eng = ENGINES.get(decoded)
@@ -247,7 +247,7 @@ async def unload_one(engine: str) -> JSONResponse:
     return JSONResponse({"unloaded": decoded}, status_code=200)
 
 
-@app.post("/unload")
+@app.post("/v1/unload")
 async def unload_all() -> dict[str, Any]:
     unloaded = []
     for slug, engine in ENGINES.items():
