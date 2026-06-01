@@ -16,6 +16,7 @@ from .midi_render import MidiRenderEngine
 from .pedalboard_chain import PedalboardChainEngine
 from .silence_detect import SilenceDetectEngine
 from .sox_transform import SoxTransformEngine
+from .uvr_separator import UVRSeparatorEngine
 
 
 def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
@@ -60,12 +61,16 @@ def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
         if executor == "audio_fingerprint":
             out[slug] = AudioFingerprintEngine(slug=slug, entry=entry)
             continue
+        if executor == "uvr_separator":
+            out[slug] = UVRSeparatorEngine(slug=slug, entry=entry)
+            continue
         raise ValueError(f"unknown executor {executor!r} for engine {slug!r}")
     return out
 
 
 # Capability detection via duck-typing — each engine declares its methods;
 # the route validates incoming requests match the engine's capabilities.
+
 
 def is_separation_engine(engine: Any) -> bool:
     return hasattr(engine, "separate")
@@ -133,3 +138,7 @@ def is_midi_inspect_engine(engine: Any) -> bool:
 
 def is_midi_transform_engine(engine: Any) -> bool:
     return hasattr(engine, "transform") and hasattr(engine, "compose")
+
+
+def is_uvr_restore_engine(engine: Any) -> bool:
+    return hasattr(engine, "restore")

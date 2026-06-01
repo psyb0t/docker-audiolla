@@ -47,6 +47,43 @@
     "audio-fingerprint": {
       "executor": "audio_fingerprint",
       "description": "Chromaprint audio fingerprint via fpcalc — recording identity hash for dedup / lookup"
+    },
+    "uvr-dereverb": {
+      "executor": "uvr_separator",
+      "model": "deverb_bs_roformer_8_384dim_10depth.ckpt",
+      "primary_stem": "No Reverb",
+      "description": "De-reverb via BS-Roformer — removes room reverb from recordings"
+    },
+    "uvr-deecho": {
+      "executor": "uvr_separator",
+      "model": "UVR-De-Echo-Normal.pth",
+      "primary_stem": "No Echo",
+      "description": "De-echo via VR Architecture — removes echo"
+    },
+    "uvr-deecho-aggressive": {
+      "executor": "uvr_separator",
+      "model": "UVR-De-Echo-Aggressive.pth",
+      "primary_stem": "No Echo",
+      "description": "Aggressive de-echo via VR Architecture"
+    },
+    "uvr-denoise": {
+      "executor": "uvr_separator",
+      "model": "denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt",
+      "primary_stem": "No Noise",
+      "description": "AI de-noise via MelBand Roformer (SDR 28) — removes broadband background noise"
+    },
+    "uvr-karaoke": {
+      "executor": "uvr_separator",
+      "model": "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt",
+      "primary_stem": "Instrumental",
+      "stems": ["Vocals", "Instrumental"],
+      "description": "Karaoke — remove lead vocals, keep backing track (MelBand Roformer)"
+    },
+    "uvr-vocal-bsr": {
+      "executor": "uvr_separator",
+      "model": "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+      "stems": ["Vocals", "Instrumental"],
+      "description": "High-quality vocal/instrumental via BS-Roformer (SDR 13) — better quality than Demucs on many sources"
     }
   }
 }

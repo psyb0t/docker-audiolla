@@ -78,9 +78,7 @@ ENGINES_FILE: Path = Path(
     os.environ.get("AUDIOLLA_ENGINES_FILE", "/app/engines.json")
 ).resolve()
 
-DATA_DIR: Path = Path(
-    os.environ.get("AUDIOLLA_DATA_DIR", "/data")
-).resolve()
+DATA_DIR: Path = Path(os.environ.get("AUDIOLLA_DATA_DIR", "/data")).resolve()
 
 # Flat per-engine snapshot directory: engines with weights get
 # DATA_DIR / models / <slug> / ... populated by entrypoint.sh.
@@ -88,6 +86,14 @@ MODELS_DIR: Path = DATA_DIR / "models"
 
 # Server-side file staging area for the /v1/files API.
 FILES_DIR: Path = DATA_DIR / "files"
+
+# Cache directory for UVR (audio-separator) model files.
+# Overridable via AUDIOLLA_UVR_MODELS_DIR.
+UVR_MODELS_DIR: Path = (
+    Path(os.environ.get("AUDIOLLA_UVR_MODELS_DIR", "")).resolve()
+    if os.environ.get("AUDIOLLA_UVR_MODELS_DIR")
+    else DATA_DIR / "uvr_models"
+)
 
 ENGINE_IDLE_TIMEOUT_SECONDS: float = _duration_env("AUDIOLLA_ENGINE_TTL", 600.0)
 SWEEPER_INTERVAL_SECONDS: float = _duration_env("AUDIOLLA_SWEEPER_INTERVAL", 60.0)
@@ -105,6 +111,7 @@ ENABLED_ENGINES: list[str] = _list_env("AUDIOLLA_ENABLED_ENGINES")
 # passing file_url / output_url gets a 400. Switch to allowlist (preferred)
 # or denylist (caveat emptor — leaky by design) to opt in.
 
+
 def _bool_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name, "").strip().lower()
     if raw == "":
@@ -113,12 +120,13 @@ def _bool_env(name: str, default: bool = False) -> bool:
         return True
     if raw in ("0", "false", "no", "off"):
         return False
-    raise ValueError(f"{name}={raw!r} must be a boolean (1/0, true/false, yes/no, on/off)")
+    raise ValueError(
+        f"{name}={raw!r} must be a boolean (1/0, true/false, yes/no, on/off)"
+    )
 
 
 FETCH_MODE: str = (
-    os.environ.get("AUDIOLLA_FETCH_MODE", "disabled").strip().lower()
-    or "disabled"
+    os.environ.get("AUDIOLLA_FETCH_MODE", "disabled").strip().lower() or "disabled"
 )
 if FETCH_MODE not in ("disabled", "allowlist", "denylist"):
     raise ValueError(
@@ -154,19 +162,22 @@ FETCH_MAX_REDIRECTS: int = _int_env("AUDIOLLA_FETCH_MAX_REDIRECTS", 5)
 # fluid-soundfont-gm Debian package.
 SOUNDFONT_PATH: str = os.environ.get("AUDIOLLA_SOUNDFONT", "").strip()
 
-_VALID_EXECUTORS = frozenset({
-    "demucs",
-    "matchering",
-    "pedalboard_chain",
-    "librosa_analyze",
-    "sox_transform",
-    "fx_chain",
-    "midi_compose",
-    "midi_render",
-    "silence_detect",
-    "ffmpeg_render",
-    "audio_fingerprint",
-})
+_VALID_EXECUTORS = frozenset(
+    {
+        "demucs",
+        "matchering",
+        "pedalboard_chain",
+        "librosa_analyze",
+        "sox_transform",
+        "fx_chain",
+        "midi_compose",
+        "midi_render",
+        "silence_detect",
+        "ffmpeg_render",
+        "audio_fingerprint",
+        "uvr_separator",
+    }
+)
 
 
 def load_registry() -> dict[str, dict]:
@@ -176,7 +187,9 @@ def load_registry() -> dict[str, dict]:
     with ENGINES_FILE.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
     if not isinstance(raw, dict) or "engines" not in raw:
-        raise ValueError(f"{ENGINES_FILE}: expected top-level object with 'engines' key")
+        raise ValueError(
+            f"{ENGINES_FILE}: expected top-level object with 'engines' key"
+        )
     engines = raw["engines"]
     if not isinstance(engines, dict) or not engines:
         raise ValueError(f"{ENGINES_FILE}: 'engines' must be a non-empty object")

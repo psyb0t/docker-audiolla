@@ -52,7 +52,7 @@ asyncio_mode = "auto"
 # automatically — the whole point is to catch newly-published wheels in the
 # supply-chain attack window (hours-to-days post-release). Manual edits to
 # this line are fine but go through the make targets for normal mutations.
-exclude-newer = "2026-05-31T00:00:00Z"
+exclude-newer = "2026-06-01T00:00:00Z"
 
 [tool.mypy]
 python_version = "3.12"

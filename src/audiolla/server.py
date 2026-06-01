@@ -11,6 +11,9 @@ Endpoints:
   POST   /v1/audio/analyze           librosa MIR analysis
   POST   /v1/audio/transform         pysox DSP transform chain
   POST   /v1/audio/loudness          pyloudnorm LUFS measurement + normalization
+  POST   /v1/audio/dereverb          remove room reverb (UVR BS-Roformer)
+  POST   /v1/audio/deecho            remove echo (UVR VR Architecture)
+  POST   /v1/audio/denoise           remove background noise (UVR MelBand Roformer)
   GET    /v1/files                   list staged files
   PUT    /v1/files/{path}            stage a file
   GET    /v1/files/{path}            retrieve a staged file
@@ -40,27 +43,41 @@ from urllib.parse import unquote
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from . import config, files as files_mod
+from . import config
+from . import files as files_mod
 from .audio import (
-    AudioConversionError,
     SUPPORTED_OUTPUT_FORMATS,
+    AudioConversionError,
     content_type_for,
     multi_stream_zip,
 )
 from .auth import BearerAuthMiddleware
-from .engines import build_engines, is_separation_engine, is_mastering_engine
-from .engines import is_analysis_engine, is_transform_engine, is_loudness_engine
-from .engines import is_fx_engine, is_midi_compose_engine, is_midi_render_engine
-from .engines import is_beats_engine, is_onsets_engine, is_melody_engine
-from .engines import is_segments_engine, is_silence_engine, is_ffmpeg_render_engine
-from .engines import is_fingerprint_engine, is_midi_inspect_engine
-from .engines import is_midi_transform_engine
+from .engines import (
+    build_engines,
+    is_analysis_engine,
+    is_beats_engine,
+    is_ffmpeg_render_engine,
+    is_fingerprint_engine,
+    is_fx_engine,
+    is_loudness_engine,
+    is_mastering_engine,
+    is_melody_engine,
+    is_midi_compose_engine,
+    is_midi_inspect_engine,
+    is_midi_render_engine,
+    is_midi_transform_engine,
+    is_onsets_engine,
+    is_segments_engine,
+    is_separation_engine,
+    is_silence_engine,
+    is_transform_engine,
+    is_uvr_restore_engine,
+)
 from .engines.ffmpeg_render import visualize_modes
 from .input_resolver import resolve_input
 from .mcp_server import build_mcp_server
 from .output_writer import write_output
 from .schema import AnalyzeResult, HealthResponse, LoudnessResult
-
 
 log = logging.getLogger("audiolla.server")
 
@@ -70,6 +87,7 @@ def _resolve_device(req: str) -> str:
         return req
     try:
         import torch
+
         return "cuda" if torch.cuda.is_available() else "cpu"
     except ImportError:
         return "cpu"
@@ -98,7 +116,9 @@ async def _idle_sweeper() -> None:
                     continue
                 log.info(
                     "idle sweeper: unloading %s (idle %.1fs >= %.1fs)",
-                    slug, last, ttl,
+                    slug,
+                    last,
+                    ttl,
                 )
                 try:
                     # Pass TTL so unload() re-checks the idle clock under
@@ -283,9 +303,7 @@ def _validate_target_lufs(target_lufs: float | None) -> None:
     if not (-70.0 <= target_lufs <= -0.1):
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"target_lufs must be in [-70.0, -0.1], got {target_lufs}"
-            ),
+            detail=(f"target_lufs must be in [-70.0, -0.1], got {target_lufs}"),
         )
 
 
@@ -305,14 +323,15 @@ def _validate_engine_supports_device(slug: str) -> None:
 
 async def _evict_siblings(current_slug: str) -> None:
     siblings = [
-        (slug, e) for slug, e in ENGINES.items()
-        if slug != current_slug and e.loaded()
+        (slug, e) for slug, e in ENGINES.items() if slug != current_slug and e.loaded()
     ]
     if not siblings:
         return
     log.info(
         "evicting %d sibling engine(s) before loading %s: %s",
-        len(siblings), current_slug, [slug for slug, _ in siblings],
+        len(siblings),
+        current_slug,
+        [slug for slug, _ in siblings],
     )
     await asyncio.gather(*(e.unload() for _, e in siblings), return_exceptions=True)
 
@@ -328,6 +347,11 @@ async def separate(
     stems: list[str] = Form(default=[]),
     output_format: str = Form(default="wav"),
 ) -> Response:
+    """Stem separation. Supports Demucs engines (htdemucs, htdemucs_ft,
+    htdemucs_6s, mdx_extra) and UVR separation engines (uvr-vocal-bsr,
+    uvr-karaoke). The ``stems`` parameter filters which stems to return;
+    omit to get all available stems for the engine.
+    """
     _validate_output_format(output_format)
 
     eng = ENGINES.get(engine)
@@ -344,7 +368,9 @@ async def separate(
     _validate_engine_supports_device(engine)
 
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
 
     entry = REGISTRY[engine]
@@ -418,13 +444,13 @@ async def master(
             status_code=400, detail="mode must be 'reference' or 'chain'"
         )
     if mode == "chain" and not preset:
-        raise HTTPException(
-            status_code=400, detail="mode=chain requires a preset name"
-        )
+        raise HTTPException(status_code=400, detail="mode=chain requires a preset name")
     _validate_target_lufs(target_lufs)
 
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
 
     if mode == "reference":
@@ -447,8 +473,12 @@ async def master(
         await _evict_siblings(engine_slug)
         try:
             audio_bytes = await eng.master_reference(
-                raw, filename, ref_raw, ref_filename,
-                target_lufs=target_lufs, output_format=output_format,
+                raw,
+                filename,
+                ref_raw,
+                ref_filename,
+                target_lufs=target_lufs,
+                output_format=output_format,
             )
         except AudioConversionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -461,7 +491,8 @@ async def master(
             )
         if not is_mastering_engine(eng):
             raise HTTPException(
-                status_code=400, detail="pedalboard-chain engine does not support mastering"
+                status_code=400,
+                detail="pedalboard-chain engine does not support mastering",
             )
         available_presets = REGISTRY[engine_slug].get("presets", [])
         if preset not in available_presets:
@@ -472,8 +503,11 @@ async def master(
         await _evict_siblings(engine_slug)
         try:
             audio_bytes = await eng.master_chain(
-                raw, filename,
-                preset=preset, target_lufs=target_lufs, output_format=output_format,
+                raw,
+                filename,
+                preset=preset,
+                target_lufs=target_lufs,
+                output_format=output_format,
             )
         except AudioConversionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -499,9 +533,9 @@ async def analyze(
     file_url: str | None = Form(default=None),
     features: list[str] = Form(default=[]),
 ) -> AnalyzeResult:
-    _VALID_FEATURES = frozenset({
-        "bpm", "key", "loudness", "duration", "spectral_centroid", "rms", "zcr"
-    })
+    _VALID_FEATURES = frozenset(
+        {"bpm", "key", "loudness", "duration", "spectral_centroid", "rms", "zcr"}
+    )
     if features:
         invalid = [f for f in features if f not in _VALID_FEATURES]
         if invalid:
@@ -523,7 +557,9 @@ async def analyze(
         )
 
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
 
     try:
@@ -556,10 +592,20 @@ async def transform(
             detail=f"invalid operations JSON: {exc}",
         ) from exc
 
-    _VALID_OPS = frozenset({
-        "gain", "equalizer", "compand", "reverb", "pitch",
-        "tempo", "rate", "channels", "trim", "pad",
-    })
+    _VALID_OPS = frozenset(
+        {
+            "gain",
+            "equalizer",
+            "compand",
+            "reverb",
+            "pitch",
+            "tempo",
+            "rate",
+            "channels",
+            "trim",
+            "pad",
+        }
+    )
     for op_item in ops:
         if not isinstance(op_item, dict) or "op" not in op_item:
             raise HTTPException(
@@ -584,7 +630,9 @@ async def transform(
         )
 
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
 
     try:
@@ -633,7 +681,9 @@ async def loudness(
         )
 
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
 
     if target_lufs is None:
@@ -642,9 +692,7 @@ async def loudness(
             lufs = await eng.measure_lufs(raw, filename)
         except AudioConversionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return LoudnessResult(
-            loudness_lufs=lufs, target_lufs=None, normalized=False
-        )
+        return LoudnessResult(loudness_lufs=lufs, target_lufs=None, normalized=False)
 
     try:
         audio_bytes, lufs = await eng.normalize_lufs(
@@ -692,27 +740,35 @@ async def fx(
             raise ValueError("effects must be a JSON array")
     except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"invalid effects JSON: {exc}",
+            status_code=400,
+            detail=f"invalid effects JSON: {exc}",
         ) from exc
 
     engine_slug = "fx-chain"
     eng = ENGINES.get(engine_slug)
     if eng is None:
         raise HTTPException(
-            status_code=404, detail="fx-chain engine not configured",
+            status_code=404,
+            detail="fx-chain engine not configured",
         )
     if not is_fx_engine(eng):
         raise HTTPException(
-            status_code=400, detail="fx-chain engine does not support fx",
+            status_code=400,
+            detail="fx-chain engine does not support fx",
         )
 
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
 
     try:
         audio_bytes = await eng.fx(
-            raw, filename, effects=chain, output_format=output_format,
+            raw,
+            filename,
+            effects=chain,
+            output_format=output_format,
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -756,7 +812,8 @@ async def midi_compose(
             spec = await request.json()
         except (ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(
-                status_code=400, detail=f"invalid JSON body: {exc}",
+                status_code=400,
+                detail=f"invalid JSON body: {exc}",
             ) from exc
         # Query params override Form defaults when the body is JSON.
         output_path = request.query_params.get("output_path") or output_path
@@ -774,10 +831,11 @@ async def midi_compose(
             spec = json.loads(str(spec_raw))
         except (ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(
-                status_code=400, detail=f"invalid `spec` JSON: {exc}",
+                status_code=400,
+                detail=f"invalid `spec` JSON: {exc}",
             ) from exc
-        output_path = (form.get("output_path") or output_path or None)  # type: ignore[assignment]
-        output_url = (form.get("output_url") or output_url or None)  # type: ignore[assignment]
+        output_path = form.get("output_path") or output_path or None  # type: ignore[assignment]
+        output_url = form.get("output_url") or output_url or None  # type: ignore[assignment]
         if output_path is not None:
             output_path = str(output_path) or None
         if output_url is not None:
@@ -787,11 +845,13 @@ async def midi_compose(
     eng = ENGINES.get(engine_slug)
     if eng is None:
         raise HTTPException(
-            status_code=404, detail="midi-compose engine not configured",
+            status_code=404,
+            detail="midi-compose engine not configured",
         )
     if not is_midi_compose_engine(eng):
         raise HTTPException(
-            status_code=400, detail="midi-compose engine missing compose()",
+            status_code=400,
+            detail="midi-compose engine missing compose()",
         )
 
     try:
@@ -833,20 +893,25 @@ async def midi_render(
     eng = ENGINES.get(engine_slug)
     if eng is None:
         raise HTTPException(
-            status_code=404, detail="midi-render engine not configured",
+            status_code=404,
+            detail="midi-render engine not configured",
         )
     if not is_midi_render_engine(eng):
         raise HTTPException(
-            status_code=400, detail="midi-render engine missing render()",
+            status_code=400,
+            detail="midi-render engine missing render()",
         )
 
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
 
     try:
         audio_bytes = await eng.render(
-            raw, filename,
+            raw,
+            filename,
             soundfont_path=soundfont_path,
             output_format=output_format,
             gain=gain,
@@ -897,7 +962,8 @@ async def midi_generate(
             spec = await request.json()
         except (ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(
-                status_code=400, detail=f"invalid JSON body: {exc}",
+                status_code=400,
+                detail=f"invalid JSON body: {exc}",
             ) from exc
         # Query-param overrides for the side knobs.
         q = request.query_params
@@ -911,7 +977,8 @@ async def midi_generate(
                 gain = float(q["gain"])
             except ValueError:
                 raise HTTPException(
-                    status_code=400, detail=f"gain must be a number: {q['gain']!r}",
+                    status_code=400,
+                    detail=f"gain must be a number: {q['gain']!r}",
                 )
         if q.get("samplerate"):
             try:
@@ -936,7 +1003,8 @@ async def midi_generate(
             spec = json.loads(str(spec_raw))
         except (ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(
-                status_code=400, detail=f"invalid `spec` JSON: {exc}",
+                status_code=400,
+                detail=f"invalid `spec` JSON: {exc}",
             ) from exc
 
     compose_eng = ENGINES.get("midi-compose")
@@ -950,7 +1018,8 @@ async def midi_generate(
     try:
         midi_bytes = await compose_eng.compose(spec)
         audio_bytes = await render_eng.render(
-            midi_bytes, "composed.mid",
+            midi_bytes,
+            "composed.mid",
             soundfont_path=soundfont_path,
             output_format=output_format,
             gain=gain,
@@ -994,14 +1063,18 @@ async def beats(
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_beats_engine(eng):
         raise HTTPException(
-            status_code=404, detail="librosa-analyze engine not configured",
+            status_code=404,
+            detail="librosa-analyze engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         result = await eng.beats(
-            raw, filename,
+            raw,
+            filename,
             click_track=click_track,
             output_format=output_format,
         )
@@ -1013,6 +1086,7 @@ async def beats(
         # engine response and use write_output. JSON still carries
         # beats / tempo so the caller gets both.
         import base64 as _b64
+
         audio_bytes = _b64.b64decode(result.pop("click_track_base64"))
         return await write_output(
             audio_bytes,
@@ -1037,10 +1111,13 @@ async def onsets(
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_onsets_engine(eng):
         raise HTTPException(
-            status_code=404, detail="librosa-analyze engine not configured",
+            status_code=404,
+            detail="librosa-analyze engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         return await eng.onsets(raw, filename)
@@ -1065,20 +1142,28 @@ async def melody(
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_melody_engine(eng):
         raise HTTPException(
-            status_code=404, detail="librosa-analyze engine not configured",
+            status_code=404,
+            detail="librosa-analyze engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         result = await eng.melody(
-            raw, filename, fmin=fmin, fmax=fmax, as_midi=as_midi,
+            raw,
+            filename,
+            fmin=fmin,
+            fmax=fmax,
+            as_midi=as_midi,
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if as_midi and (output_path or output_url):
         import base64 as _b64
+
         midi_bytes = _b64.b64decode(result.pop("midi_base64"))
         result.pop("midi_size", None)
         return await write_output(
@@ -1105,10 +1190,13 @@ async def segments(
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_segments_engine(eng):
         raise HTTPException(
-            status_code=404, detail="librosa-analyze engine not configured",
+            status_code=404,
+            detail="librosa-analyze engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         return await eng.segments(raw, filename, num_segments=num_segments)
@@ -1135,14 +1223,18 @@ async def silence(
     eng = ENGINES.get("silence-detect")
     if eng is None or not is_silence_engine(eng):
         raise HTTPException(
-            status_code=404, detail="silence-detect engine not configured",
+            status_code=404,
+            detail="silence-detect engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         result = await eng.detect(
-            raw, filename,
+            raw,
+            filename,
             threshold_db=threshold_db,
             min_duration_sec=min_duration_sec,
             trim_mode=trim_mode,
@@ -1153,6 +1245,7 @@ async def silence(
 
     if trim_mode and (output_path or output_url):
         import base64 as _b64
+
         audio_bytes = _b64.b64decode(result.pop("trimmed_audio_base64"))
         return await write_output(
             audio_bytes,
@@ -1183,14 +1276,22 @@ async def spectrogram(
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
         raise HTTPException(
-            status_code=404, detail="ffmpeg-render engine not configured",
+            status_code=404,
+            detail="ffmpeg-render engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         png = await eng.spectrogram(
-            raw, filename, width=width, height=height, color=color, scale=scale,
+            raw,
+            filename,
+            width=width,
+            height=height,
+            color=color,
+            scale=scale,
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1222,14 +1323,21 @@ async def waveform(
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
         raise HTTPException(
-            status_code=404, detail="ffmpeg-render engine not configured",
+            status_code=404,
+            detail="ffmpeg-render engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         png = await eng.waveform(
-            raw, filename, width=width, height=height, color=color,
+            raw,
+            filename,
+            width=width,
+            height=height,
+            color=color,
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1263,7 +1371,8 @@ async def visualize(
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
         raise HTTPException(
-            status_code=404, detail="ffmpeg-render engine not configured",
+            status_code=404,
+            detail="ffmpeg-render engine not configured",
         )
     if mode not in visualize_modes():
         raise HTTPException(
@@ -1271,12 +1380,19 @@ async def visualize(
             detail=f"unknown visualize mode {mode!r}; supported: {visualize_modes()}",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         video = await eng.visualize(
-            raw, filename,
-            mode=mode, width=width, height=height, fps=fps, container=container,
+            raw,
+            filename,
+            mode=mode,
+            width=width,
+            height=height,
+            fps=fps,
+            container=container,
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1313,18 +1429,155 @@ async def fingerprint(
     eng = ENGINES.get("audio-fingerprint")
     if eng is None or not is_fingerprint_engine(eng):
         raise HTTPException(
-            status_code=404, detail="audio-fingerprint engine not configured",
+            status_code=404,
+            detail="audio-fingerprint engine not configured",
         )
     raw, filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         return await eng.compute(
-            raw, filename,
-            analyze_seconds=analyze_seconds, return_raw=return_raw,
+            raw,
+            filename,
+            analyze_seconds=analyze_seconds,
+            return_raw=return_raw,
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ── /v1/audio/dereverb — UVR de-reverb ─────────────────────────────────────
+
+
+@app.post("/v1/audio/dereverb")
+async def dereverb(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    engine: str = Form(default="uvr-dereverb"),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    _validate_output_format(output_format)
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_uvr_restore_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support restore operations",
+        )
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+    try:
+        audio_bytes = await eng.restore(raw, filename, output_format=output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"dereverb.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"engine": engine, "output_format": output_format},
+    )
+
+
+# ── /v1/audio/deecho — UVR de-echo ──────────────────────────────────────────
+
+
+@app.post("/v1/audio/deecho")
+async def deecho(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    engine: str = Form(default="uvr-deecho"),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    _validate_output_format(output_format)
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_uvr_restore_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support restore operations",
+        )
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+    try:
+        audio_bytes = await eng.restore(raw, filename, output_format=output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"deecho.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"engine": engine, "output_format": output_format},
+    )
+
+
+# ── /v1/audio/denoise — UVR AI de-noise ─────────────────────────────────────
+
+
+@app.post("/v1/audio/denoise")
+async def denoise(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    engine: str = Form(default="uvr-denoise"),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    _validate_output_format(output_format)
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_uvr_restore_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support restore operations",
+        )
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+    try:
+        audio_bytes = await eng.restore(raw, filename, output_format=output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"denoise.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"engine": engine, "output_format": output_format},
+    )
 
 
 # ── /v1/midi/inspect — SMF bytes → JSON structure ──────────────────────────
@@ -1339,10 +1592,13 @@ async def midi_inspect(
     eng = ENGINES.get("midi-compose")
     if eng is None or not is_midi_inspect_engine(eng):
         raise HTTPException(
-            status_code=404, detail="midi-compose engine not configured",
+            status_code=404,
+            detail="midi-compose engine not configured",
         )
     raw, _filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         return await eng.inspect(raw)
@@ -1369,7 +1625,8 @@ async def midi_transform(
     eng = ENGINES.get("midi-compose")
     if eng is None or not is_midi_transform_engine(eng):
         raise HTTPException(
-            status_code=404, detail="midi-compose engine not configured",
+            status_code=404,
+            detail="midi-compose engine not configured",
         )
 
     def _parse_chan_list(raw_str: str | None) -> list[int] | None:
@@ -1379,14 +1636,17 @@ async def midi_transform(
             return [int(x.strip()) for x in raw_str.split(",") if x.strip()]
         except ValueError as exc:
             raise HTTPException(
-                status_code=400, detail=f"invalid channel list {raw_str!r}: {exc}",
+                status_code=400,
+                detail=f"invalid channel list {raw_str!r}: {exc}",
             ) from exc
 
     keep = _parse_chan_list(keep_channels)
     drop = _parse_chan_list(drop_channels)
 
     raw, _filename = await resolve_input(
-        file=file, file_path=file_path, file_url=file_url,
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
     )
     try:
         out_bytes = await eng.transform(

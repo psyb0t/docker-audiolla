@@ -24,6 +24,7 @@ Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. 
   - [Silence detection and trimming](#silence-detection-and-trimming)
   - [Spectrogram, waveform, visualise](#spectrogram-waveform-visualise)
   - [Acoustic fingerprint](#acoustic-fingerprint)
+  - [De-reverb, de-echo, de-noise](#de-reverb-de-echo-de-noise)
   - [Transform](#transform)
   - [Loudness](#loudness)
   - [Effects chain](#effects-chain)
@@ -225,6 +226,32 @@ curl -X POST http://localhost:8000/v1/audio/fingerprint \
 ```
 
 The base64 fingerprint string is compatible with the [AcoustID](https://acoustid.org) lookup service.
+
+### De-reverb, de-echo, de-noise
+
+AI audio restoration via UVR ecosystem models — BS-Roformer and MelBand Roformer. These operate on the signal itself, not silence thresholds.
+
+```bash
+# Remove room reverb from a recording (BS-Roformer, SDR 19+)
+curl -X POST http://localhost:8000/v1/audio/dereverb \
+  -F "file=@track.wav" \
+  -o dry.wav
+
+# Remove echo (VR Architecture — normal or aggressive)
+curl -X POST http://localhost:8000/v1/audio/deecho \
+  -F "file=@track.wav" \
+  -F "engine=uvr-deecho-aggressive" \
+  -o noecho.wav
+
+# Remove broadband background noise (MelBand Roformer, SDR 28)
+curl -X POST http://localhost:8000/v1/audio/denoise \
+  -F "file=@track.wav" \
+  -o clean.wav
+```
+
+Default engines: `uvr-dereverb`, `uvr-deecho`, `uvr-denoise`. Override with `engine=<slug>`. All three support `output_format`, `output_path`, `output_url`.
+
+UVR engines also work through `/v1/audio/separate` — `uvr-vocal-bsr` (BS-Roformer, SDR 13) and `uvr-karaoke` return vocal + instrumental stems like Demucs but often with higher quality.
 
 ### Transform
 
@@ -479,6 +506,12 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `silence-detect` | Locate silent gaps via ffmpeg `silencedetect`. Optional auto-trim. Backs `/v1/audio/silence`. |
 | `ffmpeg-render` | Static PNG spectrogram/waveform + 8-mode animated MP4/WebM video via ffmpeg filters. Backs `/v1/audio/{spectrogram,waveform,visualize}`. |
 | `audio-fingerprint` | Chromaprint acoustic fingerprint via `fpcalc`. Backs `/v1/audio/fingerprint`. |
+| `uvr-dereverb` | BS-Roformer de-reverb — removes room reverb; `primary_stem=No Reverb`. |
+| `uvr-deecho` | VR Architecture de-echo (normal) — removes echo. |
+| `uvr-deecho-aggressive` | VR Architecture de-echo (aggressive) — hard echo removal. |
+| `uvr-denoise` | MelBand Roformer de-noise (SDR 28) — removes broadband background noise. |
+| `uvr-karaoke` | MelBand Roformer karaoke — remove lead vocals, keep backing; works via `/v1/audio/separate`. |
+| `uvr-vocal-bsr` | BS-Roformer vocal/instrumental (SDR 13) — highest-quality vocal separation; works via `/v1/audio/separate`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
@@ -511,6 +544,9 @@ bytes.
 | `POST` | `/v1/audio/waveform` | PNG bytes |
 | `POST` | `/v1/audio/visualize` | MP4 bytes (default `container=mp4`); pass `container=webm` for WebM — 8 animation modes |
 | `POST` | `/v1/audio/fingerprint` | JSON — Chromaprint fingerprint string |
+| `POST` | `/v1/audio/dereverb` | audio bytes — room reverb removed |
+| `POST` | `/v1/audio/deecho` | audio bytes — echo removed |
+| `POST` | `/v1/audio/denoise` | audio bytes — broadband noise removed |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
 | `POST` | `/v1/audio/fx` | audio bytes |
@@ -571,6 +607,9 @@ Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). Th
 | `waveform` | Static PNG waveform via ffmpeg |
 | `visualize` | Animated MP4/WebM — spectrum, waves, CQT, freqs, volume, vectorscope, phasemeter, histogram |
 | `fingerprint` | Chromaprint acoustic fingerprint (AcoustID-compatible) |
+| `dereverb` | Remove room reverb via UVR BS-Roformer |
+| `deecho` | Remove echo via UVR VR Architecture |
+| `denoise` | Remove broadband background noise via UVR MelBand Roformer |
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
 | `loudness` | Measure LUFS or normalize to a target |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
@@ -595,6 +634,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or `cuda:N` |
 | `AUDIOLLA_ENGINES_FILE` | `/app/engines.json` | path to engines registry |
 | `AUDIOLLA_DATA_DIR` | `/data` | where models and staged files live |
+| `AUDIOLLA_UVR_MODELS_DIR` | `<DATA_DIR>/uvr_models` | where UVR model files are cached |
 | `AUDIOLLA_AUTH_TOKEN` | — | bearer token; empty means no auth |
 | `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
 | `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |

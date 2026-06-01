@@ -40,9 +40,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from . import config, fetch, files as files_mod
+from . import config, fetch
+from . import files as files_mod
 from .audio import AudioConversionError, content_type_for
-
 
 _log = logging.getLogger("audiolla.mcp")
 
@@ -85,8 +85,10 @@ def build_mcp_server(
         return src.read_bytes(), str(rel)
 
     async def _load_input(
-        file_path: str | None, file_url: str | None,
-        *, field_prefix: str = "file",
+        file_path: str | None,
+        file_url: str | None,
+        *,
+        field_prefix: str = "file",
     ) -> tuple[bytes, str]:
         """Resolve exactly one of (file_path, file_url) to (bytes, name)."""
         has_path = bool(file_path)
@@ -110,14 +112,18 @@ def build_mcp_server(
             raise ValueError(str(exc)) from exc
 
     async def _emit_audio(
-        data: bytes, output_format: str, output_url: str | None,
+        data: bytes,
+        output_format: str,
+        output_url: str | None,
     ) -> dict[str, Any]:
         """Return audio either base64-encoded (default) or as a presigned-PUT
         upload confirmation when output_url is set."""
         if output_url:
             try:
                 await fetch.upload_bytes(
-                    output_url, data, content_type_for(output_format),
+                    output_url,
+                    data,
+                    content_type_for(output_format),
                 )
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
@@ -242,12 +248,18 @@ def build_mcp_server(
             if eng is None:
                 raise ValueError("matchering engine not configured")
             ref_raw, ref_name = await _load_input(
-                reference_path, reference_url, field_prefix="reference",
+                reference_path,
+                reference_url,
+                field_prefix="reference",
             )
             try:
                 audio = await eng.master_reference(
-                    raw, name, ref_raw, ref_name,
-                    target_lufs=target_lufs, output_format=output_format,
+                    raw,
+                    name,
+                    ref_raw,
+                    ref_name,
+                    target_lufs=target_lufs,
+                    output_format=output_format,
                 )
             except AudioConversionError as exc:
                 raise ValueError(str(exc)) from exc
@@ -259,8 +271,10 @@ def build_mcp_server(
                 raise ValueError("pedalboard-chain engine not configured")
             try:
                 audio = await eng.master_chain(
-                    raw, name,
-                    preset=preset, target_lufs=target_lufs,
+                    raw,
+                    name,
+                    preset=preset,
+                    target_lufs=target_lufs,
                     output_format=output_format,
                 )
             except AudioConversionError as exc:
@@ -284,9 +298,7 @@ def build_mcp_server(
         if eng is None:
             raise ValueError("librosa-analyze engine not configured")
         try:
-            result = await eng.analyze(
-                raw, name, features=features or []
-            )
+            result = await eng.analyze(raw, name, features=features or [])
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         return result
@@ -312,7 +324,9 @@ def build_mcp_server(
             raise ValueError("sox-transform engine not configured")
         try:
             audio = await eng.transform(
-                raw, name, operations=operations,
+                raw,
+                name,
+                operations=operations,
                 output_format=output_format,
             )
         except AudioConversionError as exc:
@@ -350,7 +364,9 @@ def build_mcp_server(
             }
         try:
             audio, measured = await eng.normalize_lufs(
-                raw, name, target_lufs=target_lufs,
+                raw,
+                name,
+                target_lufs=target_lufs,
                 output_format=output_format,
             )
         except AudioConversionError as exc:
@@ -385,7 +401,10 @@ def build_mcp_server(
             raise ValueError("fx-chain engine not configured")
         try:
             audio = await eng.fx(
-                raw, name, effects=effects, output_format=output_format,
+                raw,
+                name,
+                effects=effects,
+                output_format=output_format,
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
@@ -460,7 +479,8 @@ def build_mcp_server(
             raise ValueError("midi-render engine not configured")
         try:
             audio = await eng.render(
-                raw, name,
+                raw,
+                name,
                 soundfont_path=soundfont_path,
                 output_format=output_format,
                 gain=gain,
@@ -484,13 +504,12 @@ def build_mcp_server(
         compose_eng = engines.get("midi-compose")
         render_eng = engines.get("midi-render")
         if compose_eng is None or render_eng is None:
-            raise ValueError(
-                "midi-compose and midi-render must both be configured"
-            )
+            raise ValueError("midi-compose and midi-render must both be configured")
         try:
             midi = await compose_eng.compose(spec)
             audio = await render_eng.render(
-                midi, "composed.mid",
+                midi,
+                "composed.mid",
                 soundfont_path=soundfont_path,
                 output_format=output_format,
                 gain=gain,
@@ -520,7 +539,10 @@ def build_mcp_server(
             raise ValueError("librosa-analyze engine not configured")
         try:
             return await eng.beats(
-                raw, name, click_track=click_track, output_format=output_format,
+                raw,
+                name,
+                click_track=click_track,
+                output_format=output_format,
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
@@ -558,7 +580,11 @@ def build_mcp_server(
             raise ValueError("librosa-analyze engine not configured")
         try:
             return await eng.melody(
-                raw, name, fmin=fmin, fmax=fmax, as_midi=as_midi,
+                raw,
+                name,
+                fmin=fmin,
+                fmax=fmax,
+                as_midi=as_midi,
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
@@ -601,7 +627,8 @@ def build_mcp_server(
             raise ValueError("silence-detect engine not configured")
         try:
             return await eng.detect(
-                raw, name,
+                raw,
+                name,
                 threshold_db=threshold_db,
                 min_duration_sec=min_duration_sec,
                 trim_mode=trim_mode,
@@ -630,8 +657,12 @@ def build_mcp_server(
             raise ValueError("ffmpeg-render engine not configured")
         try:
             png = await eng.spectrogram(
-                raw, name,
-                width=width, height=height, color=color, scale=scale,
+                raw,
+                name,
+                width=width,
+                height=height,
+                color=color,
+                scale=scale,
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
@@ -663,7 +694,11 @@ def build_mcp_server(
             raise ValueError("ffmpeg-render engine not configured")
         try:
             png = await eng.waveform(
-                raw, name, width=width, height=height, color=color,
+                raw,
+                name,
+                width=width,
+                height=height,
+                color=color,
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
@@ -700,8 +735,12 @@ def build_mcp_server(
             raise ValueError("ffmpeg-render engine not configured")
         try:
             video = await eng.visualize(
-                raw, name,
-                mode=mode, width=width, height=height, fps=fps,
+                raw,
+                name,
+                mode=mode,
+                width=width,
+                height=height,
+                fps=fps,
                 container=container,
             )
         except AudioConversionError as exc:
@@ -713,8 +752,10 @@ def build_mcp_server(
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
             return {
-                "url": output_url, "size": len(video),
-                "mode": mode, "container": container,
+                "url": output_url,
+                "size": len(video),
+                "mode": mode,
+                "container": container,
             }
         return {
             "video_base64": base64.b64encode(video).decode("ascii"),
@@ -741,11 +782,157 @@ def build_mcp_server(
             raise ValueError("audio-fingerprint engine not configured")
         try:
             return await eng.compute(
-                raw, name,
-                analyze_seconds=analyze_seconds, return_raw=return_raw,
+                raw,
+                name,
+                analyze_seconds=analyze_seconds,
+                return_raw=return_raw,
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
+
+    # ── UVR audio restoration tools ────────────────────────────────────────
+
+    @mcp.tool()
+    async def dereverb(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        engine: str = "uvr-dereverb",
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove room reverb from audio using UVR BS-Roformer model.
+
+        Input: file_path (staged file) or file_url (remote URL).
+        Returns {audio_base64, size, engine, output_format} or
+        {url, size, engine, output_format} if output_url is set.
+        engine options: uvr-dereverb (default).
+        """
+        from .engines import is_uvr_restore_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(f"unknown engine {engine!r}")
+        if not is_uvr_restore_engine(eng):
+            raise ValueError(f"engine {engine!r} does not support restore operations")
+        try:
+            audio_bytes = await eng.restore(raw, name, output_format=output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(
+                    output_url,
+                    audio_bytes,
+                    content_type_for(output_format),
+                )
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {
+                "url": output_url,
+                "size": len(audio_bytes),
+                "engine": engine,
+                "output_format": output_format,
+            }
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "size": len(audio_bytes),
+            "engine": engine,
+            "output_format": output_format,
+        }
+
+    @mcp.tool()
+    async def deecho(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        engine: str = "uvr-deecho",
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove echo from audio using UVR VR Architecture model.
+
+        engine options: uvr-deecho (default, normal),
+        uvr-deecho-aggressive.
+        """
+        from .engines import is_uvr_restore_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(f"unknown engine {engine!r}")
+        if not is_uvr_restore_engine(eng):
+            raise ValueError(f"engine {engine!r} does not support restore operations")
+        try:
+            audio_bytes = await eng.restore(raw, name, output_format=output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(
+                    output_url,
+                    audio_bytes,
+                    content_type_for(output_format),
+                )
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {
+                "url": output_url,
+                "size": len(audio_bytes),
+                "engine": engine,
+                "output_format": output_format,
+            }
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "size": len(audio_bytes),
+            "engine": engine,
+            "output_format": output_format,
+        }
+
+    @mcp.tool()
+    async def denoise(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        engine: str = "uvr-denoise",
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove broadband background noise using UVR MelBand Roformer (SDR 28).
+
+        engine options: uvr-denoise (default).
+        """
+        from .engines import is_uvr_restore_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(f"unknown engine {engine!r}")
+        if not is_uvr_restore_engine(eng):
+            raise ValueError(f"engine {engine!r} does not support restore operations")
+        try:
+            audio_bytes = await eng.restore(raw, name, output_format=output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(
+                    output_url,
+                    audio_bytes,
+                    content_type_for(output_format),
+                )
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {
+                "url": output_url,
+                "size": len(audio_bytes),
+                "engine": engine,
+                "output_format": output_format,
+            }
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "size": len(audio_bytes),
+            "engine": engine,
+            "output_format": output_format,
+        }
 
     # ── MIDI inspect + transform (mido) ────────────────────────────────────
 
@@ -818,13 +1005,10 @@ def build_mcp_server(
         try:
             data = base64.b64decode(content_base64, validate=True)
         except (ValueError, binascii.Error) as exc:
-            raise ValueError(
-                f"content_base64 is not valid base64: {exc}"
-            ) from exc
+            raise ValueError(f"content_base64 is not valid base64: {exc}") from exc
         if len(data) > config.MAX_UPLOAD_BYTES:
             raise ValueError(
-                f"upload too large ({len(data)} bytes > "
-                f"{config.MAX_UPLOAD_BYTES})"
+                f"upload too large ({len(data)} bytes > " f"{config.MAX_UPLOAD_BYTES})"
             )
         try:
             rel = files_mod.sanitize_path(path)
@@ -863,5 +1047,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 10 tools")
+    _log.info("mcp server initialised: 13 tools")
     return mcp

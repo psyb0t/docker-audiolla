@@ -24,6 +24,7 @@ NOTES.md
 
 # Local tooling
 git-update.sh
+.claude/
 about.txt
 pyrightconfig.json
 mypy.ini
