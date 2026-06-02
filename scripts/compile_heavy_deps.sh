@@ -32,10 +32,12 @@ compile_variant() {
     # project tree so HEAVY_EXCLUDE_NEWER takes effect uncontested.
     # uv also resolves [tool.uv].exclude-newer from the *output file's*
     # directory tree.  Write to a /tmp output too, then move into place.
-    local tmp_in tmp_out
+    local tmp_in tmp_out tmp_override
     tmp_in="$(mktemp /tmp/heavy-deps-${variant}-XXXXX.in)"
     tmp_out="$(mktemp /tmp/heavy-deps-${variant}-out-XXXXX.txt)"
+    tmp_override="$(mktemp /tmp/heavy-deps-override-XXXXX.txt)"
     cp "${in_src}" "${tmp_in}"
+    cp "${PROJECT_ROOT}/scripts/heavy-deps-overrides.txt" "${tmp_override}"
     (
         cd /tmp
         UV_EXCLUDE_NEWER="${HEAVY_EXCLUDE_NEWER}" uv pip compile \
@@ -43,11 +45,12 @@ compile_variant() {
             --generate-hashes \
             --extra-index-url "${extra_index}" \
             --index-strategy unsafe-best-match \
+            --override "${tmp_override}" \
             --output-file "${tmp_out}" \
             "${tmp_in}"
     )
     mv "${tmp_out}" "${out_file}"
-    rm -f "${tmp_in}"
+    rm -f "${tmp_in}" "${tmp_override}"
 }
 
 compile_variant cpu  "https://download.pytorch.org/whl/cpu"

@@ -176,6 +176,8 @@ _VALID_EXECUTORS = frozenset(
         "ffmpeg_render",
         "audio_fingerprint",
         "uvr_separator",
+        "basic_pitch",
+        "deepfilter",
     }
 )
 

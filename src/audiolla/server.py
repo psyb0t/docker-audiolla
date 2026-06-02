@@ -55,7 +55,9 @@ from .auth import BearerAuthMiddleware
 from .engines import (
     build_engines,
     is_analysis_engine,
+    is_basic_pitch_engine,
     is_beats_engine,
+    is_deepfilter_engine,
     is_ffmpeg_render_engine,
     is_fingerprint_engine,
     is_fx_engine,
@@ -1673,6 +1675,125 @@ async def midi_transform(
             "quantize_grid_beats": quantize_grid_beats,
             "tempo_bpm": tempo_bpm,
         },
+    )
+
+
+# ── /v1/audio/to_midi — polyphonic audio-to-MIDI via basic-pitch ────────────
+
+
+@app.post("/v1/audio/to_midi")
+async def to_midi(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    engine: str = Form(default="basic-pitch"),
+    onset_threshold: float = Form(default=0.5),
+    frame_threshold: float = Form(default=0.3),
+    minimum_note_length_ms: float = Form(default=58.0),
+    minimum_frequency: float | None = Form(default=None),
+    maximum_frequency: float | None = Form(default=None),
+    multiple_pitch_bends: bool = Form(default=False),
+    melodia_trick: bool = Form(default=True),
+) -> Response:
+    """Convert audio to a polyphonic MIDI file via Spotify basic-pitch."""
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_basic_pitch_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support audio-to-MIDI transcription",
+        )
+
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+
+    await _evict_siblings(engine)
+
+    try:
+        midi_bytes = await eng.to_midi(
+            raw,
+            filename,
+            onset_threshold=onset_threshold,
+            frame_threshold=frame_threshold,
+            minimum_note_length_ms=minimum_note_length_ms,
+            minimum_frequency=minimum_frequency,
+            maximum_frequency=maximum_frequency,
+            multiple_pitch_bends=multiple_pitch_bends,
+            melodia_trick=melodia_trick,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        midi_bytes,
+        media_type="audio/midi",
+        filename="output.mid",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine,
+            "output_format": "mid",
+            "size": len(midi_bytes),
+        },
+    )
+
+
+# ── /v1/audio/enhance — neural speech/vocal enhancement (DeepFilterNet) ─────
+
+
+@app.post("/v1/audio/enhance")
+async def audio_enhance(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    engine: str = Form(default="deepfilter"),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Neural speech and vocal enhancement via DeepFilterNet DF3."""
+    _validate_output_format(output_format)
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_deepfilter_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support neural enhancement",
+        )
+
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+
+    await _evict_siblings(engine)
+
+    try:
+        audio_bytes = await eng.enhance(raw, filename, output_format=output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"enhanced.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"engine": engine, "output_format": output_format},
     )
 
 

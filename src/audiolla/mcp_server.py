@@ -992,6 +992,127 @@ def build_mcp_server(
             "size": len(out),
         }
 
+    # ── audio-to-MIDI (basic-pitch) ────────────────────────────────────────
+
+    @mcp.tool()
+    async def audio_to_midi(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        engine: str = "basic-pitch",
+        onset_threshold: float = 0.5,
+        frame_threshold: float = 0.3,
+        minimum_note_length_ms: float = 58.0,
+        minimum_frequency: float | None = None,
+        maximum_frequency: float | None = None,
+        multiple_pitch_bends: bool = False,
+        melodia_trick: bool = True,
+        output_path: str | None = None,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Convert audio to a polyphonic MIDI file via Spotify basic-pitch.
+
+        Provide exactly one of `file_path` or `file_url`. Returns
+        `{midi_base64, size, engine}` by default, or writes to staging
+        if `output_path` is set, or PUTs to a presigned URL if
+        `output_url` is set.
+        """
+        from .engines import is_basic_pitch_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(f"unknown engine {engine!r}")
+        if not is_basic_pitch_engine(eng):
+            raise ValueError(
+                f"engine {engine!r} does not support audio-to-MIDI transcription"
+            )
+        try:
+            midi = await eng.to_midi(
+                raw,
+                name,
+                onset_threshold=onset_threshold,
+                frame_threshold=frame_threshold,
+                minimum_note_length_ms=minimum_note_length_ms,
+                minimum_frequency=minimum_frequency,
+                maximum_frequency=maximum_frequency,
+                multiple_pitch_bends=multiple_pitch_bends,
+                melodia_trick=melodia_trick,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if output_path:
+            try:
+                rel = files_mod.sanitize_path(output_path)
+                dest = files_mod.resolve_under(config.FILES_DIR, rel)
+            except files_mod.FilePathError as exc:
+                raise ValueError(str(exc)) from exc
+            files_mod.write_atomic(dest, midi)
+            return {"path": str(rel), "size": len(midi), "engine": engine}
+        if output_url:
+            try:
+                await fetch.upload_bytes(output_url, midi, "audio/midi")
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {"url": output_url, "size": len(midi), "engine": engine}
+        return {
+            "midi_base64": base64.b64encode(midi).decode("ascii"),
+            "size": len(midi),
+            "engine": engine,
+        }
+
+    # ── neural enhancement (DeepFilterNet) ────────────────────────────────
+
+    @mcp.tool()
+    async def enhance(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        engine: str = "deepfilter",
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Neural speech and vocal enhancement via DeepFilterNet DF3.
+
+        Provide exactly one of `file_path` or `file_url`. Returns
+        `{audio_base64, size, engine, output_format}` by default,
+        or `{url, size, engine, output_format}` if `output_url` is set.
+        """
+        from .engines import is_deepfilter_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(f"unknown engine {engine!r}")
+        if not is_deepfilter_engine(eng):
+            raise ValueError(
+                f"engine {engine!r} does not support neural enhancement"
+            )
+        try:
+            audio_bytes = await eng.enhance(raw, name, output_format=output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(
+                    output_url,
+                    audio_bytes,
+                    content_type_for(output_format),
+                )
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {
+                "url": output_url,
+                "size": len(audio_bytes),
+                "engine": engine,
+                "output_format": output_format,
+            }
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "size": len(audio_bytes),
+            "engine": engine,
+            "output_format": output_format,
+        }
+
     # ── file staging tools ──────────────────────────────────────────────────
 
     @mcp.tool()
@@ -1047,5 +1168,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 13 tools")
+    _log.info("mcp server initialised: 15 tools")
     return mcp

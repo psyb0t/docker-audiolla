@@ -6,6 +6,8 @@ from typing import Any
 
 from .. import config
 from .audio_fingerprint import AudioFingerprintEngine
+from .basic_pitch_engine import BasicPitchEngine
+from .deepfilter_engine import DeepFilterNetEngine
 from .demucs import DemucsEngine
 from .ffmpeg_render import FfmpegRenderEngine
 from .fx_chain import FxChainEngine
@@ -63,6 +65,12 @@ def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
             continue
         if executor == "uvr_separator":
             out[slug] = UVRSeparatorEngine(slug=slug, entry=entry)
+            continue
+        if executor == "basic_pitch":
+            out[slug] = BasicPitchEngine(slug=slug, entry=entry)
+            continue
+        if executor == "deepfilter":
+            out[slug] = DeepFilterNetEngine(slug=slug, entry=entry)
             continue
         raise ValueError(f"unknown executor {executor!r} for engine {slug!r}")
     return out
@@ -142,3 +150,11 @@ def is_midi_transform_engine(engine: Any) -> bool:
 
 def is_uvr_restore_engine(engine: Any) -> bool:
     return hasattr(engine, "restore")
+
+
+def is_basic_pitch_engine(engine: Any) -> bool:
+    return hasattr(engine, "to_midi")
+
+
+def is_deepfilter_engine(engine: Any) -> bool:
+    return hasattr(engine, "enhance") and hasattr(engine, "_df_state")

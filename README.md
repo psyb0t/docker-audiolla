@@ -25,6 +25,8 @@ Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. 
   - [Spectrogram, waveform, visualise](#spectrogram-waveform-visualise)
   - [Acoustic fingerprint](#acoustic-fingerprint)
   - [De-reverb, de-echo, de-noise](#de-reverb-de-echo-de-noise)
+  - [Audio-to-MIDI transcription](#audio-to-midi-transcription)
+  - [Neural speech and vocal enhancement](#neural-speech-and-vocal-enhancement)
   - [Transform](#transform)
   - [Loudness](#loudness)
   - [Effects chain](#effects-chain)
@@ -252,6 +254,54 @@ curl -X POST http://localhost:8000/v1/audio/denoise \
 Default engines: `uvr-dereverb`, `uvr-deecho`, `uvr-denoise`. Override with `engine=<slug>`. All three support `output_format`, `output_path`, `output_url`.
 
 UVR engines also work through `/v1/audio/separate` — `uvr-vocal-bsr` (BS-Roformer, SDR 13) and `uvr-karaoke` return vocal + instrumental stems like Demucs but often with higher quality.
+
+### Audio-to-MIDI transcription
+
+Polyphonic audio-to-MIDI via Spotify's basic-pitch (ONNX backend, no TensorFlow). Play guitar, hum a melody, record a piano riff — get a MIDI file back with all the notes.
+
+```bash
+# Any audio → MIDI bytes
+curl -X POST http://localhost:8000/v1/audio/to_midi \
+  -F "file=@guitar_riff.wav" \
+  -o riff.mid
+
+# Tune the detection thresholds
+curl -X POST http://localhost:8000/v1/audio/to_midi \
+  -F "file=@piano.wav" \
+  -F "onset_threshold=0.6" \
+  -F "frame_threshold=0.3" \
+  -F "minimum_note_length_ms=80" \
+  -o piano.mid
+
+# Write directly to staging
+curl -X POST http://localhost:8000/v1/audio/to_midi \
+  -F "file_path=recordings/bass.wav" \
+  -F "output_path=midi/bass_notes.mid"
+# → {"path":"midi/bass_notes.mid","size":...,"engine":"basic-pitch","output_format":"mid"}
+```
+
+Optional params: `onset_threshold` (0–1, default 0.5), `frame_threshold` (0–1, default 0.3), `minimum_note_length_ms` (default 58), `minimum_frequency` / `maximum_frequency` (Hz, default unconstrained), `multiple_pitch_bends` (bool, default false), `melodia_trick` (bool, default true — helps with melodic content). Default engine: `basic-pitch`.
+
+The MIDI file is piped straight into `/v1/midi/inspect` or `/v1/midi/render` — audio → MIDI → audio is a complete round-trip.
+
+### Neural speech and vocal enhancement
+
+DeepFilterNet DF3 — deep learning noise suppression trained on speech. Better than broadband de-noise for voice recordings; more surgical than UVR's de-noise on vocals specifically.
+
+```bash
+# Enhance a vocal recording
+curl -X POST http://localhost:8000/v1/audio/enhance \
+  -F "file=@vocal_recording.wav" \
+  -o enhanced.wav
+
+# Stage the output, mp3
+curl -X POST http://localhost:8000/v1/audio/enhance \
+  -F "file_path=vocals/raw.wav" \
+  -F "output_format=mp3" \
+  -F "output_path=vocals/enhanced.mp3"
+```
+
+Default engine: `deepfilter`. Supports `output_format`, `output_path`, `output_url`.
 
 ### Transform
 
@@ -512,6 +562,8 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `uvr-denoise` | MelBand Roformer de-noise (SDR 28) — removes broadband background noise. |
 | `uvr-karaoke` | MelBand Roformer karaoke — remove lead vocals, keep backing; works via `/v1/audio/separate`. |
 | `uvr-vocal-bsr` | BS-Roformer vocal/instrumental (SDR 13) — highest-quality vocal separation; works via `/v1/audio/separate`. |
+| `basic-pitch` | Polyphonic audio-to-MIDI via Spotify basic-pitch (ONNX backend). Backs `/v1/audio/to_midi`. |
+| `deepfilter` | Neural speech and vocal enhancement via DeepFilterNet DF3. Backs `/v1/audio/enhance`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
@@ -547,6 +599,8 @@ bytes.
 | `POST` | `/v1/audio/dereverb` | audio bytes — room reverb removed |
 | `POST` | `/v1/audio/deecho` | audio bytes — echo removed |
 | `POST` | `/v1/audio/denoise` | audio bytes — broadband noise removed |
+| `POST` | `/v1/audio/to_midi` | MIDI bytes (`audio/midi`) — polyphonic transcription |
+| `POST` | `/v1/audio/enhance` | audio bytes — neural speech/vocal enhancement |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
 | `POST` | `/v1/audio/fx` | audio bytes |
@@ -610,6 +664,8 @@ Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). Th
 | `dereverb` | Remove room reverb via UVR BS-Roformer |
 | `deecho` | Remove echo via UVR VR Architecture |
 | `denoise` | Remove broadband background noise via UVR MelBand Roformer |
+| `audio_to_midi` | Polyphonic audio-to-MIDI transcription via basic-pitch (ONNX) — returns MIDI base64 |
+| `enhance` | Neural speech and vocal enhancement via DeepFilterNet DF3 |
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
 | `loudness` | Measure LUFS or normalize to a target |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |

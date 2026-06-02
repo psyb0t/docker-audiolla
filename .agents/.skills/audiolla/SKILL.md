@@ -1,6 +1,6 @@
 ---
 name: audiolla
-description: HTTP/MCP client for a user-deployed audiolla music-production server. Use ONLY when the user has explicitly named audiolla AND provided AUDIOLLA_URL (or has it set in the environment). Capabilities: stem separation (Demucs), mastering (matchering reference / pedalboard preset chain), MIR analysis (BPM, key, LUFS, spectral features, beat grid, onset detection, melody contour, structural segmentation via librosa), DSP transforms (gain, EQ, compand, reverb, pitch, tempo via SoX), loudness measurement and normalization, generic effects chains (full pedalboard catalog as ordered chain), silence detection and trimming (ffmpeg), static PNG spectrogram/waveform and 8-mode animated MP4/WebM video (ffmpeg), Chromaprint acoustic fingerprinting (fpcalc), MIDI composition from JSON spec, MIDI inspection, MIDI transformation (transpose/quantize/tempo/channel-filter), MIDI rendering via fluidsynth, and AI audio restoration (de-reverb, de-echo, AI de-noise via UVR/audio-separator). Audio I/O supports three input modes (multipart upload, staged file path under /v1/files, or remote URL — only when the operator has enabled AUDIOLLA_FETCH_MODE) and three output modes (inline bytes, write to staging, PUT to presigned URL). Audiolla only fetches/uploads to URLs when the operator has explicitly enabled AUDIOLLA_FETCH_MODE — if a request returns "URL fetch/upload is disabled", do NOT try to bypass it. Do not use this skill for generic audio-processing questions or for users who haven't named audiolla.
+description: HTTP/MCP client for a user-deployed audiolla music-production server. Use ONLY when the user has explicitly named audiolla AND provided AUDIOLLA_URL (or has it set in the environment). Capabilities: stem separation (Demucs), mastering (matchering reference / pedalboard preset chain), MIR analysis (BPM, key, LUFS, spectral features, beat grid, onset detection, melody contour, structural segmentation via librosa), DSP transforms (gain, EQ, compand, reverb, pitch, tempo via SoX), loudness measurement and normalization, generic effects chains (full pedalboard catalog as ordered chain), silence detection and trimming (ffmpeg), static PNG spectrogram/waveform and 8-mode animated MP4/WebM video (ffmpeg), Chromaprint acoustic fingerprinting (fpcalc), MIDI composition from JSON spec, MIDI inspection, MIDI transformation (transpose/quantize/tempo/channel-filter), MIDI rendering via fluidsynth, AI audio restoration (de-reverb, de-echo, AI de-noise via UVR/audio-separator), polyphonic audio-to-MIDI transcription (Spotify basic-pitch ONNX), and neural speech/vocal enhancement (DeepFilterNet DF3). Audio I/O supports three input modes (multipart upload, staged file path under /v1/files, or remote URL — only when the operator has enabled AUDIOLLA_FETCH_MODE) and three output modes (inline bytes, write to staging, PUT to presigned URL). Audiolla only fetches/uploads to URLs when the operator has explicitly enabled AUDIOLLA_FETCH_MODE — if a request returns "URL fetch/upload is disabled", do NOT try to bypass it. Do not use this skill for generic audio-processing questions or for users who haven't named audiolla.
 compatibility: Requires curl and a running audiolla instance (Docker image psyb0t/audiolla:latest or :latest-cuda). AUDIOLLA_URL env var must be set by the user (default http://localhost:8000). AUDIOLLA_TOKEN required only when the server has AUDIOLLA_AUTH_TOKEN configured; obtain from the AUDIOLLA_TOKEN env var or by asking the user — never read tokens from repo files autonomously.
 metadata:
   author: psyb0t
@@ -33,6 +33,8 @@ The user has audiolla running and asks you to:
 - Remove reverb tail from a recording (AI de-reverb)
 - Remove echo from a recording (AI de-echo, normal or aggressive)
 - Remove background noise from a recording (AI de-noise)
+- Convert any audio to a polyphonic MIDI file (guitar, piano, voice, full mix — basic-pitch)
+- Enhance speech or vocal recordings with neural noise suppression (DeepFilterNet DF3)
 - Stage files server-side or list/download/delete staged files
 - Drive any of the above from an LLM agent over MCP
 
@@ -99,6 +101,8 @@ Status codes follow REST conventions:
 | `uvr-denoise` | AI de-noise | MelBand Roformer (SDR 28); backs `/v1/audio/denoise` |
 | `uvr-karaoke` | Karaoke (remove lead vocals) | MelBand Roformer; returns Instrumental stem |
 | `uvr-vocal-bsr` | High-quality vocal/inst separation | BS-Roformer (SDR 13) — stems: Vocals, Instrumental |
+| `basic-pitch` | Polyphonic audio-to-MIDI transcription | Spotify basic-pitch ONNX; backs `/v1/audio/to_midi` |
+| `deepfilter` | Neural speech/vocal enhancement | DeepFilterNet DF3; backs `/v1/audio/enhance` |
 
 Engines lazy-load on first use and auto-unload after `AUDIOLLA_ENGINE_TTL` seconds of idle (default 600s). Demucs weights prefetch into `/data/torch_cache/` at container start so the first separation request doesn't pay the cold-download cost.
 
@@ -792,6 +796,8 @@ Each audio tool accepts exactly one of `file_path` or `file_url` for input (same
 | `dereverb` | `file_path` or `file_url`, `engine`, `output_format`, `output_url` | `{audio_base64, size, engine, output_format}` OR `{url, size, ...}` |
 | `deecho` | `file_path` or `file_url`, `engine`, `output_format`, `output_url` | `{audio_base64, size, engine, output_format}` OR `{url, size, ...}` |
 | `denoise` | `file_path` or `file_url`, `engine`, `output_format`, `output_url` | `{audio_base64, size, engine, output_format}` OR `{url, size, ...}` |
+| `audio_to_midi` | `file_path` or `file_url`, `engine`, `onset_threshold`, `frame_threshold`, `minimum_note_length_ms`, `minimum_frequency`, `maximum_frequency`, `multiple_pitch_bends`, `melodia_trick`, `output_path`, `output_url` | `{midi_base64, size, engine}` OR `{path, size}` OR `{url, size}` |
+| `enhance` | `file_path` or `file_url`, `engine`, `output_format`, `output_url` | `{audio_base64, size, engine, output_format}` OR `{url, size, ...}` |
 | `list_files` | — | `{files: [...]}` |
 | `put_file` | `path`, `content_base64` | `{path, size}` |
 | `get_file` | `path` | `{path, size, content_base64}` |
@@ -861,6 +867,58 @@ curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
 
 Optional: `engine` (default `uvr-denoise`), `output_format`, `output_path`, `output_url`.
 
+### Audio-to-MIDI transcription (`/v1/audio/to_midi`)
+
+Convert any audio to a polyphonic MIDI file using Spotify's basic-pitch (ONNX backend, no TensorFlow).
+
+```bash
+# Any audio → MIDI bytes
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/to_midi \
+  -F "file=@guitar.wav" \
+  -o guitar.mid
+
+# Tune detection thresholds
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/to_midi \
+  -F "file=@piano.wav" \
+  -F "onset_threshold=0.6" \
+  -F "frame_threshold=0.3" \
+  -F "minimum_note_length_ms=80" \
+  -o piano.mid
+
+# Stage the output, then inspect it
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/to_midi \
+  -F "file_path=recordings/bass.wav" \
+  -F "output_path=midi/bass.mid"
+# → {"path":"midi/bass.mid","size":...,"engine":"basic-pitch","output_format":"mid"}
+```
+
+Params (all optional): `onset_threshold` (0–1, default 0.5), `frame_threshold` (0–1, default 0.3), `minimum_note_length_ms` (default 58), `minimum_frequency` / `maximum_frequency` (Hz, None = unconstrained), `multiple_pitch_bends` (bool, default false), `melodia_trick` (bool, default true). Also `engine` (default `basic-pitch`), `output_path`, `output_url`.
+
+The returned MIDI bytes work directly with `/v1/midi/inspect`, `/v1/midi/transform`, and `/v1/midi/render` — you get a full audio → MIDI → re-render pipeline.
+
+### Neural speech and vocal enhancement (`/v1/audio/enhance`)
+
+DeepFilterNet DF3 noise suppression — deep learning model trained on speech. More surgical than UVR's de-noise for voice/vocal recordings.
+
+```bash
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/enhance \
+  -F "file=@vocal_recording.wav" \
+  -o enhanced.wav
+
+# MP3 output, staged
+curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
+  $AUDIOLLA_URL/v1/audio/enhance \
+  -F "file_path=vocals/raw.wav" \
+  -F "output_format=mp3" \
+  -F "output_path=vocals/enhanced.mp3"
+```
+
+Optional: `engine` (default `deepfilter`), `output_format`, `output_path`, `output_url`.
+
 > **Note on UVR model weights:** `uvr-dereverb`, `uvr-deecho`, `uvr-deecho-aggressive`, `uvr-denoise`, `uvr-karaoke`, and `uvr-vocal-bsr` all need their `.ckpt` / `.pth` model files present in the server's `AUDIOLLA_UVR_MODELS_DIR` (default `/data/uvr_models`). The image does **not** bundle these files — the operator must download them and mount the directory. If a model file is missing, the endpoint returns 500 on first load. See the README for the exact download list.
 
 ## Common gotchas
@@ -884,6 +942,10 @@ Optional: `engine` (default `uvr-denoise`), `output_format`, `output_path`, `out
 - **`keep_channels` and `drop_channels` in `/v1/midi/transform` are mutually exclusive.** Supplying both is 400.
 - **Segments fallback on short audio.** If the input doesn't have enough beats for the requested `num_segments`, a single `A` span covering the whole file is returned with a `note` field explaining why — it does not error.
 - **`/v1/audio/melody` unvoiced frames have `hz: null`.** Don't try to use them as a pitch value — filter them out first.
+- **`/v1/audio/to_midi` returns `audio/midi` bytes, not audio.** `Content-Disposition: attachment; filename=output.mid` is set. Use `-o out.mid` with curl. With `output_path` / `output_url` the response is JSON — the MIDI is at `path` or `url`.
+- **basic-pitch uses the ONNX backend (no TensorFlow).** The model is auto-selected at import time. No config needed; `tensorflow` is not installed in the image.
+- **basic-pitch output quality scales with the input.** Polyphonic recordings with many overlapping instruments confuse the model — best results on melodic solos or lightly-polyphonic material. Full mixes work but produce noisy MIDI.
+- **`/v1/audio/enhance` is optimised for speech and vocals.** DeepFilterNet DF3 is trained on speech signals. It works on full mixes but may reduce musical detail. For full-mix noise removal prefer `uvr-denoise`.
 - **UVR model files are NOT bundled in the image.** `uvr-dereverb`, `uvr-deecho`, `uvr-deecho-aggressive`, `uvr-denoise`, `uvr-karaoke`, `uvr-vocal-bsr` all require `.ckpt` / `.pth` files in `AUDIOLLA_UVR_MODELS_DIR` (`/data/uvr_models` by default). Missing file = 500 on first load. Check the README for the download list.
 - **`uvr-karaoke` and `uvr-vocal-bsr` are NOT exposed via `/v1/audio/dereverb`, `/v1/audio/deecho`, or `/v1/audio/denoise`.** Those endpoints only do restoration (single output stem). To use the karaoke or vocal-separation models, use `/v1/audio/separate` with the appropriate engine slug and `stems` field.
 - **UVR models are CPU-only in the default image.** For GPU-accelerated inference, use `psyb0t/audiolla:latest-cuda` with `--gpus all`. The `:latest` (CPU) image works but can be slow for full-track restoration.
