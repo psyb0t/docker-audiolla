@@ -1059,6 +1059,7 @@ async def beats(
     output_url: str | None = Form(default=None),
     click_track: bool = Form(default=False),
     output_format: str = Form(default="wav"),
+    start_bpm: float | None = Form(default=None),
 ) -> Any:
     """Returns JSON with tempo + beat positions. With ``click_track=true``
     also synthesises a metronome-mixed audio render and includes a
@@ -1082,6 +1083,7 @@ async def beats(
             filename,
             click_track=click_track,
             output_format=output_format,
+            start_bpm=start_bpm,
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
