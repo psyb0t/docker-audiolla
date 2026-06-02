@@ -57,7 +57,9 @@ from .engines import (
     is_analysis_engine,
     is_basic_pitch_engine,
     is_beats_engine,
+    is_chord_detect_engine,
     is_deepfilter_engine,
+    is_diarize_engine,
     is_ffmpeg_render_engine,
     is_fingerprint_engine,
     is_fx_engine,
@@ -74,6 +76,7 @@ from .engines import (
     is_silence_engine,
     is_transform_engine,
     is_uvr_restore_engine,
+    is_vad_engine,
 )
 from .engines.ffmpeg_render import visualize_modes
 from .input_resolver import resolve_input
@@ -1453,14 +1456,14 @@ async def fingerprint(
 # ── /v1/audio/dereverb — UVR de-reverb ─────────────────────────────────────
 
 
-@app.post("/v1/audio/dereverb")
+@app.post("/v1/audio/dereverb/{engine}")
 async def dereverb(
+    engine: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
-    engine: str = Form(default="uvr-dereverb"),
     output_format: str = Form(default="wav"),
 ) -> Response:
     _validate_output_format(output_format)
@@ -1497,14 +1500,14 @@ async def dereverb(
 # ── /v1/audio/deecho — UVR de-echo ──────────────────────────────────────────
 
 
-@app.post("/v1/audio/deecho")
+@app.post("/v1/audio/deecho/{engine}")
 async def deecho(
+    engine: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
-    engine: str = Form(default="uvr-deecho"),
     output_format: str = Form(default="wav"),
 ) -> Response:
     _validate_output_format(output_format)
@@ -1541,14 +1544,14 @@ async def deecho(
 # ── /v1/audio/denoise — UVR AI de-noise ─────────────────────────────────────
 
 
-@app.post("/v1/audio/denoise")
+@app.post("/v1/audio/denoise/{engine}")
 async def denoise(
+    engine: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
-    engine: str = Form(default="uvr-denoise"),
     output_format: str = Form(default="wav"),
 ) -> Response:
     _validate_output_format(output_format)
@@ -1681,14 +1684,14 @@ async def midi_transform(
 # ── /v1/audio/to_midi — polyphonic audio-to-MIDI via basic-pitch ────────────
 
 
-@app.post("/v1/audio/to_midi")
+@app.post("/v1/audio/to_midi/{engine}")
 async def to_midi(
+    engine: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
-    engine: str = Form(default="basic-pitch"),
     onset_threshold: float = Form(default=0.5),
     frame_threshold: float = Form(default=0.3),
     minimum_note_length_ms: float = Form(default=58.0),
@@ -1750,14 +1753,14 @@ async def to_midi(
 # ── /v1/audio/enhance — neural speech/vocal enhancement (DeepFilterNet) ─────
 
 
-@app.post("/v1/audio/enhance")
+@app.post("/v1/audio/enhance/{engine}")
 async def audio_enhance(
+    engine: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
-    engine: str = Form(default="deepfilter"),
     output_format: str = Form(default="wav"),
 ) -> Response:
     """Neural speech and vocal enhancement via DeepFilterNet DF3."""
@@ -1795,6 +1798,128 @@ async def audio_enhance(
         output_url=output_url,
         extra_json={"engine": engine, "output_format": output_format},
     )
+
+
+# ── /v1/audio/chords — chord + key detection via librosa ─────────────────────
+
+
+@app.post("/v1/audio/chords")
+async def chords(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    hop_length: int = Form(default=512),
+    segment_min_duration_sec: float = Form(default=0.5),
+) -> JSONResponse:
+    eng = ENGINES.get("chord-detect")
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail="chord-detect engine not configured",
+        )
+    if not is_chord_detect_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail="chord-detect engine does not support chord detection",
+        )
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+    try:
+        result = await eng.detect_chords(
+            raw,
+            filename,
+            hop_length=hop_length,
+            segment_min_duration_sec=segment_min_duration_sec,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/vad — voice activity detection via silero-vad ──────────────────
+
+
+@app.post("/v1/audio/vad")
+async def vad(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    threshold: float = Form(default=0.5),
+    min_speech_duration_ms: float = Form(default=250.0),
+    min_silence_duration_ms: float = Form(default=100.0),
+) -> JSONResponse:
+    eng = ENGINES.get("silero-vad")
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail="silero-vad engine not configured",
+        )
+    if not is_vad_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail="silero-vad engine does not support voice activity detection",
+        )
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+    try:
+        result = await eng.detect_voice(
+            raw,
+            filename,
+            threshold=threshold,
+            min_speech_duration_ms=min_speech_duration_ms,
+            min_silence_duration_ms=min_silence_duration_ms,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/diarize/{engine} — speaker diarization ─────────────────────────
+
+
+@app.post("/v1/audio/diarize/{engine}")
+async def diarize(
+    engine: str,
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    num_speakers: int | None = Form(default=None),
+    min_speakers: int | None = Form(default=None),
+    max_speakers: int | None = Form(default=None),
+) -> JSONResponse:
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_diarize_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support speaker diarization",
+        )
+    raw, filename = await resolve_input(
+        file=file,
+        file_path=file_path,
+        file_url=file_url,
+    )
+    try:
+        result = await eng.diarize(
+            raw,
+            filename,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
 
 
 def _resolve_files_path(raw: str) -> tuple[Any, str]:

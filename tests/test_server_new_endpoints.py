@@ -483,8 +483,7 @@ def test_dereverb_200_returns_audio():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb",
-                data={"engine": "uvr-dereverb"},
+                "/v1/audio/dereverb/uvr-dereverb",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -503,8 +502,7 @@ def test_dereverb_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb",
-                data={"engine": "nonexistent"},
+                "/v1/audio/dereverb/nonexistent",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -516,7 +514,6 @@ def test_dereverb_400_for_wrong_engine_type():
     """An engine that does not expose restore() (e.g. a fingerprint engine)
     should return 400 from dereverb."""
     wrong_eng = _make_fingerprint_engine()
-    # Remove restore to fail duck-typing
     del wrong_eng.restore
 
     files_dir = Path(tempfile.mkdtemp()) / "files"
@@ -528,8 +525,7 @@ def test_dereverb_400_for_wrong_engine_type():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb",
-                data={"engine": "uvr-dereverb"},
+                "/v1/audio/dereverb/uvr-dereverb",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -548,8 +544,8 @@ def test_dereverb_415_for_unsupported_output_format():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb",
-                data={"engine": "uvr-dereverb", "output_format": "xyz"},
+                "/v1/audio/dereverb/uvr-dereverb",
+                data={"output_format": "xyz"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -567,8 +563,8 @@ def test_dereverb_output_path_returns_json():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb",
-                data={"engine": "uvr-dereverb", "output_path": "dereverb/out.wav"},
+                "/v1/audio/dereverb/uvr-dereverb",
+                data={"output_path": "dereverb/out.wav"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -590,8 +586,7 @@ def test_deecho_200_returns_audio():
          patch.dict("audiolla.server.REGISTRY", {"uvr-deecho": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/deecho",
-                data={"engine": "uvr-deecho"},
+                "/v1/audio/deecho/uvr-deecho",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -609,8 +604,7 @@ def test_deecho_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/deecho",
-                data={"engine": "nope"},
+                "/v1/audio/deecho/nope",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -630,8 +624,7 @@ def test_deecho_400_for_wrong_engine_type():
          patch.dict("audiolla.server.REGISTRY", {"uvr-deecho": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/deecho",
-                data={"engine": "uvr-deecho"},
+                "/v1/audio/deecho/uvr-deecho",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -652,8 +645,7 @@ def test_denoise_200_returns_audio():
          patch.dict("audiolla.server.REGISTRY", {"uvr-denoise": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/denoise",
-                data={"engine": "uvr-denoise"},
+                "/v1/audio/denoise/uvr-denoise",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -671,8 +663,7 @@ def test_denoise_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/denoise",
-                data={"engine": "nope"},
+                "/v1/audio/denoise/nope",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -693,8 +684,7 @@ def test_to_midi_200_returns_midi():
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/to_midi",
-                data={"engine": "basic-pitch"},
+                "/v1/audio/to_midi/basic-pitch",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -713,8 +703,7 @@ def test_to_midi_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/to_midi",
-                data={"engine": "nonexistent"},
+                "/v1/audio/to_midi/nonexistent",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -734,8 +723,7 @@ def test_to_midi_400_for_wrong_engine_type():
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/to_midi",
-                data={"engine": "basic-pitch"},
+                "/v1/audio/to_midi/basic-pitch",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -754,8 +742,8 @@ def test_to_midi_output_path_returns_json():
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/to_midi",
-                data={"engine": "basic-pitch", "output_path": "midi/out.mid"},
+                "/v1/audio/to_midi/basic-pitch",
+                data={"output_path": "midi/out.mid"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -774,8 +762,8 @@ def test_to_midi_custom_thresholds_passed_to_engine():
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/to_midi",
-                data={"engine": "basic-pitch", "onset_threshold": "0.8"},
+                "/v1/audio/to_midi/basic-pitch",
+                data={"onset_threshold": "0.8"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -798,8 +786,7 @@ def test_enhance_200_returns_audio():
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/enhance",
-                data={"engine": "deepfilter"},
+                "/v1/audio/enhance/deepfilter",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -818,8 +805,7 @@ def test_enhance_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/enhance",
-                data={"engine": "nonexistent"},
+                "/v1/audio/enhance/nonexistent",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -843,8 +829,7 @@ def test_enhance_400_for_wrong_engine_type():
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/enhance",
-                data={"engine": "deepfilter"},
+                "/v1/audio/enhance/deepfilter",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -863,8 +848,8 @@ def test_enhance_415_for_unsupported_output_format():
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/enhance",
-                data={"engine": "deepfilter", "output_format": "xyz"},
+                "/v1/audio/enhance/deepfilter",
+                data={"output_format": "xyz"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -882,10 +867,199 @@ def test_enhance_output_path_returns_json():
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/enhance",
-                data={"engine": "deepfilter", "output_path": "enhanced/out.wav"},
+                "/v1/audio/enhance/deepfilter",
+                data={"output_path": "enhanced/out.wav"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
     assert r.status_code == 200
     assert r.json()["path"] == "enhanced/out.wav"
+
+
+# ── /v1/audio/chords ──────────────────────────────────────────────────────────
+
+
+def _make_chord_detect_engine() -> MagicMock:
+    eng = MagicMock()
+    eng.loaded.return_value = False
+    eng.last_used_secs_ago.return_value = None
+    eng.detect_chords = AsyncMock(return_value={
+        "key": "G major",
+        "key_confidence": 0.85,
+        "chords": [{"chord": "G major", "start_sec": 0.0, "end_sec": 2.0, "confidence": 0.9}],
+        "duration": 8.0,
+    })
+    return eng
+
+
+def test_chords_200_returns_json():
+    eng = _make_chord_detect_engine()
+    files_dir = Path(tempfile.mkdtemp()) / "files"
+    files_dir.mkdir()
+
+    with patch("audiolla.server.config.FILES_DIR", files_dir), \
+         patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
+         patch.dict("audiolla.server.ENGINES", {"chord-detect": eng}, clear=True), \
+         patch.dict("audiolla.server.REGISTRY", {"chord-detect": {"executor": "chord_detect"}}, clear=True):
+        with TestClient(_server_mod.app) as c:
+            r = c.post(
+                "/v1/audio/chords",
+                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+            )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert "key" in body
+    assert "chords" in body
+    eng.detect_chords.assert_awaited_once()
+
+
+def test_chords_404_when_no_engine():
+    files_dir = Path(tempfile.mkdtemp()) / "files"
+    files_dir.mkdir()
+
+    with patch("audiolla.server.config.FILES_DIR", files_dir), \
+         patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
+         patch.dict("audiolla.server.ENGINES", {}, clear=True), \
+         patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        with TestClient(_server_mod.app) as c:
+            r = c.post(
+                "/v1/audio/chords",
+                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+            )
+
+    assert r.status_code == 404
+
+
+# ── /v1/audio/vad ─────────────────────────────────────────────────────────────
+
+
+def _make_vad_engine() -> MagicMock:
+    eng = MagicMock()
+    eng.loaded.return_value = False
+    eng.last_used_secs_ago.return_value = None
+    eng.detect_voice = AsyncMock(return_value={
+        "speech_segments": [{"start_sec": 0.5, "end_sec": 5.0, "duration_sec": 4.5}],
+        "non_speech_segments": [],
+        "speech_ratio": 0.75,
+        "duration": 6.0,
+        "threshold": 0.5,
+    })
+    return eng
+
+
+def test_vad_200_returns_json():
+    eng = _make_vad_engine()
+    files_dir = Path(tempfile.mkdtemp()) / "files"
+    files_dir.mkdir()
+
+    with patch("audiolla.server.config.FILES_DIR", files_dir), \
+         patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
+         patch.dict("audiolla.server.ENGINES", {"silero-vad": eng}, clear=True), \
+         patch.dict("audiolla.server.REGISTRY", {"silero-vad": {"executor": "vad"}}, clear=True):
+        with TestClient(_server_mod.app) as c:
+            r = c.post(
+                "/v1/audio/vad",
+                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+            )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert "speech_segments" in body
+    eng.detect_voice.assert_awaited_once()
+
+
+def test_vad_404_when_no_engine():
+    files_dir = Path(tempfile.mkdtemp()) / "files"
+    files_dir.mkdir()
+
+    with patch("audiolla.server.config.FILES_DIR", files_dir), \
+         patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
+         patch.dict("audiolla.server.ENGINES", {}, clear=True), \
+         patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        with TestClient(_server_mod.app) as c:
+            r = c.post(
+                "/v1/audio/vad",
+                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+            )
+
+    assert r.status_code == 404
+
+
+# ── /v1/audio/diarize/{engine} ────────────────────────────────────────────────
+
+
+def _make_diarize_engine() -> MagicMock:
+    eng = MagicMock()
+    eng.loaded.return_value = False
+    eng.last_used_secs_ago.return_value = None
+    eng.diarize = AsyncMock(return_value={
+        "segments": [
+            {"speaker": "SPEAKER_00", "start_sec": 0.0, "end_sec": 5.0, "duration_sec": 5.0},
+            {"speaker": "SPEAKER_01", "start_sec": 5.0, "end_sec": 10.0, "duration_sec": 5.0},
+        ],
+        "num_speakers": 2,
+        "speakers": ["SPEAKER_00", "SPEAKER_01"],
+        "duration": 10.0,
+    })
+    return eng
+
+
+def test_diarize_200_returns_json():
+    eng = _make_diarize_engine()
+    files_dir = Path(tempfile.mkdtemp()) / "files"
+    files_dir.mkdir()
+
+    with patch("audiolla.server.config.FILES_DIR", files_dir), \
+         patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
+         patch.dict("audiolla.server.ENGINES", {"pyannote": eng}, clear=True), \
+         patch.dict("audiolla.server.REGISTRY", {"pyannote": {"executor": "diarize_pyannote"}}, clear=True):
+        with TestClient(_server_mod.app) as c:
+            r = c.post(
+                "/v1/audio/diarize/pyannote",
+                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+            )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert "segments" in body
+    assert "num_speakers" in body
+    eng.diarize.assert_awaited_once()
+
+
+def test_diarize_404_for_unknown_engine():
+    files_dir = Path(tempfile.mkdtemp()) / "files"
+    files_dir.mkdir()
+
+    with patch("audiolla.server.config.FILES_DIR", files_dir), \
+         patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
+         patch.dict("audiolla.server.ENGINES", {}, clear=True), \
+         patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        with TestClient(_server_mod.app) as c:
+            r = c.post(
+                "/v1/audio/diarize/nonexistent",
+                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+            )
+
+    assert r.status_code == 404
+
+
+def test_diarize_400_for_wrong_engine_type():
+    wrong_eng = _make_fingerprint_engine()
+    del wrong_eng.diarize
+
+    files_dir = Path(tempfile.mkdtemp()) / "files"
+    files_dir.mkdir()
+
+    with patch("audiolla.server.config.FILES_DIR", files_dir), \
+         patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
+         patch.dict("audiolla.server.ENGINES", {"pyannote": wrong_eng}, clear=True), \
+         patch.dict("audiolla.server.REGISTRY", {"pyannote": {"executor": "diarize_pyannote"}}, clear=True):
+        with TestClient(_server_mod.app) as c:
+            r = c.post(
+                "/v1/audio/diarize/pyannote",
+                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+            )
+
+    assert r.status_code == 400
+    assert "diarization" in r.json()["detail"].lower()

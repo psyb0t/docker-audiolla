@@ -92,6 +92,18 @@
     "deepfilter": {
       "executor": "deepfilter",
       "description": "Neural speech and vocal enhancement via DeepFilterNet DF3"
+    },
+    "chord-detect": {
+      "executor": "chord_detect",
+      "description": "Chord and key detection via librosa Krumhansl-Schmuckler + chroma template matching"
+    },
+    "silero-vad": {
+      "executor": "vad",
+      "description": "Voice activity detection via silero-vad — speech/non-speech segments with timestamps"
+    },
+    "pyannote": {
+      "executor": "diarize_pyannote",
+      "description": "Speaker diarization via pyannote/speaker-diarization-3.1 — who spoke when (requires HUGGINGFACE_TOKEN)"
     }
   }
 }

@@ -1113,6 +1113,94 @@ def build_mcp_server(
             "output_format": output_format,
         }
 
+    # ── chord + key detection (librosa) ───────────────────────────────────────
+
+    @mcp.tool()
+    async def chords(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        hop_length: int = 512,
+        segment_min_duration_sec: float = 0.5,
+    ) -> dict[str, Any]:
+        """Chord + key detection via librosa chroma analysis.
+        Returns detected key with confidence, and time-stamped chord segments."""
+        from .engines import is_chord_detect_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("chord-detect")
+        if eng is None:
+            raise ValueError("chord-detect engine not configured")
+        if not is_chord_detect_engine(eng):
+            raise ValueError("chord-detect engine does not support chord detection")
+        try:
+            return await eng.detect_chords(
+                raw,
+                name,
+                hop_length=hop_length,
+                segment_min_duration_sec=segment_min_duration_sec,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def vad(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        threshold: float = 0.5,
+        min_speech_duration_ms: float = 250.0,
+        min_silence_duration_ms: float = 100.0,
+    ) -> dict[str, Any]:
+        """Voice activity detection via silero-vad. Returns speech/non-speech segments
+        with timestamps and overall speech ratio."""
+        from .engines import is_vad_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("silero-vad")
+        if eng is None:
+            raise ValueError("silero-vad engine not configured")
+        if not is_vad_engine(eng):
+            raise ValueError("silero-vad engine does not support voice activity detection")
+        try:
+            return await eng.detect_voice(
+                raw,
+                name,
+                threshold=threshold,
+                min_speech_duration_ms=min_speech_duration_ms,
+                min_silence_duration_ms=min_silence_duration_ms,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def diarize(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        engine: str = "pyannote",
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> dict[str, Any]:
+        """Speaker diarization — who spoke when. Returns time-stamped speaker segments.
+        engine options: pyannote (default, requires HUGGINGFACE_TOKEN)."""
+        from .engines import is_diarize_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(f"unknown engine {engine!r}")
+        if not is_diarize_engine(eng):
+            raise ValueError(f"engine {engine!r} does not support speaker diarization")
+        try:
+            return await eng.diarize(
+                raw,
+                name,
+                num_speakers=num_speakers,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
     # ── file staging tools ──────────────────────────────────────────────────
 
     @mcp.tool()
@@ -1168,5 +1256,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 15 tools")
+    _log.info("mcp server initialised: 18 tools")
     return mcp

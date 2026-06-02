@@ -7,8 +7,10 @@ from typing import Any
 from .. import config
 from .audio_fingerprint import AudioFingerprintEngine
 from .basic_pitch_engine import BasicPitchEngine
+from .chord_detect_engine import ChordDetectEngine
 from .deepfilter_engine import DeepFilterNetEngine
 from .demucs import DemucsEngine
+from .diarize_pyannote_engine import DiarizeEngine
 from .ffmpeg_render import FfmpegRenderEngine
 from .fx_chain import FxChainEngine
 from .librosa_analyze import LibrosaAnalyzeEngine
@@ -19,6 +21,7 @@ from .pedalboard_chain import PedalboardChainEngine
 from .silence_detect import SilenceDetectEngine
 from .sox_transform import SoxTransformEngine
 from .uvr_separator import UVRSeparatorEngine
+from .vad_engine import VADEngine
 
 
 def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
@@ -71,6 +74,15 @@ def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
             continue
         if executor == "deepfilter":
             out[slug] = DeepFilterNetEngine(slug=slug, entry=entry)
+            continue
+        if executor == "chord_detect":
+            out[slug] = ChordDetectEngine(slug=slug, entry=entry)
+            continue
+        if executor == "vad":
+            out[slug] = VADEngine(slug=slug, entry=entry)
+            continue
+        if executor == "diarize_pyannote":
+            out[slug] = DiarizeEngine(slug=slug, entry=entry)
             continue
         raise ValueError(f"unknown executor {executor!r} for engine {slug!r}")
     return out
@@ -158,3 +170,15 @@ def is_basic_pitch_engine(engine: Any) -> bool:
 
 def is_deepfilter_engine(engine: Any) -> bool:
     return hasattr(engine, "enhance") and hasattr(engine, "_df_state")
+
+
+def is_chord_detect_engine(engine: Any) -> bool:
+    return hasattr(engine, "detect_chords")
+
+
+def is_vad_engine(engine: Any) -> bool:
+    return hasattr(engine, "detect_voice")
+
+
+def is_diarize_engine(engine: Any) -> bool:
+    return hasattr(engine, "diarize")

@@ -162,6 +162,8 @@ FETCH_MAX_REDIRECTS: int = _int_env("AUDIOLLA_FETCH_MAX_REDIRECTS", 5)
 # fluid-soundfont-gm Debian package.
 SOUNDFONT_PATH: str = os.environ.get("AUDIOLLA_SOUNDFONT", "").strip()
 
+HUGGINGFACE_TOKEN: str = os.environ.get("HUGGINGFACE_TOKEN", "")
+
 _VALID_EXECUTORS = frozenset(
     {
         "demucs",
@@ -178,6 +180,9 @@ _VALID_EXECUTORS = frozenset(
         "uvr_separator",
         "basic_pitch",
         "deepfilter",
+        "chord_detect",
+        "vad",
+        "diarize_pyannote",
     }
 )
 
