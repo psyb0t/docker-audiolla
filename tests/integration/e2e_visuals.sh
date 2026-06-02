@@ -213,6 +213,49 @@ test_visualize_unknown_mode_400() {
     echo "OK: visualize_unknown_mode_400"
 }
 
+# ── spectrogram color + scale params ────────────────────────────────────────
+
+test_spectrogram_color_scale() {
+    local code tmp
+    tmp=$(mktemp --suffix=.png)
+    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
+        -X POST \
+        -F "file=@${FIXTURE}" \
+        -F "width=320" \
+        -F "height=160" \
+        -F "color=fire" \
+        -F "scale=lin" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/spectrogram")
+    assert_eq "$code" "200" "spectrogram color=fire scale=lin -> 200" || { rm -f "$tmp"; return 1; }
+    if ! _is_png "$tmp"; then
+        echo "  FAIL: response is not a PNG"
+        rm -f "$tmp"; return 1
+    fi
+    rm -f "$tmp"
+    echo "OK: spectrogram_color_scale"
+}
+
+# ── waveform color param ─────────────────────────────────────────────────────
+
+test_waveform_color() {
+    local code tmp
+    tmp=$(mktemp --suffix=.png)
+    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
+        -X POST \
+        -F "file=@${FIXTURE}" \
+        -F "width=320" \
+        -F "height=160" \
+        -F "color=cyan" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/waveform")
+    assert_eq "$code" "200" "waveform color=cyan -> 200" || { rm -f "$tmp"; return 1; }
+    if ! _is_png "$tmp"; then
+        echo "  FAIL: response is not a PNG"
+        rm -f "$tmp"; return 1
+    fi
+    rm -f "$tmp"
+    echo "OK: waveform_color"
+}
+
 harness_run_tests \
     test_spectrogram_png \
     test_waveform_png \
@@ -221,4 +264,6 @@ harness_run_tests \
     test_visualize_waves_webm \
     test_visualize_cqt_mp4 \
     test_visualize_output_path \
-    test_visualize_unknown_mode_400
+    test_visualize_unknown_mode_400 \
+    test_spectrogram_color_scale \
+    test_waveform_color

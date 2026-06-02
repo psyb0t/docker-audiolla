@@ -5,17 +5,43 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-> POST a track. Get stems, a master, analysis, or a processed file back. No cloud, no accounts, runs wherever Docker runs.
+**Twenty audio engines. One port. Zero cloud.**
 
-HTTP API for audio processing. You throw a WAV (or MP3, FLAC, whatever) at an endpoint and get audio or JSON out. Split a track into stems with Demucs. Master against a reference with matchering. Measure LUFS. Run a pedalboard effect chain — full catalog, your order and params. Extract BPM and key with librosa. Find beats, onsets, melody, and structural segments. Detect and trim silence. Generate a spectrogram or waveform PNG, or render an animated visualisation video. Compute a Chromaprint acoustic fingerprint. Chain sox transforms. Compose a song from a JSON spec, inspect or transform an existing MIDI file, and render it through fluidsynth + a General MIDI SoundFont. Use it from curl, a shell script, a Makefile, a Python notebook, a DAW pipeline, or an LLM agent over the MCP server at `/v1/mcp`. It's HTTP and JSON. The wire format doesn't care who's typing.
+You needed Demucs for stems. Then librosa for BPM and key. Then basic-pitch for MIDI transcription. Then pyannote for speaker diarization. Then DeepFilterNet for speech enhancement. Then you spent three days debugging Python version conflicts and now you hate everything.
 
-Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. OpenAPI spec included.
+audiolla is what happens when you stop doing that.
+
+Every audio processing tool worth using — wrapped in one HTTP API, running in one Docker container. POST a file. Get audio, JSON, or MIDI back. Drive it from curl, shell scripts, Python notebooks, Makefiles, or point an LLM agent at the MCP endpoint and let it rip.
+
+No account. No subscription. No per-minute billing. No vendor lock-in. `docker run` and you're done.
+
+---
+
+## What's in the box
+
+| | |
+|--|--|
+| 🎛️ **Stem separation** | Demucs — htdemucs, fine-tuned, 6-stem, MDX variants |
+| 🎚️ **Mastering** | Reference mastering (matchering) + custom pedalboard chains |
+| 📊 **Analysis** | BPM · key · LUFS · beats · onsets · melody · structural segments |
+| 🎹 **Chords + key** | Chord detection + Krumhansl-Schmuckler key estimation |
+| 🎵 **Audio → MIDI** | Polyphonic transcription via Spotify's basic-pitch (ONNX, no TF) |
+| 🧹 **Restoration** | De-reverb · de-echo · de-noise via UVR BS-Roformer + MelBand Roformer |
+| 🗣️ **Speech** | Enhancement (DeepFilterNet) · VAD (silero-vad) · diarization (pyannote) |
+| 🖼️ **Visuals** | Spectrogram + waveform PNGs + 8-mode animated MP4/WebM |
+| 🔍 **Fingerprint** | Chromaprint acoustic fingerprinting (AcoustID-compatible) |
+| ✂️ **Silence** | Detect gaps · trim edges · strip all silence |
+| 🎼 **MIDI pipeline** | Compose from JSON · inspect · transform · render via fluidsynth |
+| 🎸 **Effects** | 23-effect pedalboard chain — Compressor, Reverb, PitchShift, filters… |
+| 🔧 **Transforms** | Sox DSP — pitch, tempo, EQ, reverb, gain |
+| 📢 **Loudness** | Measure LUFS · normalize to target |
 
 ---
 
 ## Table of Contents
 
 - [Run it](#run-it)
+- [Quick start](#quick-start)
 - [What it can do](#what-it-can-do)
   - [Split stems](#split-stems)
   - [Master](#master)
@@ -27,6 +53,9 @@ Engines lazy-load on first use and auto-unload after idle. CPU and CUDA images. 
   - [De-reverb, de-echo, de-noise](#de-reverb-de-echo-de-noise)
   - [Audio-to-MIDI transcription](#audio-to-midi-transcription)
   - [Neural speech and vocal enhancement](#neural-speech-and-vocal-enhancement)
+  - [Chord and key detection](#chord-and-key-detection)
+  - [Voice activity detection](#voice-activity-detection)
+  - [Speaker diarization](#speaker-diarization)
   - [Transform](#transform)
   - [Loudness](#loudness)
   - [Effects chain](#effects-chain)
@@ -69,21 +98,57 @@ Demucs weights prefetch at container startup (for whichever variants are enabled
 
 ---
 
+## Quick start
+
+Once the container is up, this is a complete audio pipeline in six curl commands:
+
+```bash
+# rip the vocals out of a track
+curl -X POST http://localhost:8000/v1/audio/separate \
+  -F "file=@song.wav" -F "engine=htdemucs" -F "stems=vocals" \
+  -o vocals.wav
+
+# what key is it in? what are the chords?
+curl -X POST http://localhost:8000/v1/audio/chords -F "file=@song.wav"
+# → {"key":"F# minor","key_confidence":0.91,"chords":[{"chord":"F#m","start_sec":0.0,...},...]}
+
+# transcribe that vocal melody to MIDI
+curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
+  -F "file=@vocals.wav" -o melody.mid
+
+# render the MIDI back to audio through a SoundFont
+curl -X POST http://localhost:8000/v1/midi/render \
+  -F "file=@melody.mid" -o rendered.wav
+
+# strip background noise from a voice recording
+curl -X POST http://localhost:8000/v1/audio/denoise/uvr-denoise \
+  -F "file=@interview.wav" -o clean.wav
+
+# who's speaking and when?
+curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
+  -F "file=@interview.wav"
+# → {"num_speakers":2,"segments":[{"speaker":"SPEAKER_00","start_sec":0.5,"end_sec":8.2},...]}
+```
+
+Audio in. MIDI out. Chords detected. Speakers identified. De-noised. Re-synthesized. No Python environment to set up. No API keys. No account. Just HTTP.
+
+---
+
 ## What it can do
 
-Output defaults to `wav`. Any endpoint that returns audio accepts `-F "output_format=mp3"` (also `flac`, `opus`, `aac`, `pcm`).
+Output defaults to `wav`. Pass `-F "output_format=mp3"` to get mp3 instead (`flac`, `opus`, `aac`, `pcm` also work).
 
-**Input modes** — every audio endpoint accepts exactly one of:
+**Input** — every audio endpoint accepts exactly one of:
 
 - `file` — multipart upload (the default in the examples below)
-- `file_path` — relative path under the `/v1/files` staging area
-- `file_url` — remote URL the server fetches (off by default — see [Remote URLs](#remote-urls))
+- `file_path` — path inside the `/v1/files` staging area
+- `file_url` — remote URL the server fetches (disabled by default — see [Remote URLs](#remote-urls))
 
-**Output modes** — audio-producing endpoints optionally accept one of:
+**Output** — audio-producing endpoints also accept:
 
-- `output_path` — server writes the result to `/v1/files/<path>`, response is JSON
-- `output_url` — server PUTs the result to a presigned URL, response is JSON
-- neither → audio bytes inline (the default)
+- `output_path` — server writes to `/v1/files/<path>`, returns JSON
+- `output_url` — server PUTs to a presigned URL, returns JSON
+- neither → raw audio bytes (the default)
 
 ### Split stems
 
@@ -153,7 +218,7 @@ curl -X POST http://localhost:8000/v1/audio/segments \
   -F "num_segments=4"
 ```
 
-Beat detection also generates a click-track file when `click_track=true` — handy for aligning a mix to a grid. Melody can be exported as a single-track MIDI file via `as_midi=true`.
+Beat detection also generates a click-track file when `click_track=true` — handy for aligning a mix to a grid. Pass `start_bpm=140` to seed the tracker when you already know the rough tempo (faster, more accurate). Melody can be exported as a single-track MIDI file via `as_midi=true`.
 
 ### Silence detection and trimming
 
@@ -233,25 +298,27 @@ The base64 fingerprint string is compatible with the [AcoustID](https://acoustid
 
 AI audio restoration via UVR ecosystem models — BS-Roformer and MelBand Roformer. These operate on the signal itself, not silence thresholds.
 
+The engine slug is part of the URL path — pick the one you want:
+
 ```bash
-# Remove room reverb from a recording (BS-Roformer, SDR 19+)
-curl -X POST http://localhost:8000/v1/audio/dereverb \
+# Remove room reverb (BS-Roformer, SDR 19+)
+curl -X POST http://localhost:8000/v1/audio/dereverb/uvr-dereverb \
   -F "file=@track.wav" \
   -o dry.wav
 
-# Remove echo (VR Architecture — normal or aggressive)
-curl -X POST http://localhost:8000/v1/audio/deecho \
-  -F "file=@track.wav" \
-  -F "engine=uvr-deecho-aggressive" \
-  -o noecho.wav
+# Remove echo — normal or aggressive variant
+curl -X POST http://localhost:8000/v1/audio/deecho/uvr-deecho \
+  -F "file=@track.wav" -o noecho.wav
+curl -X POST http://localhost:8000/v1/audio/deecho/uvr-deecho-aggressive \
+  -F "file=@track.wav" -o noecho.wav
 
 # Remove broadband background noise (MelBand Roformer, SDR 28)
-curl -X POST http://localhost:8000/v1/audio/denoise \
+curl -X POST http://localhost:8000/v1/audio/denoise/uvr-denoise \
   -F "file=@track.wav" \
   -o clean.wav
 ```
 
-Default engines: `uvr-dereverb`, `uvr-deecho`, `uvr-denoise`. Override with `engine=<slug>`. All three support `output_format`, `output_path`, `output_url`.
+All three support `output_format`, `output_path`, `output_url`.
 
 UVR engines also work through `/v1/audio/separate` — `uvr-vocal-bsr` (BS-Roformer, SDR 13) and `uvr-karaoke` return vocal + instrumental stems like Demucs but often with higher quality.
 
@@ -261,12 +328,12 @@ Polyphonic audio-to-MIDI via Spotify's basic-pitch (ONNX backend, no TensorFlow)
 
 ```bash
 # Any audio → MIDI bytes
-curl -X POST http://localhost:8000/v1/audio/to_midi \
+curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
   -F "file=@guitar_riff.wav" \
   -o riff.mid
 
 # Tune the detection thresholds
-curl -X POST http://localhost:8000/v1/audio/to_midi \
+curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
   -F "file=@piano.wav" \
   -F "onset_threshold=0.6" \
   -F "frame_threshold=0.3" \
@@ -274,7 +341,7 @@ curl -X POST http://localhost:8000/v1/audio/to_midi \
   -o piano.mid
 
 # Write directly to staging
-curl -X POST http://localhost:8000/v1/audio/to_midi \
+curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
   -F "file_path=recordings/bass.wav" \
   -F "output_path=midi/bass_notes.mid"
 # → {"path":"midi/bass_notes.mid","size":...,"engine":"basic-pitch","output_format":"mid"}
@@ -290,18 +357,117 @@ DeepFilterNet DF3 — deep learning noise suppression trained on speech. Better 
 
 ```bash
 # Enhance a vocal recording
-curl -X POST http://localhost:8000/v1/audio/enhance \
+curl -X POST http://localhost:8000/v1/audio/enhance/deepfilter \
   -F "file=@vocal_recording.wav" \
   -o enhanced.wav
 
 # Stage the output, mp3
-curl -X POST http://localhost:8000/v1/audio/enhance \
+curl -X POST http://localhost:8000/v1/audio/enhance/deepfilter \
   -F "file_path=vocals/raw.wav" \
   -F "output_format=mp3" \
   -F "output_path=vocals/enhanced.mp3"
 ```
 
-Default engine: `deepfilter`. Supports `output_format`, `output_path`, `output_url`.
+Supports `output_format`, `output_path`, `output_url`.
+
+### Chord and key detection
+
+Krumhansl-Schmuckler key estimation + chroma-template chord segmentation via librosa. No extra deps beyond the librosa stack.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/chords \
+  -F "file=@track.wav"
+# → {
+#     "key": "C major",
+#     "key_confidence": 0.87,
+#     "duration": 183.4,
+#     "chords": [
+#       {"chord": "C", "start_sec": 0.0, "end_sec": 2.3, "confidence": 0.91},
+#       {"chord": "Am", "start_sec": 2.3, "end_sec": 4.6, "confidence": 0.85},
+#       ...
+#     ]
+#   }
+
+# Tune the hop length (lower = finer time resolution)
+curl -X POST http://localhost:8000/v1/audio/chords \
+  -F "file=@track.wav" \
+  -F "hop_length=256"
+```
+
+Optional params: `hop_length` (default 512), `segment_min_duration_sec` (default 0.5 — merge very short chord segments).
+
+### Voice activity detection
+
+silero-vad — ONNX-based VAD, fast and accurate on both speech and music. Returns timestamped speech and non-speech segments.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/vad \
+  -F "file=@interview.wav"
+# → {
+#     "speech_ratio": 0.73,
+#     "duration": 120.0,
+#     "threshold": 0.5,
+#     "speech_segments": [
+#       {"start_sec": 1.2, "end_sec": 8.4},
+#       ...
+#     ],
+#     "non_speech_segments": [
+#       {"start_sec": 0.0, "end_sec": 1.2},
+#       ...
+#     ]
+#   }
+
+# Tighter detection
+curl -X POST http://localhost:8000/v1/audio/vad \
+  -F "file=@podcast.wav" \
+  -F "threshold=0.7" \
+  -F "min_speech_duration_ms=300" \
+  -F "min_silence_duration_ms=200"
+```
+
+Optional params: `threshold` (0–1, default 0.5), `min_speech_duration_ms` (default 250), `min_silence_duration_ms` (default 100).
+
+### Speaker diarization
+
+pyannote/speaker-diarization-3.1 — state-of-the-art speaker diarization from HuggingFace Hub. Returns per-speaker timestamped segments and speaker count.
+
+> **Note:** This engine requires a HuggingFace account. You must accept the model terms at
+> [https://huggingface.co/pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+> and then set `HUGGINGFACE_TOKEN` when starting the container. A read-only token with model access is enough.
+
+```bash
+docker run ... \
+  -e HUGGINGFACE_TOKEN=hf_your_token_here \
+  psyb0t/audiolla:latest
+```
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
+  -F "file=@interview.wav"
+# → {
+#     "num_speakers": 2,
+#     "speakers": ["SPEAKER_00", "SPEAKER_01"],
+#     "duration": 120.0,
+#     "segments": [
+#       {"speaker": "SPEAKER_00", "start_sec": 0.5, "end_sec": 8.2, "duration_sec": 7.7},
+#       {"speaker": "SPEAKER_01", "start_sec": 8.5, "end_sec": 14.1, "duration_sec": 5.6},
+#       ...
+#     ]
+#   }
+
+# Hint the expected speaker count
+curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
+  -F "file=@roundtable.wav" \
+  -F "num_speakers=4"
+
+# Or constrain the range
+curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
+  -F "file=@panel.wav" \
+  -F "min_speakers=2" \
+  -F "max_speakers=6"
+```
+
+Optional params: `num_speakers` (exact count hint), `min_speakers`, `max_speakers`.
 
 ### Transform
 
@@ -416,21 +582,20 @@ curl -X POST http://localhost:8000/v1/midi/transform \
   -F "drop_channels=9" \
   -o no-drums.mid
 
-# keep only channels 0 and 1
+# keep only channels 0 and 1 (comma-separated)
 curl -X POST http://localhost:8000/v1/midi/transform \
   -F "file=@song.mid" \
-  -F "keep_channels=0" \
-  -F "keep_channels=1" \
+  -F "keep_channels=0,1" \
   -o two-ch.mid
 
 # quantize to 1/16th notes
 curl -X POST http://localhost:8000/v1/midi/transform \
   -F "file=@song.mid" \
-  -F "quantize=0.25" \
+  -F "quantize_grid_beats=0.25" \
   -o quantized.mid
 ```
 
-`transpose_semitones` ±48. `quantize` is in beats (0.25 = 1/16th at 4/4). `keep_channels` and `drop_channels` accept multiple values; only one can be set per request.
+`transpose_semitones` ±48. `quantize_grid_beats` is in beats (0.25 = 1/16th at 4/4). `keep_channels` and `drop_channels` take comma-separated channel numbers (`0,1,2`); only one can be set per request.
 
 ### Render MIDI to audio
 
@@ -564,6 +729,9 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `uvr-vocal-bsr` | BS-Roformer vocal/instrumental (SDR 13) — highest-quality vocal separation; works via `/v1/audio/separate`. |
 | `basic-pitch` | Polyphonic audio-to-MIDI via Spotify basic-pitch (ONNX backend). Backs `/v1/audio/to_midi`. |
 | `deepfilter` | Neural speech and vocal enhancement via DeepFilterNet DF3. Backs `/v1/audio/enhance`. |
+| `chord-detect` | Chord and key detection via librosa — Krumhansl-Schmuckler key estimation + chroma template chord segmentation. Backs `/v1/audio/chords`. |
+| `silero-vad` | Voice activity detection via silero-vad (ONNX) — returns speech/non-speech segments with timestamps and speech ratio. Backs `/v1/audio/vad`. |
+| `pyannote` | Speaker diarization via pyannote/speaker-diarization-3.1 — returns per-speaker timestamped segments. Requires `HUGGINGFACE_TOKEN`. Backs `/v1/audio/diarize`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
@@ -596,11 +764,14 @@ bytes.
 | `POST` | `/v1/audio/waveform` | PNG bytes |
 | `POST` | `/v1/audio/visualize` | MP4 bytes (default `container=mp4`); pass `container=webm` for WebM — 8 animation modes |
 | `POST` | `/v1/audio/fingerprint` | JSON — Chromaprint fingerprint string |
-| `POST` | `/v1/audio/dereverb` | audio bytes — room reverb removed |
-| `POST` | `/v1/audio/deecho` | audio bytes — echo removed |
-| `POST` | `/v1/audio/denoise` | audio bytes — broadband noise removed |
-| `POST` | `/v1/audio/to_midi` | MIDI bytes (`audio/midi`) — polyphonic transcription |
-| `POST` | `/v1/audio/enhance` | audio bytes — neural speech/vocal enhancement |
+| `POST` | `/v1/audio/dereverb/{engine}` | audio bytes — room reverb removed |
+| `POST` | `/v1/audio/deecho/{engine}` | audio bytes — echo removed |
+| `POST` | `/v1/audio/denoise/{engine}` | audio bytes — broadband noise removed |
+| `POST` | `/v1/audio/to_midi/{engine}` | MIDI bytes (`audio/midi`) — polyphonic transcription |
+| `POST` | `/v1/audio/enhance/{engine}` | audio bytes — neural speech/vocal enhancement |
+| `POST` | `/v1/audio/chords` | JSON — detected key and chord progression |
+| `POST` | `/v1/audio/vad` | JSON — speech/non-speech segments with timestamps and speech ratio |
+| `POST` | `/v1/audio/diarize/{engine}` | JSON — per-speaker timestamped segments |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
 | `POST` | `/v1/audio/fx` | audio bytes |
@@ -638,9 +809,9 @@ bytes.
 
 ## MCP
 
-audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp` using the streamable HTTP transport. Any MCP client gets the full audio processing surface — separate stems, master tracks, analyze, transform, normalize, compose / render / generate MIDI — over JSON-RPC. Convenient if you're driving things from an LLM agent, but the underlying REST API is doing the work either way.
+audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp`. Point any MCP-capable LLM agent at it and it gets the full audio processing surface as callable tools — separate stems, detect chords, transcribe to MIDI, diarize speakers, compose music from a JSON spec — all over JSON-RPC without writing a line of integration code.
 
-Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The intended workflow is: `put_file` to stage a file, call whatever tools you need, `get_file` to pull results back.
+Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow: `put_file` to stage a file, call whatever tools you need, `get_file` to pull results back.
 
 **Endpoint:** `http://localhost:8000/v1/mcp`
 
@@ -666,6 +837,9 @@ Audio in and out over MCP is base64-encoded (JSON-RPC can't carry raw bytes). Th
 | `denoise` | Remove broadband background noise via UVR MelBand Roformer |
 | `audio_to_midi` | Polyphonic audio-to-MIDI transcription via basic-pitch (ONNX) — returns MIDI base64 |
 | `enhance` | Neural speech and vocal enhancement via DeepFilterNet DF3 |
+| `chords` | Chord and key detection via librosa — key + per-segment chord labels |
+| `vad` | Voice activity detection via silero-vad — speech/non-speech segments with timestamps |
+| `diarize` | Speaker diarization via pyannote — per-speaker timestamped segments |
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
 | `loudness` | Measure LUFS or normalize to a target |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
@@ -692,6 +866,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_DATA_DIR` | `/data` | where models and staged files live |
 | `AUDIOLLA_UVR_MODELS_DIR` | `<DATA_DIR>/uvr_models` | where UVR model files are cached |
 | `AUDIOLLA_AUTH_TOKEN` | — | bearer token; empty means no auth |
+| `HUGGINGFACE_TOKEN` | — | HuggingFace access token; required for `pyannote` speaker diarization (accept model terms at huggingface.co/pyannote/speaker-diarization-3.1 first) |
 | `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
 | `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
@@ -714,7 +889,6 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | Music generation | MusicGen is CC-BY-NC. Stable Audio Open needs a Stability AI commercial agreement. Nothing permissively licensed at production quality exists yet. |
 | Essentia analysis | AGPL v3 — any network service using it has to publish full source. librosa handles the common cases without that. |
 | Streaming separation | Demucs needs the whole file. No chunked or real-time inference. |
-| Speech denoising | resemble-enhance / DeepFilterNet are for speech. Useful after you've already pulled vocals with Demucs, but that's a different tool. |
 | VST3 plugin hosting | Pedalboard can do it but you'd need to mount your host plugin directory. Out of scope for the default image. |
 | rubberband pitch/time-stretch | GPL v2 + commercial license. Sox handles basic pitch and tempo. Add it yourself if you accept the terms. |
 

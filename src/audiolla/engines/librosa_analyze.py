@@ -164,13 +164,14 @@ class LibrosaAnalyzeEngine(EngineBase):
         *,
         click_track: bool = False,
         output_format: str = "wav",
+        start_bpm: float | None = None,
     ) -> dict[str, Any]:
         """Full beat tracking — returns BPM + per-beat times. With
         ``click_track=True``, also returns a base64-encoded audio rendering
         of the input mixed with a metronome click on each beat."""
         async with self._lock:
             result = await asyncio.to_thread(
-                self._beats_sync, raw, filename, click_track, output_format,
+                self._beats_sync, raw, filename, click_track, output_format, start_bpm,
             )
             self._touch()
             return result
@@ -181,6 +182,7 @@ class LibrosaAnalyzeEngine(EngineBase):
         filename: str,
         click_track: bool,
         output_format: str,
+        start_bpm: float | None,
     ) -> dict[str, Any]:
         import base64
 
@@ -191,7 +193,8 @@ class LibrosaAnalyzeEngine(EngineBase):
         wav_path = to_wav_float32(raw, filename)
         try:
             y, sr = librosa.load(wav_path, sr=None, mono=True)
-            tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+            kw = {"start_bpm": start_bpm} if start_bpm is not None else {}
+            tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, **kw)
             tempo_val = float(np.atleast_1d(tempo)[0])
             beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
             result: dict[str, Any] = {

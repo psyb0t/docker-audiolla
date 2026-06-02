@@ -83,6 +83,23 @@ test_beats_click_track_output_path() {
     echo "OK: beats_click_track_output_path"
 }
 
+# ── beats start_bpm: hint speeds up tracking without changing result shape ───
+
+test_beats_start_bpm() {
+    local body
+    body=$(curl -s --max-time 60 -X POST \
+        -F "file=@${FIXTURE}" \
+        -F "start_bpm=140" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/beats")
+    if ! echo "$body" | jq -e '.tempo_bpm | type == "number"' >/dev/null 2>&1; then
+        echo "  FAIL: tempo_bpm missing with start_bpm hint; body: $body"; return 1
+    fi
+    if ! echo "$body" | jq -e '.beats | type == "array"' >/dev/null 2>&1; then
+        echo "  FAIL: beats array missing; body: $body"; return 1
+    fi
+    echo "OK: beats_start_bpm (tempo=$(echo "$body" | jq -r '.tempo_bpm'))"
+}
+
 # ── onsets: list of {time, strength} ────────────────────────────────────────
 
 test_onsets_returns_list() {
@@ -167,6 +184,7 @@ harness_run_tests \
     test_beats_returns_tempo_and_beats \
     test_beats_click_track_is_wav \
     test_beats_click_track_output_path \
+    test_beats_start_bpm \
     test_onsets_returns_list \
     test_melody_contour \
     test_melody_as_midi \

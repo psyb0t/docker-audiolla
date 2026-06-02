@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         git \
         curl \
+        cargo \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.15@sha256:e590846f4776907b254ac0f44b5b380347af5d90d668138ca7938d1b0c2f98d3 /uv /usr/local/bin/uv
@@ -40,14 +41,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # 2) Heavy ML / DSP deps — CUDA torch (cu126 channel, matches base CUDA 12.6.3),
 #    hash-locked. See scripts/heavy-deps-cuda.in for the human spec. Pins:
 #    torch/torchaudio 2.5.1, demucs 4.0.1, matchering 2.0.6, pedalboard 0.9.20,
-#    pyloudnorm 0.1.1, librosa 0.10.2, sox 1.4.1, numpy 1.26.4,
+#    pyloudnorm 0.1.1, librosa 0.10.2, sox 1.4.1, numpy 2.1.3,
 #    soundfile 0.12.1, huggingface-hub 0.30.2.
 COPY requirements-heavy-cuda.txt ./
+# requirements-heavy-cuda.txt was compiled with --override so that
+# numpy==2.1.3 (needed by audio-separator) coexists with deepfilternet's
+# over-conservative numpy<2.0 declaration. At install time we extract the
+# numpy block (with all its hashes) from the requirements file and pass it
+# as the override so uv accepts the constraint conflict.
 RUN --mount=type=cache,target=/root/.cache/uv \
+    python3 -c "import re,sys; txt=open('requirements-heavy-cuda.txt').read(); m=re.search(r'(numpy==[\d.]+(?:\s*\\\\\n\s+--hash=sha256:[a-f0-9]+)+)', txt); open('/tmp/np-override.txt','w').write(m.group(1).rstrip(' \\\\\n')+'\ntensorflow ; sys_platform == \"never\"\ntensorflow-cpu ; sys_platform == \"never\"\n') if m else sys.exit('numpy block not found')" && \
     uv pip install --python /opt/venv/bin/python --no-config \
         --extra-index-url https://download.pytorch.org/whl/cu126 \
         --index-strategy unsafe-best-match \
         --require-hashes \
+        --override /tmp/np-override.txt \
         -r requirements-heavy-cuda.txt
 
 # -----------------------------------------------------------------------------

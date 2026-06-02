@@ -87,8 +87,34 @@ test_fingerprint_via_file_path() {
     echo "OK: fingerprint_via_file_path"
 }
 
+# ── analyze_seconds: limits how many seconds fpcalc scans ───────────────────
+
+test_fingerprint_analyze_seconds() {
+    local body_full body_short fp_full fp_short
+    # Default (120s) — covers the entire 8s fixture so both should match.
+    body_full=$(curl -s --max-time 60 -X POST \
+        -F "file=@${FIXTURE}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
+    body_short=$(curl -s --max-time 60 -X POST \
+        -F "file=@${FIXTURE}" \
+        -F "analyze_seconds=3" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
+    if ! echo "$body_short" | jq -e '.fingerprint | type == "string" and length > 0' >/dev/null 2>&1; then
+        echo "  FAIL: fingerprint missing with analyze_seconds=3; body: $body_short"; return 1
+    fi
+    # A 3s window produces a shorter (or equal) fingerprint than full scan.
+    fp_full=$(echo "$body_full"  | jq -r '.fingerprint | length')
+    fp_short=$(echo "$body_short" | jq -r '.fingerprint | length')
+    if [ "$fp_short" -gt "$fp_full" ]; then
+        echo "  FAIL: shorter window produced a longer fingerprint ($fp_short > $fp_full)"
+        return 1
+    fi
+    echo "OK: fingerprint_analyze_seconds (full=${fp_full} short=${fp_short} chars)"
+}
+
 harness_run_tests \
     test_fingerprint_returns_string \
     test_fingerprint_is_deterministic \
     test_fingerprint_return_raw \
-    test_fingerprint_via_file_path
+    test_fingerprint_via_file_path \
+    test_fingerprint_analyze_seconds

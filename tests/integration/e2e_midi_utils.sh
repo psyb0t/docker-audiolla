@@ -176,6 +176,50 @@ test_transform_tempo_output_path() {
     echo "OK: transform_tempo_output_path"
 }
 
+# ── transform: quantize_grid_beats snaps notes to grid ────────────────────────
+
+test_transform_quantize_grid_beats() {
+    local mid out code
+    mid=$(mktemp --suffix=.mid)
+    build_demo_midi "$mid" || { rm -f "$mid"; return 1; }
+    out=$(mktemp --suffix=.mid)
+    code=$(curl -s -o "$out" -w "%{http_code}" --max-time 30 \
+        -X POST \
+        -F "file=@${mid}" \
+        -F "quantize_grid_beats=0.25" \
+        "${AUDIOLLA_BASE_URL}/v1/midi/transform")
+    rm -f "$mid"
+    assert_eq "$code" "200" "quantize_grid_beats -> 200" || { rm -f "$out"; return 1; }
+    head -c 4 "$out" | grep -q "MThd" || { echo "  FAIL: not MIDI"; rm -f "$out"; return 1; }
+    rm -f "$out"
+    echo "OK: transform_quantize_grid_beats"
+}
+
+# ── transform: keep_channels whitelists only specified channels ────────────────
+
+test_transform_keep_channels() {
+    local mid out after code
+    mid=$(mktemp --suffix=.mid)
+    build_demo_midi "$mid" || { rm -f "$mid"; return 1; }
+    out=$(mktemp --suffix=.mid)
+    # Keep only channel 0 (Lead) — channel 9 (Kick) should disappear.
+    code=$(curl -s -o "$out" -w "%{http_code}" --max-time 30 \
+        -X POST \
+        -F "file=@${mid}" \
+        -F "keep_channels=0" \
+        "${AUDIOLLA_BASE_URL}/v1/midi/transform")
+    assert_eq "$code" "200" "keep_channels=0 -> 200" || { rm -f "$mid" "$out"; return 1; }
+    after=$(curl -s --max-time 30 -X POST -F "file=@${out}" \
+        "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
+    rm -f "$mid" "$out"
+    # Channel 9 must be gone after keeping only channel 0.
+    if echo "$after" | jq -e '.tracks | any(.channels | any(. == 9))' >/dev/null 2>&1; then
+        echo "  FAIL: channel 9 still present after keep_channels=0; body: $after"
+        return 1
+    fi
+    echo "OK: transform_keep_channels"
+}
+
 # ── invalid: both keep + drop → 400 ───────────────────────────────────────
 
 test_transform_both_keep_drop_400() {
@@ -201,4 +245,6 @@ harness_run_tests \
     test_transform_transpose_round_trips \
     test_transform_drop_drums \
     test_transform_tempo_output_path \
+    test_transform_quantize_grid_beats \
+    test_transform_keep_channels \
     test_transform_both_keep_drop_400

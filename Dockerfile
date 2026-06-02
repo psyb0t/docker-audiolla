@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         git \
         curl \
+        cargo \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.15@sha256:e590846f4776907b254ac0f44b5b380347af5d90d668138ca7938d1b0c2f98d3 /uv /usr/local/bin/uv
@@ -46,11 +47,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 #    torch 2.5.1+cpu, torchaudio 2.5.1+cpu, numpy 1.26.4,
 #    soundfile 0.12.1, huggingface-hub 0.30.2.
 COPY requirements-heavy-cpu.txt ./
+# deepfilternet==0.5.6 declares numpy<2.0 (overly conservative; works fine
+# with 2.x). Extract the full numpy block (with hashes) from the requirements
+# file and pass it as --override so uv accepts the constraint conflict.
+# Tensorflow exclusion prevents resolution of basic-pitch's optional dep.
 RUN --mount=type=cache,target=/root/.cache/uv \
+    python3 -c "import re,sys; txt=open('requirements-heavy-cpu.txt').read(); m=re.search(r'(numpy==[\d.]+(?:\s*\\\\\n\s+--hash=sha256:[a-f0-9]+)+)', txt); open('/tmp/np-override.txt','w').write(m.group(1).rstrip(' \\\\\n')+'\ntensorflow ; sys_platform == \"never\"\ntensorflow-cpu ; sys_platform == \"never\"\n') if m else sys.exit('numpy block not found')" && \
     uv pip install --python /opt/venv/bin/python --no-config \
         --extra-index-url https://download.pytorch.org/whl/cpu \
         --index-strategy unsafe-best-match \
         --require-hashes \
+        --override /tmp/np-override.txt \
         -r requirements-heavy-cpu.txt
 
 # -----------------------------------------------------------------------------
