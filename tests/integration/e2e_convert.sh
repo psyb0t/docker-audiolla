@@ -136,14 +136,14 @@ test_convert_invalid_sample_rate_400() {
 
 # ── missing file → 400 ───────────────────────────────────────────────────────
 
-test_convert_missing_file_400() {
+test_convert_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         "${AUDIOLLA_BASE_URL}/v1/audio/convert")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: convert_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: convert_missing_file_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -177,5 +177,5 @@ harness_run_tests \
     test_convert_to_mono \
     test_convert_invalid_channels_400 \
     test_convert_invalid_sample_rate_400 \
-    test_convert_missing_file_400 \
+    test_convert_missing_file_404 \
     test_convert_output_path

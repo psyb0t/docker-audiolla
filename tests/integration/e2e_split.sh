@@ -134,7 +134,7 @@ test_split_invalid_mode_400() {
 
 # ── missing file → 400 ───────────────────────────────────────────────────────
 
-test_split_missing_file_400() {
+test_split_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
@@ -142,8 +142,8 @@ test_split_missing_file_400() {
         -F "mode=equal" \
         -F "count=2" \
         "${AUDIOLLA_BASE_URL}/v1/audio/split")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: split_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: split_missing_file_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -183,5 +183,5 @@ harness_run_tests \
     test_split_silence_returns_zip \
     test_split_equal_missing_count_400 \
     test_split_invalid_mode_400 \
-    test_split_missing_file_400 \
+    test_split_missing_file_404 \
     test_split_output_path

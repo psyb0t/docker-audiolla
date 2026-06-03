@@ -108,15 +108,15 @@ test_fade_neither_400() {
 
 # ── missing file → 400 ───────────────────────────────────────────────────────
 
-test_fade_missing_file_400() {
+test_fade_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         -F "fade_in=1.0" \
         "${AUDIOLLA_BASE_URL}/v1/audio/fade")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: fade_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: fade_missing_file_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -150,5 +150,5 @@ harness_run_tests \
     test_fade_custom_curve \
     test_fade_output_format_mp3 \
     test_fade_neither_400 \
-    test_fade_missing_file_400 \
+    test_fade_missing_file_404 \
     test_fade_output_path

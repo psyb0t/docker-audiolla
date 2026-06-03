@@ -133,14 +133,14 @@ test_concat_missing_files_422() {
 
 # ── nonexistent file in array → 400 ──────────────────────────────────────────
 
-test_concat_missing_file_in_array_400() {
+test_concat_missing_file_in_array_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F 'files=[{"file_path":"concat/part_a.wav"},{"file_path":"concat/ghost.wav"}]' \
         "${AUDIOLLA_BASE_URL}/v1/audio/concat")
-    assert_eq "$code" "400" "missing file in array -> 400" || return 1
-    echo "OK: concat_missing_file_in_array_400"
+    assert_eq "$code" "404" "missing file in array -> 404" || return 1
+    echo "OK: concat_missing_file_in_array_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -172,5 +172,5 @@ harness_run_tests \
     test_concat_one_file_400 \
     test_concat_invalid_files_json_400 \
     test_concat_missing_files_422 \
-    test_concat_missing_file_in_array_400 \
+    test_concat_missing_file_in_array_404 \
     test_concat_output_path

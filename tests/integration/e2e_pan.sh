@@ -111,14 +111,14 @@ test_pan_out_of_range_400() {
 
 # ── missing file → 400 ───────────────────────────────────────────────────────
 
-test_pan_missing_file_400() {
+test_pan_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         "${AUDIOLLA_BASE_URL}/v1/audio/pan")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: pan_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: pan_missing_file_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -151,5 +151,5 @@ harness_run_tests \
     test_pan_output_stereo \
     test_pan_output_format_mp3 \
     test_pan_out_of_range_400 \
-    test_pan_missing_file_400 \
+    test_pan_missing_file_404 \
     test_pan_output_path

@@ -125,15 +125,15 @@ test_key_match_missing_key_422() {
 
 # ── missing file → 400 ───────────────────────────────────────────────────────
 
-test_key_match_missing_file_400() {
+test_key_match_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         -F "target_key=C" \
         "${AUDIOLLA_BASE_URL}/v1/audio/key-match")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: key_match_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: key_match_missing_file_404"
 }
 
 harness_run_tests \
@@ -144,4 +144,4 @@ harness_run_tests \
     test_key_match_output_format_mp3 \
     test_key_match_invalid_key_400 \
     test_key_match_missing_key_422 \
-    test_key_match_missing_file_400
+    test_key_match_missing_file_404

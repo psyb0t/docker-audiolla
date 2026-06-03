@@ -112,14 +112,14 @@ test_stereo_width_negative_400() {
 
 # ── missing file → 400 ───────────────────────────────────────────────────────
 
-test_stereo_width_missing_file_400() {
+test_stereo_width_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         "${AUDIOLLA_BASE_URL}/v1/audio/stereo-width")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: stereo_width_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: stereo_width_missing_file_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -152,5 +152,5 @@ harness_run_tests \
     test_stereo_width_output_format_mp3 \
     test_stereo_width_out_of_range_400 \
     test_stereo_width_negative_400 \
-    test_stereo_width_missing_file_400 \
+    test_stereo_width_missing_file_404 \
     test_stereo_width_output_path

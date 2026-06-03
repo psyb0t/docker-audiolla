@@ -105,15 +105,15 @@ test_sidechain_duck_missing_trigger_400() {
 
 # ── missing primary file → 400 ───────────────────────────────────────────────
 
-test_sidechain_duck_missing_primary_400() {
+test_sidechain_duck_missing_primary_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         -F "trigger_file=@${FIXTURE_REF}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/sidechain-duck")
-    assert_eq "$code" "400" "missing primary -> 400" || return 1
-    echo "OK: sidechain_duck_missing_primary_400"
+    assert_eq "$code" "404" "missing primary -> 404" || return 1
+    echo "OK: sidechain_duck_missing_primary_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -145,5 +145,5 @@ harness_run_tests \
     test_sidechain_duck_output_format_mp3 \
     test_sidechain_duck_staged_trigger \
     test_sidechain_duck_missing_trigger_400 \
-    test_sidechain_duck_missing_primary_400 \
+    test_sidechain_duck_missing_primary_404 \
     test_sidechain_duck_output_path

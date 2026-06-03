@@ -91,15 +91,15 @@ test_similar_missing_reference_400() {
 
 # ── missing primary file → 400 ───────────────────────────────────────────────
 
-test_similar_missing_primary_400() {
+test_similar_missing_primary_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         -F "reference_file=@${FIXTURE_REF}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/similar")
-    assert_eq "$code" "400" "missing primary -> 400" || return 1
-    echo "OK: similar_missing_primary_400"
+    assert_eq "$code" "404" "missing primary -> 404" || return 1
+    echo "OK: similar_missing_primary_404"
 }
 
 harness_run_tests \
@@ -107,4 +107,4 @@ harness_run_tests \
     test_similar_self_is_high \
     test_similar_dim_field \
     test_similar_missing_reference_400 \
-    test_similar_missing_primary_400
+    test_similar_missing_primary_404

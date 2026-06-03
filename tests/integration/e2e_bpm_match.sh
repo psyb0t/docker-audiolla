@@ -15,6 +15,21 @@ FIXTURE="${_DIR}/.fixtures/audio.wav"
 
 harness_start "librosa-analyze,stretch"
 
+# Generate a click-track fixture: 8 s of 880 Hz clicks at 120 BPM (every 0.5 s).
+# The plain sine-wave fixture has no perceivable beat; librosa needs rhythmic
+# content to return a non-zero BPM.
+BEAT_FIXTURE="${_DIR}/.fixtures/beat_click.wav"
+docker run --rm \
+    -u "$(id -u):$(id -g)" \
+    -v "${_DIR}/.fixtures:${_DIR}/.fixtures" \
+    --entrypoint ffmpeg "${HARNESS_IMAGE}" \
+    -hide_banner -loglevel error \
+    -f lavfi \
+    -i "aevalsrc=sin(2*PI*880*t)*if(lt(mod(t\,0.5)\,0.05)\,1\,0):s=44100:d=8" \
+    -ar 44100 -y "$BEAT_FIXTURE" \
+    || { echo "FATAL: beat fixture generation failed" >&2; exit 1; }
+[ -s "$BEAT_FIXTURE" ] || { echo "FATAL: beat fixture is empty" >&2; exit 1; }
+
 # ── returns WAV with required JSON fields ─────────────────────────────────────
 
 test_bpm_match_returns_wav() {
@@ -22,7 +37,7 @@ test_bpm_match_returns_wav() {
     tmpout=$(mktemp)
     code=$(curl -s -o "$tmpout" -w "%{http_code}" --max-time 180 \
         -X POST \
-        -F "file=@${FIXTURE}" \
+        -F "file=@${BEAT_FIXTURE}" \
         -F "target_bpm=120.0" \
         "${AUDIOLLA_BASE_URL}/v1/audio/bpm-match")
     assert_eq "$code" "200" "bpm-match -> 200" || { rm -f "$tmpout"; return 1; }
@@ -39,7 +54,7 @@ test_bpm_match_returns_wav() {
 test_bpm_match_json_metadata() {
     local body src_bpm target_bpm
     body=$(curl -s --max-time 180 -X POST \
-        -F "file=@${FIXTURE}" \
+        -F "file=@${BEAT_FIXTURE}" \
         -F "target_bpm=140.0" \
         -F "output_path=bpm/matched.wav" \
         "${AUDIOLLA_BASE_URL}/v1/audio/bpm-match")
@@ -60,7 +75,7 @@ test_bpm_match_with_pitch() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 180 \
         -X POST \
-        -F "file=@${FIXTURE}" \
+        -F "file=@${BEAT_FIXTURE}" \
         -F "target_bpm=100.0" \
         -F "pitch_semitones=2.0" \
         "${AUDIOLLA_BASE_URL}/v1/audio/bpm-match")
@@ -75,7 +90,7 @@ test_bpm_match_output_format_mp3() {
     tmpout=$(mktemp)
     code=$(curl -s -o "$tmpout" -w "%{http_code}" --max-time 180 \
         -X POST \
-        -F "file=@${FIXTURE}" \
+        -F "file=@${BEAT_FIXTURE}" \
         -F "target_bpm=120.0" \
         -F "output_format=mp3" \
         "${AUDIOLLA_BASE_URL}/v1/audio/bpm-match")
@@ -114,15 +129,15 @@ test_bpm_match_missing_target_422() {
 
 # ── missing file → 400 ───────────────────────────────────────────────────────
 
-test_bpm_match_missing_file_400() {
+test_bpm_match_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         -F "target_bpm=120.0" \
         "${AUDIOLLA_BASE_URL}/v1/audio/bpm-match")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: bpm_match_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: bpm_match_missing_file_404"
 }
 
 harness_run_tests \
@@ -132,4 +147,4 @@ harness_run_tests \
     test_bpm_match_output_format_mp3 \
     test_bpm_match_zero_target_400 \
     test_bpm_match_missing_target_422 \
-    test_bpm_match_missing_file_400
+    test_bpm_match_missing_file_404

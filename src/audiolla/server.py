@@ -2614,7 +2614,12 @@ async def bpm_match(
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
     try:
         beats_result = await librosa_eng.beats(raw, filename)
-        source_bpm = beats_result["tempo"]
+        source_bpm = beats_result["tempo_bpm"]
+        if not source_bpm:
+            raise HTTPException(
+                status_code=400,
+                detail="could not detect source BPM from audio",
+            )
         tempo_factor = target_bpm / source_bpm
         audio_bytes = await stretch_eng.stretch(
             raw,
