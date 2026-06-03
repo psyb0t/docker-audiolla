@@ -186,6 +186,8 @@ _VALID_EXECUTORS = frozenset(
         "stretch",
         "ast_tag",
         "clap_embed",
+        "hpss",
+        "noise_reduce",
     }
 )
 

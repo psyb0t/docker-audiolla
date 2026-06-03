@@ -337,31 +337,37 @@ def build_mcp_server(
     async def loudness(
         file_path: str | None = None,
         file_url: str | None = None,
-        target_lufs: float | None = None,
-        output_format: str = "wav",
-        output_url: str | None = None,
     ) -> dict[str, Any]:
-        """pyloudnorm LUFS analyze (no target_lufs) or normalize (with).
-
-        Provide exactly one of `file_path` or `file_url`. Without
-        `target_lufs`, returns the measurement as JSON. With
-        `target_lufs`, returns the normalized audio (base64 by default,
-        or PUT to `output_url`) plus the measured LUFS.
-        """
+        """Measure integrated loudness (LUFS) via pyloudnorm. Returns JSON only.
+        Use ``normalize`` to produce loudness-normalized audio."""
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("librosa-analyze")
         if eng is None or not hasattr(eng, "measure_lufs"):
             raise ValueError("loudness engine not configured")
-        if target_lufs is None:
-            try:
-                lufs = await eng.measure_lufs(raw, name)
-            except AudioConversionError as exc:
-                raise ValueError(str(exc)) from exc
-            return {
-                "loudness_lufs": lufs,
-                "target_lufs": None,
-                "normalized": False,
-            }
+        try:
+            lufs = await eng.measure_lufs(raw, name)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"loudness_lufs": lufs}
+
+    @mcp.tool()
+    async def normalize(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        target_lufs: float = -14.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Normalize audio to a target LUFS level via pyloudnorm.
+
+        Provide exactly one of `file_path` or `file_url`. Returns base64
+        audio plus ``measured_lufs`` and ``target_lufs``. Pass
+        ``output_url`` for a presigned PUT instead.
+        """
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("librosa-analyze")
+        if eng is None or not hasattr(eng, "normalize_lufs"):
+            raise ValueError("loudness engine not configured")
         try:
             audio, measured = await eng.normalize_lufs(
                 raw,
@@ -374,7 +380,6 @@ def build_mcp_server(
         emitted = await _emit_audio(audio, output_format, output_url)
         emitted["measured_lufs"] = measured
         emitted["target_lufs"] = target_lufs
-        emitted["normalized"] = True
         return emitted
 
     # ── effects-chain tool ──────────────────────────────────────────────────
@@ -1284,6 +1289,83 @@ def build_mcp_server(
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
 
+    # ── HPSS + noise reduction ──────────────────────────────────────────────
+
+    @mcp.tool()
+    async def hpss(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        margin: float = 1.0,
+        kernel_size: int = 31,
+        output_format: str = "wav",
+    ) -> dict[str, Any]:
+        """Harmonic/percussive source separation via librosa HPSS median filter.
+
+        Provide exactly one of `file_path` or `file_url`. Returns
+        ``{stems: {harmonic: <base64>, percussive: <base64>}, output_format}``.
+        ``margin`` ≥1.0 controls separation aggressiveness; ``kernel_size``
+        sets the median filter width (odd int, default 31).
+        """
+        from .engines import is_hpss_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("hpss")
+        if eng is None or not is_hpss_engine(eng):
+            raise ValueError("hpss engine not configured")
+        try:
+            result = await eng.hpss(
+                raw,
+                name,
+                margin=margin,
+                kernel_size=kernel_size,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return {
+            "stems": {
+                stem: base64.b64encode(audio).decode("ascii")
+                for stem, audio in result.items()
+            },
+            "output_format": output_format,
+        }
+
+    @mcp.tool()
+    async def noise_reduce(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        stationary: bool = False,
+        prop_decrease: float = 1.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Spectral noise reduction via noisereduce (no GPU required).
+
+        Provide exactly one of `file_path` or `file_url`.
+        ``stationary=True`` targets constant noise (hum/hiss);
+        ``False`` uses adaptive non-stationary mode (default).
+        ``prop_decrease`` in [0,1] scales how aggressively noise is
+        removed (1.0 = full). Returns base64 audio unless ``output_url``
+        is set (presigned PUT).
+        """
+        from .engines import is_noise_reduce_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("noise-reduce")
+        if eng is None or not is_noise_reduce_engine(eng):
+            raise ValueError("noise-reduce engine not configured")
+        try:
+            audio_bytes = await eng.reduce(
+                raw,
+                name,
+                stationary=stationary,
+                prop_decrease=prop_decrease,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
     # ── file staging tools ──────────────────────────────────────────────────
 
     @mcp.tool()
@@ -1339,5 +1421,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 21 tools")
+    _log.info("mcp server initialised: 39 tools")
     return mcp

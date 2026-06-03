@@ -5,7 +5,7 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-**Twenty audio engines. One port. Zero cloud.**
+**Thirty audio engines. One port. Zero cloud.**
 
 You needed Demucs for stems. Then librosa for BPM and key. Then basic-pitch for MIDI transcription. Then pyannote for speaker diarization. Then DeepFilterNet for speech enhancement. Then you spent three days debugging Python version conflicts and now you hate everything.
 
@@ -35,6 +35,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | 🎸 **Effects** | 23-effect pedalboard chain — Compressor, Reverb, PitchShift, filters… |
 | 🔧 **Transforms** | Sox DSP — pitch, tempo, EQ, reverb, gain |
 | 📢 **Loudness** | Measure LUFS · normalize to target |
+| 🥁 **HPSS** | Harmonic/percussive source separation via librosa median filter |
+| 🔇 **Noise reduction** | Spectral noise reduction via noisereduce — stationary + adaptive modes |
+| ⏩ **Time-stretch** | Independent tempo factor + pitch shift via librosa phase vocoder |
+| 🏷️ **Audio tagging** | Top-K AudioSet class labels via Audio Spectrogram Transformer |
+| 🔗 **Audio embeddings** | 512-dim semantic embeddings via LAION CLAP + optional text similarity |
 
 ---
 
@@ -57,7 +62,13 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Voice activity detection](#voice-activity-detection)
   - [Speaker diarization](#speaker-diarization)
   - [Transform](#transform)
-  - [Loudness](#loudness)
+  - [Loudness measurement](#loudness-measurement)
+  - [Loudness normalization](#loudness-normalization)
+  - [HPSS (harmonic/percussive split)](#hpss-harmonicpercussive-split)
+  - [Spectral noise reduction](#spectral-noise-reduction)
+  - [Time-stretch and pitch-shift](#time-stretch-and-pitch-shift)
+  - [Audio tagging](#audio-tagging)
+  - [Audio embeddings](#audio-embeddings)
   - [Effects chain](#effects-chain)
   - [Compose MIDI](#compose-midi)
   - [Inspect MIDI](#inspect-midi)
@@ -482,19 +493,159 @@ curl -X POST http://localhost:8000/v1/audio/transform \
   -o out.mp3
 ```
 
-### Loudness
+### Loudness measurement
 
 ```bash
-# measure integrated LUFS (returns JSON)
+# Measure integrated LUFS — returns JSON, no audio output
 curl -X POST http://localhost:8000/v1/audio/loudness \
   -F "file=@track.wav"
+# → {"loudness_lufs": -18.4}
+```
 
-# normalize to -14 LUFS and get the file back
-curl -X POST http://localhost:8000/v1/audio/loudness \
+### Loudness normalization
+
+```bash
+# Normalize to -14 LUFS (streaming platform standard) — returns audio
+curl -X POST http://localhost:8000/v1/audio/normalize \
   -F "file=@track.wav" \
   -F "target_lufs=-14" \
   -o normalized.wav
+
+# Write to staging, check measured LUFS from header
+curl -X POST http://localhost:8000/v1/audio/normalize \
+  -F "file=@track.wav" \
+  -F "target_lufs=-23" \
+  -F "output_path=mastered/norm.wav"
 ```
+
+`target_lufs` is required. The response carries `X-Loudness-LUFS` with the measured pre-normalization level.
+
+### HPSS (harmonic/percussive split)
+
+Median-filter harmonic/percussive source separation via librosa. Harmonic = tonal content (pitched instruments, pads); percussive = transients (drums, percussion). No ML — pure DSP, fast, no GPU needed.
+
+```bash
+# Get both stems in a ZIP
+curl -X POST http://localhost:8000/v1/audio/hpss \
+  -F "file=@track.wav" \
+  -o stems.zip
+# → stems.zip contains harmonic.wav + percussive.wav
+
+# Wider margin = harder separation (more aggressive)
+curl -X POST http://localhost:8000/v1/audio/hpss \
+  -F "file=@track.wav" \
+  -F "margin=3.0" \
+  -o stems.zip
+
+# Output to staging
+curl -X POST http://localhost:8000/v1/audio/hpss \
+  -F "file=@track.wav" \
+  -F "output_path=hpss/stems.zip"
+```
+
+Params: `margin` (default 1.0 — ≥1.0, higher = more aggressive), `kernel_size` (default 31 — odd int, median filter width), `output_format` (default `wav`).
+
+### Spectral noise reduction
+
+Stationary and non-stationary spectral noise reduction via noisereduce. No GPU, no model weights — pure spectral subtraction + Wiener filtering.
+
+```bash
+# Non-stationary mode (adaptive, default — good for variable background noise)
+curl -X POST http://localhost:8000/v1/audio/noise-reduce \
+  -F "file=@recording.wav" \
+  -o clean.wav
+
+# Stationary mode — targets constant hum, hiss, fan noise
+curl -X POST http://localhost:8000/v1/audio/noise-reduce \
+  -F "file=@recording.wav" \
+  -F "stationary=true" \
+  -o clean.wav
+
+# Partial reduction — subtle noise floor cleanup
+curl -X POST http://localhost:8000/v1/audio/noise-reduce \
+  -F "file=@recording.wav" \
+  -F "prop_decrease=0.5" \
+  -o clean.wav
+```
+
+Params: `stationary` (bool, default `false`), `prop_decrease` (0–1, default 1.0 = full reduction), `output_format`, `output_path`, `output_url`.
+
+For AI-based de-noise (higher quality, GPU-accelerated), use `/v1/audio/denoise/uvr-denoise` instead.
+
+### Time-stretch and pitch-shift
+
+Independent tempo factor and semitone offset via librosa phase vocoder. Slow a track down to learn it; shift a vocal up 3 semitones for a different key; transpose a MIDI melody to a different register first, then render.
+
+```bash
+# Slow down to 80% speed, no pitch change
+curl -X POST http://localhost:8000/v1/audio/stretch \
+  -F "file=@track.wav" \
+  -F "tempo_factor=0.8" \
+  -o slow.wav
+
+# Shift up 3 semitones, no tempo change
+curl -X POST http://localhost:8000/v1/audio/stretch \
+  -F "file=@vocal.wav" \
+  -F "pitch_semitones=3" \
+  -o pitched.wav
+
+# Both — pitch-corrected time stretch (traditional chipmunk effect)
+curl -X POST http://localhost:8000/v1/audio/stretch \
+  -F "file=@track.wav" \
+  -F "tempo_factor=0.5" \
+  -F "pitch_semitones=6" \
+  -F "output_format=mp3" \
+  -o stretched.mp3
+```
+
+Params: `tempo_factor` (default 1.0 — 0.5 = half speed), `pitch_semitones` (default 0.0 — ±semitones), `output_format`, `output_path`.
+
+### Audio tagging
+
+Top-K AudioSet class label classification via Audio Spectrogram Transformer (MIT/ast-finetuned-audioset-10-10-0.4593). Identifies what's in a recording — music, speech, specific instruments, environmental sounds, etc.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/tag \
+  -F "file=@recording.wav"
+# → {
+#     "tags": [
+#       {"label": "Music", "score": 0.94},
+#       {"label": "Drum", "score": 0.87},
+#       {"label": "Guitar", "score": 0.71},
+#       ...
+#     ],
+#     "duration": 5.2
+#   }
+
+# Get top 20 results instead of the default 10
+curl -X POST http://localhost:8000/v1/audio/tag \
+  -F "file=@soundscape.wav" \
+  -F "top_k=20"
+```
+
+Requires the HF model cache. First run downloads the weights to `/data/hf/`. Optional: `top_k` (default 10).
+
+> Run the container once with `-e HF_HUB_OFFLINE=0` and send one request to pull the model down. Subsequent runs use the cache with `HF_HUB_OFFLINE=1`.
+
+### Audio embeddings
+
+512-dimensional L2-normalized audio embeddings via LAION CLAP (laion/larger_clap_music_and_speech). Useful for semantic audio search, similarity scoring, and clustering.
+
+```bash
+# Get the embedding vector
+curl -X POST http://localhost:8000/v1/audio/embed \
+  -F "file=@track.wav"
+# → {"embedding": [0.032, -0.11, ...], "dim": 512, "norm": 1.0}
+
+# Semantic similarity — how well does the audio match a text description?
+curl -X POST http://localhost:8000/v1/audio/embed \
+  -F "file=@track.wav" \
+  -F "query_text=energetic rock guitar riff"
+# → {"embedding": [...], "dim": 512, "norm": 1.0,
+#    "query_text": "energetic rock guitar riff", "similarity": 0.73}
+```
+
+`similarity` is cosine similarity in [-1, 1]. Requires HF model cache — same first-run download caveat as audio tagging.
 
 ### Effects chain
 
@@ -732,6 +883,11 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `chord-detect` | Chord and key detection via librosa — Krumhansl-Schmuckler key estimation + chroma template chord segmentation. Backs `/v1/audio/chords`. |
 | `silero-vad` | Voice activity detection via silero-vad (ONNX) — returns speech/non-speech segments with timestamps and speech ratio. Backs `/v1/audio/vad`. |
 | `pyannote` | Speaker diarization via pyannote/speaker-diarization-3.1 — returns per-speaker timestamped segments. Requires `HUGGINGFACE_TOKEN`. Backs `/v1/audio/diarize`. |
+| `stretch` | Time-stretch + pitch-shift via librosa phase vocoder — independent tempo factor and semitone offset. Backs `/v1/audio/stretch`. |
+| `ast-tag` | Audio tagging via Audio Spectrogram Transformer (MIT/ast-finetuned-audioset-10-10-0.4593) — top-K AudioSet class labels. Requires HF model cache. Backs `/v1/audio/tag`. |
+| `clap-embed` | 512-dim L2-normalized audio embeddings via LAION CLAP (laion/larger_clap_music_and_speech) — semantic audio search. Requires HF model cache. Backs `/v1/audio/embed`. |
+| `hpss` | Harmonic/percussive source separation via librosa HPSS median filter — returns harmonic + percussive stems as a ZIP. Backs `/v1/audio/hpss`. |
+| `noise-reduce` | Spectral noise reduction via noisereduce — stationary (constant hum/hiss) and non-stationary (adaptive) modes, no GPU required. Backs `/v1/audio/noise-reduce`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
@@ -773,7 +929,13 @@ bytes.
 | `POST` | `/v1/audio/vad` | JSON — speech/non-speech segments with timestamps and speech ratio |
 | `POST` | `/v1/audio/diarize/{engine}` | JSON — per-speaker timestamped segments |
 | `POST` | `/v1/audio/transform` | audio bytes |
-| `POST` | `/v1/audio/loudness` | JSON (no `target_lufs`) or audio bytes (with `target_lufs`) |
+| `POST` | `/v1/audio/loudness` | JSON — `{loudness_lufs}` (measure only, no audio) |
+| `POST` | `/v1/audio/normalize` | audio bytes — requires `target_lufs`; header `X-Loudness-LUFS` carries pre-normalization level |
+| `POST` | `/v1/audio/hpss` | ZIP containing `harmonic.<fmt>` + `percussive.<fmt>` |
+| `POST` | `/v1/audio/noise-reduce` | audio bytes |
+| `POST` | `/v1/audio/stretch` | audio bytes |
+| `POST` | `/v1/audio/tag` | JSON — top-K AudioSet labels with confidence scores |
+| `POST` | `/v1/audio/embed` | JSON — 512-dim embedding; with `query_text` also returns cosine similarity |
 | `POST` | `/v1/audio/fx` | audio bytes |
 
 ### MIDI
@@ -841,7 +1003,13 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `vad` | Voice activity detection via silero-vad — speech/non-speech segments with timestamps |
 | `diarize` | Speaker diarization via pyannote — per-speaker timestamped segments |
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
-| `loudness` | Measure LUFS or normalize to a target |
+| `loudness` | Measure integrated LUFS — returns JSON only |
+| `normalize` | Normalize audio to a target LUFS level — returns base64 audio |
+| `hpss` | Harmonic/percussive separation — returns per-stem base64 audio |
+| `noise_reduce` | Spectral noise reduction — stationary or adaptive mode |
+| `stretch` | Time-stretch + pitch-shift via librosa phase vocoder |
+| `tag` | Audio tagging via AST — top-K AudioSet labels with confidence scores |
+| `embed` | 512-dim CLAP audio embedding; with `query_text` returns cosine similarity |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
 | `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
 | `midi_inspect` | Read MIDI structure — tempo, tracks, channels, note counts |

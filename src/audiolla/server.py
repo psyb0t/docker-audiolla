@@ -73,6 +73,8 @@ from .engines import (
     is_onsets_engine,
     is_segments_engine,
     is_embed_engine,
+    is_hpss_engine,
+    is_noise_reduce_engine,
     is_separation_engine,
     is_silence_engine,
     is_stretch_engine,
@@ -669,46 +671,44 @@ async def loudness(
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
+) -> LoudnessResult:
+    """Measure integrated LUFS (ITU-R BS.1770-4) via pyloudnorm. Returns JSON only.
+    To normalize to a target level use POST /v1/audio/normalize."""
+    eng = ENGINES.get("librosa-analyze")
+    if eng is None or not is_loudness_engine(eng):
+        raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        lufs = await eng.measure_lufs(raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return LoudnessResult(loudness_lufs=lufs, target_lufs=None, normalized=False)
+
+
+@app.post("/v1/audio/normalize")
+async def normalize(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
-    target_lufs: float | None = Form(default=None),
+    target_lufs: float = Form(...),
     output_format: str = Form(default="wav"),
 ) -> Any:
+    """Normalize audio to a target LUFS level via pyloudnorm (gain scaling).
+    Common targets: -14 (Spotify/YouTube), -16 (Apple Music), -23 (broadcast EBU R128)."""
     _validate_output_format(output_format)
     _validate_target_lufs(target_lufs)
-
-    engine_slug = "librosa-analyze"
-    eng = ENGINES.get(engine_slug)
-    if eng is None:
-        raise HTTPException(
-            status_code=404, detail="librosa-analyze engine not configured"
-        )
-    if not is_loudness_engine(eng):
-        raise HTTPException(
-            status_code=400, detail="engine does not support loudness operations"
-        )
-
-    raw, filename = await resolve_input(
-        file=file,
-        file_path=file_path,
-        file_url=file_url,
-    )
-
-    if target_lufs is None:
-        # Pure measurement — JSON only, output_path/url are meaningless.
-        try:
-            lufs = await eng.measure_lufs(raw, filename)
-        except AudioConversionError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return LoudnessResult(loudness_lufs=lufs, target_lufs=None, normalized=False)
-
+    eng = ENGINES.get("librosa-analyze")
+    if eng is None or not is_loudness_engine(eng):
+        raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
     try:
         audio_bytes, lufs = await eng.normalize_lufs(
             raw, filename, target_lufs=target_lufs, output_format=output_format
         )
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     return await write_output(
         audio_bytes,
         media_type=content_type_for(output_format),
@@ -2013,6 +2013,95 @@ async def embed(
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(result)
+
+
+# ── /v1/audio/hpss — harmonic/percussive source separation ───────────────────
+
+
+@app.post("/v1/audio/hpss")
+async def hpss(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    margin: float = Form(default=1.0),
+    kernel_size: int = Form(default=31),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Harmonic/percussive source separation via librosa HPSS median filter.
+    Returns a ZIP containing harmonic.<fmt> (tonal content) and
+    percussive.<fmt> (transients/drums). margin > 1 sharpens the separation."""
+    _validate_output_format(output_format)
+    eng = ENGINES.get("hpss")
+    if eng is None or not is_hpss_engine(eng):
+        raise HTTPException(status_code=404, detail="hpss engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        stems = await eng.hpss(
+            raw, filename, margin=margin, kernel_size=kernel_size, output_format=output_format
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        multi_stream_zip(stems, output_format),
+        media_type="application/zip",
+        filename="hpss-stems.zip",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"stems": list(stems.keys()), "output_format": output_format},
+    )
+
+
+# ── /v1/audio/noise-reduce — spectral noise reduction ────────────────────────
+
+
+@app.post("/v1/audio/noise-reduce")
+async def noise_reduce(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    stationary: bool = Form(default=False),
+    prop_decrease: float = Form(default=1.0),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Spectral noise reduction via noisereduce. stationary=True assumes a
+    constant noise profile (hum, tape hiss); default non-stationary adapts
+    the noise estimate over time. prop_decrease controls reduction strength
+    (1.0 = full, 0.0 = none)."""
+    _validate_output_format(output_format)
+    if not (0.0 <= prop_decrease <= 1.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"prop_decrease must be in [0.0, 1.0], got {prop_decrease}",
+        )
+    eng = ENGINES.get("noise-reduce")
+    if eng is None or not is_noise_reduce_engine(eng):
+        raise HTTPException(status_code=404, detail="noise-reduce engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await eng.reduce(
+            raw, filename,
+            stationary=stationary,
+            prop_decrease=prop_decrease,
+            output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"denoised.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "stationary": stationary,
+            "prop_decrease": prop_decrease,
+            "output_format": output_format,
+        },
+    )
 
 
 def _resolve_files_path(raw: str) -> tuple[Any, str]:

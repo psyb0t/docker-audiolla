@@ -118,6 +118,15 @@
       "executor": "clap_embed",
       "hf_model": "laion/larger_clap_music_and_speech",
       "description": "512-dim audio embeddings via LAION CLAP — semantic audio search; optional text query returns cosine similarity (requires HF model cache)"
+    },
+    "hpss": {
+      "executor": "hpss",
+      "stems": ["harmonic", "percussive"],
+      "description": "Harmonic/percussive source separation via librosa HPSS median filter — returns harmonic (tonal) + percussive (transient) stems as a ZIP"
+    },
+    "noise-reduce": {
+      "executor": "noise_reduce",
+      "description": "Spectral noise reduction via noisereduce — stationary (constant hum/hiss) and non-stationary (adaptive) modes, no GPU required"
     }
   }
 }

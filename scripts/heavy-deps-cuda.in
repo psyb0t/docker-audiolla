@@ -19,3 +19,4 @@ silero-vad==5.1.2
 pyannote.audio==3.3.2
 transformers==4.51.3
 accelerate==1.6.0
+noisereduce==3.0.3

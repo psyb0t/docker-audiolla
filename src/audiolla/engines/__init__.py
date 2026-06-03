@@ -13,6 +13,8 @@ from .demucs import DemucsEngine
 from .diarize_pyannote_engine import DiarizeEngine
 from .embed_engine import EmbedEngine
 from .ffmpeg_render import FfmpegRenderEngine
+from .hpss_engine import HpssEngine
+from .noise_reduce_engine import NoiseReduceEngine
 from .fx_chain import FxChainEngine
 from .librosa_analyze import LibrosaAnalyzeEngine
 from .matchering_engine import MatcheringEngine
@@ -95,6 +97,12 @@ def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
             continue
         if executor == "clap_embed":
             out[slug] = EmbedEngine(slug=slug, entry=entry)
+            continue
+        if executor == "hpss":
+            out[slug] = HpssEngine(slug=slug, entry=entry)
+            continue
+        if executor == "noise_reduce":
+            out[slug] = NoiseReduceEngine(slug=slug, entry=entry)
             continue
         raise ValueError(f"unknown executor {executor!r} for engine {slug!r}")
     return out
@@ -206,3 +214,11 @@ def is_tag_engine(engine: Any) -> bool:
 
 def is_embed_engine(engine: Any) -> bool:
     return hasattr(engine, "embed")
+
+
+def is_hpss_engine(engine: Any) -> bool:
+    return hasattr(engine, "hpss")
+
+
+def is_noise_reduce_engine(engine: Any) -> bool:
+    return hasattr(engine, "reduce")
