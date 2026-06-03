@@ -1379,6 +1379,135 @@ def build_mcp_server(
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
 
+    @mcp.tool()
+    async def fade(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        fade_in: float = 0.0,
+        fade_out: float = 0.0,
+        curve: str = "tri",
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply fade-in/fade-out. curve: tri/qsin/esin/hsin/log/exp/lin/etc.
+        At least one of fade_in/fade_out must be > 0. Returns base64 audio."""
+        from .audio import fade_audio as _fade  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        if fade_in <= 0.0 and fade_out <= 0.0:
+            raise ValueError("at least one of fade_in or fade_out must be > 0")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(
+                _fade, raw, name, output_format,
+                fade_in=fade_in, fade_out=fade_out, curve=curve,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def reverse(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Reverse audio playback direction. Returns base64 audio."""
+        from .audio import reverse_audio as _reverse  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(_reverse, raw, name, output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def loop(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        count: int = 2,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Repeat audio count times (minimum 2). Returns base64 audio."""
+        from .audio import loop_audio as _loop  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        if count < 2:
+            raise ValueError(f"count must be >= 2, got {count}")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(_loop, raw, name, output_format, count)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def bpm_match(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        target_bpm: float = 120.0,
+        pitch_semitones: float = 0.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Detect source BPM then time-stretch to target_bpm.
+        Requires librosa-analyze + stretch engines.
+        Returns base64 audio + {source_bpm, target_bpm, tempo_factor}."""
+        from .engines import is_beats_engine as _is_beats  # noqa: PLC0415
+        from .engines import is_stretch_engine as _is_stretch  # noqa: PLC0415
+        if target_bpm <= 0:
+            raise ValueError(f"target_bpm must be > 0, got {target_bpm}")
+        librosa_eng = engines.get("librosa-analyze")
+        if librosa_eng is None or not _is_beats(librosa_eng):
+            raise ValueError("librosa-analyze engine not configured")
+        stretch_eng = engines.get("stretch")
+        if stretch_eng is None or not _is_stretch(stretch_eng):
+            raise ValueError("stretch engine not configured")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            beats_result = await librosa_eng.beats(raw, name)
+            source_bpm = beats_result["tempo"]
+            tempo_factor = target_bpm / source_bpm
+            audio_bytes = await stretch_eng.stretch(
+                raw,
+                name,
+                tempo_factor=tempo_factor,
+                pitch_semitones=pitch_semitones,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        result = await _emit_audio(audio_bytes, output_format, output_url)
+        result["source_bpm"] = round(source_bpm, 2)
+        result["target_bpm"] = target_bpm
+        result["tempo_factor"] = round(tempo_factor, 4)
+        return result
+
+    @mcp.tool()
+    async def stereo_width(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        width: float = 1.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Adjust stereo image width via M/S processing.
+        width=0.0 → mono, 1.0 → original, >1.0 → wider. Range: [0.0, 3.0].
+        Returns base64 audio."""
+        from .audio import stereo_width_audio as _stereo_width  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        if not (0.0 <= width <= 3.0):
+            raise ValueError(f"width must be in [0.0, 3.0], got {width}")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(
+                _stereo_width, raw, name, output_format, width
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
     # ── audio utilities: concat / speed / convert / similar / midi_quantize ──
 
     @mcp.tool()
@@ -1639,5 +1768,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 48 tools")
+    _log.info("mcp server initialised: 53 tools")
     return mcp

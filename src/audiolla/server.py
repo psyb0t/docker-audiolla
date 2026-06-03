@@ -52,9 +52,13 @@ from .audio import (
     concat_audio,
     content_type_for,
     convert_audio,
+    fade_audio,
+    loop_audio,
     mix_audio,
     multi_stream_zip,
+    reverse_audio,
     speed_audio,
+    stereo_width_audio,
     trim_audio,
 )
 from .auth import BearerAuthMiddleware
@@ -2459,6 +2463,215 @@ async def classify(
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(result)
+
+
+# ── /v1/audio/fade — fade-in / fade-out ──────────────────────────────────────
+
+
+@app.post("/v1/audio/fade")
+async def fade(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    fade_in: float = Form(default=0.0),
+    fade_out: float = Form(default=0.0),
+    curve: str = Form(default="tri"),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Apply fade-in and/or fade-out. curve options: tri, qsin, esin, hsin, log, ipar,
+    qua, cub, squ, cbr, par, exp, lin. At least one of fade_in/fade_out must be > 0."""
+    _validate_output_format(output_format)
+    if fade_in <= 0.0 and fade_out <= 0.0:
+        raise HTTPException(
+            status_code=400,
+            detail="at least one of fade_in or fade_out must be > 0",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            fade_audio, raw, filename, output_format,
+            fade_in=fade_in, fade_out=fade_out, curve=curve,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"faded.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"fade_in": fade_in, "fade_out": fade_out, "curve": curve},
+    )
+
+
+# ── /v1/audio/reverse — reverse playback ─────────────────────────────────────
+
+
+@app.post("/v1/audio/reverse")
+async def reverse(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Reverse audio playback direction via ffmpeg areverse."""
+    _validate_output_format(output_format)
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            reverse_audio, raw, filename, output_format
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"reversed.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+    )
+
+
+# ── /v1/audio/loop — repeat audio ────────────────────────────────────────────
+
+
+@app.post("/v1/audio/loop")
+async def loop(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    count: int = Form(default=2),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Repeat audio count times (minimum 2). Uses ffmpeg aloop filter."""
+    _validate_output_format(output_format)
+    if count < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"count must be >= 2, got {count}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            loop_audio, raw, filename, output_format, count
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"looped.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"count": count},
+    )
+
+
+# ── /v1/audio/bpm-match — detect BPM + time-stretch to target ────────────────
+
+
+@app.post("/v1/audio/bpm-match")
+async def bpm_match(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    target_bpm: float = Form(...),
+    pitch_semitones: float = Form(default=0.0),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Detect source BPM via librosa then time-stretch to target_bpm.
+    Requires both librosa-analyze and stretch engines."""
+    _validate_output_format(output_format)
+    if target_bpm <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"target_bpm must be > 0, got {target_bpm}",
+        )
+    librosa_eng = ENGINES.get("librosa-analyze")
+    if librosa_eng is None or not is_beats_engine(librosa_eng):
+        raise HTTPException(
+            status_code=404,
+            detail="librosa-analyze engine not configured",
+        )
+    stretch_eng = ENGINES.get("stretch")
+    if stretch_eng is None or not is_stretch_engine(stretch_eng):
+        raise HTTPException(
+            status_code=404,
+            detail="stretch engine not configured",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        beats_result = await librosa_eng.beats(raw, filename)
+        source_bpm = beats_result["tempo"]
+        tempo_factor = target_bpm / source_bpm
+        audio_bytes = await stretch_eng.stretch(
+            raw,
+            filename,
+            tempo_factor=tempo_factor,
+            pitch_semitones=pitch_semitones,
+            output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"bpm_matched.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "source_bpm": round(source_bpm, 2),
+            "target_bpm": target_bpm,
+            "tempo_factor": round(tempo_factor, 4),
+            "pitch_semitones": pitch_semitones,
+        },
+    )
+
+
+# ── /v1/audio/stereo-width — M/S stereo width ────────────────────────────────
+
+
+@app.post("/v1/audio/stereo-width")
+async def stereo_width(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    width: float = Form(default=1.0),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Adjust stereo width via M/S processing. width=0.0 → mono, 1.0 → original,
+    >1.0 → wider. Range: [0.0, 3.0]."""
+    _validate_output_format(output_format)
+    if not (0.0 <= width <= 3.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"width must be in [0.0, 3.0], got {width}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            stereo_width_audio, raw, filename, output_format, width
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"stereo_width.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"width": width},
+    )
 
 
 def _resolve_files_path(raw: str) -> tuple[Any, str]:

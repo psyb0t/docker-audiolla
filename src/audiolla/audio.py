@@ -387,6 +387,171 @@ def convert_audio(
             os.unlink(out_path)
 
 
+_FADE_CURVES = frozenset({
+    "tri", "qsin", "esin", "hsin", "log", "ipar", "qua",
+    "cub", "squ", "cbr", "par", "exp", "lin",
+})
+
+
+def fade_audio(
+    raw_bytes: bytes,
+    original_filename: str,
+    output_format: str,
+    fade_in: float = 0.0,
+    fade_out: float = 0.0,
+    curve: str = "tri",
+) -> bytes:
+    if fade_in < 0 or fade_out < 0:
+        raise AudioConversionError("fade_in and fade_out must be >= 0")
+    if fade_in == 0.0 and fade_out == 0.0:
+        raise AudioConversionError("at least one of fade_in or fade_out must be > 0")
+    if curve not in _FADE_CURVES:
+        raise AudioConversionError(
+            f"unsupported curve {curve!r}; supported: {sorted(_FADE_CURVES)}"
+        )
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_path = write_temp_input(raw_bytes, original_filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-fade-")
+    os.close(out_fd)
+    try:
+        filter_parts: list[str] = []
+        if fade_in > 0:
+            filter_parts.append(f"afade=t=in:d={fade_in}:curve={curve}")
+        if fade_out > 0:
+            proc = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    in_path,
+                ],
+                capture_output=True,
+                timeout=60,
+            )
+            duration = float(proc.stdout.decode().strip())
+            st = max(0.0, duration - fade_out)
+            filter_parts.append(f"afade=t=out:st={st}:d={fade_out}:curve={curve}")
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-i", in_path, "-af", ",".join(filter_parts)]
+            + codec_args
+            + [out_path]
+        )
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        if os.path.exists(in_path):
+            os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def reverse_audio(
+    raw_bytes: bytes,
+    original_filename: str,
+    output_format: str,
+) -> bytes:
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_path = write_temp_input(raw_bytes, original_filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-reverse-")
+    os.close(out_fd)
+    try:
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-i", in_path, "-af", "areverse"]
+            + codec_args
+            + [out_path]
+        )
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        if os.path.exists(in_path):
+            os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def loop_audio(
+    raw_bytes: bytes,
+    original_filename: str,
+    output_format: str,
+    count: int = 2,
+) -> bytes:
+    if count < 2:
+        raise AudioConversionError("count must be >= 2")
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_path = write_temp_input(raw_bytes, original_filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-loop-")
+    os.close(out_fd)
+    try:
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-i", in_path,
+             "-af", f"aloop=loop={count - 1}:size=2147483647"]
+            + codec_args
+            + [out_path]
+        )
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        if os.path.exists(in_path):
+            os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def stereo_width_audio(
+    raw_bytes: bytes,
+    original_filename: str,
+    output_format: str,
+    width: float = 1.0,
+) -> bytes:
+    if not (0.0 <= width <= 3.0):
+        raise AudioConversionError(
+            f"width must be in [0.0, 3.0], got {width}"
+        )
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    a = (1.0 + width) / 2.0
+    b = (1.0 - width) / 2.0
+    pan_filter = (
+        f"aformat=channel_layouts=stereo,"
+        f"pan=stereo|c0={a}*c0+{b}*c1|c1={b}*c0+{a}*c1"
+    )
+    in_path = write_temp_input(raw_bytes, original_filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-stereowidth-")
+    os.close(out_fd)
+    try:
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-i", in_path, "-af", pan_filter]
+            + codec_args
+            + [out_path]
+        )
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        if os.path.exists(in_path):
+            os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
 def _run_ffmpeg(args: list[str]) -> None:
     proc = subprocess.run(args, capture_output=True, timeout=600)
     if proc.returncode != 0:

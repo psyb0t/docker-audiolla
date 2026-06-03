@@ -5,7 +5,7 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-**Thirty audio engines. One port. Zero cloud. Five more primitives.**
+**Thirty audio engines. One port. Zero cloud. Ten more primitives.**
 
 You needed Demucs for stems. Then librosa for BPM and key. Then basic-pitch for MIDI transcription. Then pyannote for speaker diarization. Then DeepFilterNet for speech enhancement. Then you spent three days debugging Python version conflicts and now you hate everything.
 
@@ -49,6 +49,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | 🔄 **Convert** | Re-encode: format, sample rate, channel count in one call |
 | 🔍 **Similar** | Cosine similarity between two audio files via CLAP embeddings |
 | 🎹 **MIDI quantize** | Snap MIDI note timings to a rhythmic grid (16th, 8th, quarter…) |
+| 🌅 **Fade** | Fade-in and/or fade-out with 13 curve shapes |
+| ⏪ **Reverse** | Flip audio backwards |
+| 🔁 **Loop** | Repeat audio N times |
+| 🎯 **BPM match** | Auto-detect BPM then stretch to a target — no manual math |
+| ↔️ **Stereo width** | Widen or collapse the stereo image via M/S processing |
 
 ---
 
@@ -87,6 +92,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Convert](#convert)
   - [Similar](#similar)
   - [MIDI quantize](#midi-quantize)
+  - [Fade](#fade)
+  - [Reverse](#reverse)
+  - [Loop](#loop)
+  - [BPM match](#bpm-match)
+  - [Stereo width](#stereo-width)
   - [Effects chain](#effects-chain)
   - [Compose MIDI](#compose-midi)
   - [Inspect MIDI](#inspect-midi)
@@ -881,6 +891,93 @@ curl -X POST http://localhost:8000/v1/midi/quantize \
 
 `grid_beats`: grid size in beats — `0.25` = 16th note, `0.5` = 8th, `1.0` = quarter note. Default: `0.25`.
 
+### Fade
+
+Apply fade-in, fade-out, or both. 13 curve shapes: `tri`, `qsin`, `esin`, `hsin`, `log`, `ipar`, `qua`, `cub`, `squ`, `cbr`, `par`, `exp`, `lin`.
+
+```bash
+# 2s fade-in
+curl -X POST http://localhost:8000/v1/audio/fade \
+  -F "file=@track.wav" -F "fade_in=2.0" -o faded.wav
+
+# 3s fade-out with exponential curve
+curl -X POST http://localhost:8000/v1/audio/fade \
+  -F "file=@track.wav" -F "fade_out=3.0" -F "curve=exp" -o faded.wav
+
+# Both — 1s in, 2s out
+curl -X POST http://localhost:8000/v1/audio/fade \
+  -F "file=@track.wav" -F "fade_in=1.0" -F "fade_out=2.0" -o faded.wav
+```
+
+At least one of `fade_in` / `fade_out` must be > 0.
+
+### Reverse
+
+Flip audio backwards via ffmpeg `areverse`.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/reverse \
+  -F "file=@sample.wav" -o reversed.wav
+
+curl -X POST http://localhost:8000/v1/audio/reverse \
+  -F "file_path=stems/vocals.wav" -F "output_format=mp3" -o reversed.mp3
+```
+
+### Loop
+
+Repeat audio N times. Uses ffmpeg `aloop` filter — no re-encoding overhead per iteration.
+
+```bash
+# Play 4 times total
+curl -X POST http://localhost:8000/v1/audio/loop \
+  -F "file=@beat.wav" -F "count=4" -o looped.wav
+
+# 8-bar loop → 32 bars
+curl -X POST http://localhost:8000/v1/audio/loop \
+  -F "file_path=stems/drums.wav" -F "count=4" -F "output_path=loops/drums32.wav"
+```
+
+`count` must be ≥ 2 (total plays, not extra loops).
+
+### BPM match
+
+Detect the source BPM via librosa, then time-stretch to the target — no manual math.
+
+```bash
+# Stretch anything to 128 BPM
+curl -X POST http://localhost:8000/v1/audio/bpm-match \
+  -F "file=@loop.wav" -F "target_bpm=128" -o matched.wav
+
+# Match tempo and also shift pitch
+curl -X POST http://localhost:8000/v1/audio/bpm-match \
+  -F "file=@loop.wav" \
+  -F "target_bpm=140" \
+  -F "pitch_semitones=2" \
+  -o matched.wav
+```
+
+Response includes `X-Source-BPM`, `X-Target-BPM`, and `X-Tempo-Factor` headers (also in JSON when `output_path` is used). Requires both `librosa-analyze` and `stretch` engines.
+
+### Stereo width
+
+Widen or collapse the stereo image via M/S processing. `width=0.0` → mono, `1.0` → original, `>1.0` → wider. Works on mono input too (upmixes first).
+
+```bash
+# Widen to 1.5×
+curl -X POST http://localhost:8000/v1/audio/stereo-width \
+  -F "file=@mix.wav" -F "width=1.5" -o wide.wav
+
+# Collapse to mono
+curl -X POST http://localhost:8000/v1/audio/stereo-width \
+  -F "file=@mix.wav" -F "width=0.0" -o mono.wav
+
+# Subtle narrowing for mix bus
+curl -X POST http://localhost:8000/v1/audio/stereo-width \
+  -F "file_path=master/mix.wav" -F "width=0.8" -F "output_path=master/narrow.wav"
+```
+
+Range: `[0.0, 3.0]`.
+
 ### Effects chain
 
 Apply an ordered chain of pedalboard effects — full catalog, you pick the order and params. Different from `/v1/audio/master` (which runs preset mastering chains).
@@ -1178,6 +1275,11 @@ bytes.
 | `POST` | `/v1/audio/speed` | audio bytes — `speed` float required (0.1–10.0) |
 | `POST` | `/v1/audio/convert` | audio bytes — format/sample_rate/channels conversion |
 | `POST` | `/v1/audio/similar` | JSON — `{similarity, dim}`; requires `clap-embed` |
+| `POST` | `/v1/audio/fade` | audio bytes — `fade_in`/`fade_out` seconds, 13 `curve` options |
+| `POST` | `/v1/audio/reverse` | audio bytes — flips playback direction |
+| `POST` | `/v1/audio/loop` | audio bytes — `count` total plays (≥2) |
+| `POST` | `/v1/audio/bpm-match` | audio bytes — `target_bpm` required; requires `librosa-analyze` + `stretch` |
+| `POST` | `/v1/audio/stereo-width` | audio bytes — `width` [0.0–3.0]; M/S stereo processing |
 | `POST` | `/v1/audio/fx` | audio bytes |
 
 ### MIDI
@@ -1262,6 +1364,11 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `convert` | Re-encode: format, sample_rate, channels in one call |
 | `similar` | Cosine similarity between two audio files via CLAP — returns `{similarity, dim}` |
 | `midi_quantize` | Snap MIDI note timings to a rhythmic grid — `grid_beats` in beats |
+| `fade` | Fade-in/fade-out with configurable duration and curve shape |
+| `reverse` | Flip audio backwards |
+| `loop` | Repeat audio N times — `count` total plays |
+| `bpm_match` | Detect BPM then stretch to `target_bpm` — returns source/target BPM + tempo_factor |
+| `stereo_width` | M/S stereo width — `width=0` mono, `1` original, `>1` wider |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
 | `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
 | `midi_inspect` | Read MIDI structure — tempo, tracks, channels, note counts |
