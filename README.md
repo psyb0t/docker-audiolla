@@ -5,7 +5,7 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-**Thirty audio engines. One port. Zero cloud. Ten more primitives.**
+**Thirty audio engines. One port. Zero cloud. Fifteen more primitives.**
 
 You needed Demucs for stems. Then librosa for BPM and key. Then basic-pitch for MIDI transcription. Then pyannote for speaker diarization. Then DeepFilterNet for speech enhancement. Then you spent three days debugging Python version conflicts and now you hate everything.
 
@@ -54,6 +54,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | 🔁 **Loop** | Repeat audio N times |
 | 🎯 **BPM match** | Auto-detect BPM then stretch to a target — no manual math |
 | ↔️ **Stereo width** | Widen or collapse the stereo image via M/S processing |
+| ✂️ **Split** | Split into N equal parts or on silence — returns ZIP of segments |
+| 🔊 **Pan** | Position audio in the stereo field (-1 left → 0 center → 1 right) |
+| 🎚️ **EQ** | Parametric EQ — JSON array of freq/gain_db/width_hz bands |
+| 🎵 **Key match** | Detect source key then pitch-shift to a target key |
+| 🎙️ **Sidechain duck** | Duck music when a trigger track (voice) is loud |
 
 ---
 
@@ -97,6 +102,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Loop](#loop)
   - [BPM match](#bpm-match)
   - [Stereo width](#stereo-width)
+  - [Split](#split)
+  - [Pan](#pan)
+  - [EQ](#eq)
+  - [Key match](#key-match)
+  - [Sidechain duck](#sidechain-duck)
   - [Effects chain](#effects-chain)
   - [Compose MIDI](#compose-midi)
   - [Inspect MIDI](#inspect-midi)
@@ -978,6 +988,114 @@ curl -X POST http://localhost:8000/v1/audio/stereo-width \
 
 Range: `[0.0, 3.0]`.
 
+### Split
+
+Split a file into segments. Two modes: `equal` (N equal time parts) or `silence` (split on quiet gaps). Returns a ZIP of numbered files.
+
+```bash
+# Split into 4 equal parts
+curl -X POST http://localhost:8000/v1/audio/split \
+  -F "file=@track.wav" -F "mode=equal" -F "count=4" -o segments.zip
+
+# Split a DJ mix on silence
+curl -X POST http://localhost:8000/v1/audio/split \
+  -F "file=@djmix.wav" \
+  -F "mode=silence" \
+  -F "threshold_db=-40" \
+  -F "min_duration_sec=1.0" \
+  -o tracks.zip
+
+# Split to mp3
+curl -X POST http://localhost:8000/v1/audio/split \
+  -F "file=@album.flac" -F "mode=equal" -F "count=10" -F "output_format=mp3" -o parts.zip
+```
+
+`mode=equal` requires `count >= 2`. `mode=silence` uses `threshold_db` (default -30) and `min_duration_sec` (default 0.5); requires the `silence-detect` engine.
+
+### Pan
+
+Position audio in the stereo field. Works on mono and stereo input.
+
+```bash
+# Hard left
+curl -X POST http://localhost:8000/v1/audio/pan \
+  -F "file=@vocal.wav" -F "position=-1.0" -o left.wav
+
+# Slight right (e.g. guitar in mix)
+curl -X POST http://localhost:8000/v1/audio/pan \
+  -F "file_path=stems/guitar.wav" -F "position=0.4" -o guitar_panned.wav
+
+# Center (no-op but valid)
+curl -X POST http://localhost:8000/v1/audio/pan \
+  -F "file=@mono.wav" -F "position=0.0" -o stereo.wav
+```
+
+`position`: -1.0 = hard left, 0.0 = center, 1.0 = hard right.
+
+### EQ
+
+Parametric EQ via ffmpeg `equalizer` filter. Pass any number of bands — each with a center frequency, gain, and optional bandwidth.
+
+```bash
+# Low-cut + presence boost
+curl -X POST http://localhost:8000/v1/audio/eq \
+  -F "file=@vocal.wav" \
+  -F 'bands=[{"freq":100,"gain_db":-6,"width_hz":80},{"freq":3000,"gain_db":3,"width_hz":500}]' \
+  -o eq.wav
+
+# Single band: cut 60 Hz hum
+curl -X POST http://localhost:8000/v1/audio/eq \
+  -F "file=@recording.wav" \
+  -F 'bands=[{"freq":60,"gain_db":-20,"width_hz":30}]' \
+  -o clean.wav
+```
+
+Each band: `freq` (Hz, required), `gain_db` (dB, required, range ±30), `width_hz` (optional, default 100).
+
+### Key match
+
+Detect the source key via CLAP chord analysis, then pitch-shift to a target key — one call instead of two.
+
+```bash
+# Shift everything to C major
+curl -X POST http://localhost:8000/v1/audio/key-match \
+  -F "file=@loop.wav" -F "target_key=C" -o matched.wav
+
+# Match to F# (response includes source_key + semitones shifted)
+curl -X POST http://localhost:8000/v1/audio/key-match \
+  -F "file_path=stems/melody.wav" \
+  -F "target_key=F#" \
+  -F "output_path=matched/melody_fsharp.wav"
+```
+
+`target_key`: root note, e.g. `C`, `F#`, `Bb`, `D#`. Mode suffix (`major`/`minor`/`m`) is ignored — only the root matters for pitch. Requires `chord-detect` and `stretch` engines.
+
+### Sidechain duck
+
+Duck a primary track (music) whenever a trigger track (voice) is loud — the classic voiceover-over-music effect. Pure ffmpeg `sidechaincompress`, no model required.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/sidechain-duck \
+  -F "file=@music.wav" \
+  -F "trigger_file=@voice.wav" \
+  -F "threshold_db=-20" \
+  -F "ratio=4" \
+  -F "attack_ms=10" \
+  -F "release_ms=200" \
+  -o ducked.wav
+
+# Aggressive duck for podcast-style music bed
+curl -X POST http://localhost:8000/v1/audio/sidechain-duck \
+  -F "file_path=music/bed.wav" \
+  -F "trigger_file_path=voice/narration.wav" \
+  -F "threshold_db=-30" \
+  -F "ratio=10" \
+  -F "release_ms=400" \
+  -o "output_path=final/mix.wav"
+```
+
+Primary track is compressed whenever the trigger exceeds `threshold_db`. `ratio` sets compression intensity. Files must be the same duration for best results; shorter trigger is padded with silence.
+
 ### Effects chain
 
 Apply an ordered chain of pedalboard effects — full catalog, you pick the order and params. Different from `/v1/audio/master` (which runs preset mastering chains).
@@ -1280,6 +1398,11 @@ bytes.
 | `POST` | `/v1/audio/loop` | audio bytes — `count` total plays (≥2) |
 | `POST` | `/v1/audio/bpm-match` | audio bytes — `target_bpm` required; requires `librosa-analyze` + `stretch` |
 | `POST` | `/v1/audio/stereo-width` | audio bytes — `width` [0.0–3.0]; M/S stereo processing |
+| `POST` | `/v1/audio/split` | ZIP — `mode=equal` (requires `count`) or `mode=silence` |
+| `POST` | `/v1/audio/pan` | audio bytes — `position` [-1.0–1.0] |
+| `POST` | `/v1/audio/eq` | audio bytes — `bands` JSON array of `{freq, gain_db, width_hz}` |
+| `POST` | `/v1/audio/key-match` | audio bytes — `target_key` required; requires `chord-detect` + `stretch` |
+| `POST` | `/v1/audio/sidechain-duck` | audio bytes — primary + `trigger_file_*`; ffmpeg sidechaincompress |
 | `POST` | `/v1/audio/fx` | audio bytes |
 
 ### MIDI
@@ -1369,6 +1492,11 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `loop` | Repeat audio N times — `count` total plays |
 | `bpm_match` | Detect BPM then stretch to `target_bpm` — returns source/target BPM + tempo_factor |
 | `stereo_width` | M/S stereo width — `width=0` mono, `1` original, `>1` wider |
+| `split` | Split into equal parts or on silence — returns `{segments:[{name,audio_base64}]}` |
+| `pan` | Pan in the stereo field — `position` [-1.0–1.0] |
+| `eq` | Parametric EQ — `bands` list of `{freq, gain_db, width_hz}` |
+| `key_match` | Detect key then pitch-shift to `target_key` — returns source_key + semitones |
+| `sidechain_duck` | Duck primary track on trigger — `threshold_db`, `ratio`, `attack_ms`, `release_ms` |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
 | `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
 | `midi_inspect` | Read MIDI structure — tempo, tracks, channels, note counts |

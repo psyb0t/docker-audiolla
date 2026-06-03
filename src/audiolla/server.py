@@ -52,12 +52,16 @@ from .audio import (
     concat_audio,
     content_type_for,
     convert_audio,
+    eq_audio,
     fade_audio,
     loop_audio,
     mix_audio,
     multi_stream_zip,
+    pan_audio,
     reverse_audio,
+    sidechain_duck,
     speed_audio,
+    split_audio_equal,
     stereo_width_audio,
     trim_audio,
 )
@@ -2671,6 +2675,305 @@ async def stereo_width(
         output_path=output_path,
         output_url=output_url,
         extra_json={"width": width},
+    )
+
+
+_NOTE_TO_SEMITONE: dict[str, int] = {
+    "C": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
+    "E": 4, "F": 5, "F#": 6, "GB": 6, "G": 7, "G#": 8,
+    "AB": 8, "A": 9, "A#": 10, "BB": 10, "B": 11,
+}
+
+_MODE_SUFFIXES = frozenset({
+    "major", "minor", "maj", "min", "m",
+})
+
+
+def _parse_key_root(key_str: str) -> int:
+    """Parse a key string like 'C', 'F#', 'Bb', 'D minor' to a semitone (0-11)."""
+    parts = key_str.strip().upper().split()
+    root = parts[0]
+    # Strip mode suffix that may be attached without space (e.g. "Cm")
+    for suffix in sorted(_MODE_SUFFIXES, key=len, reverse=True):
+        upper = suffix.upper()
+        if root.endswith(upper) and len(root) > len(upper):
+            root = root[: -len(upper)]
+            break
+    semitone = _NOTE_TO_SEMITONE.get(root)
+    if semitone is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unrecognised key root {root!r}; "
+            f"valid roots: {list(_NOTE_TO_SEMITONE.keys())}",
+        )
+    return semitone
+
+
+# ── /v1/audio/split — split into equal or silence-based segments ──────────────
+
+
+@app.post("/v1/audio/split")
+async def split(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    mode: str = Form(default="equal"),
+    count: int | None = Form(default=None),
+    threshold_db: float = Form(default=-30.0),
+    min_duration_sec: float = Form(default=0.5),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Split audio into segments. mode=equal (requires count>=2) or mode=silence
+    (uses threshold_db/min_duration_sec via silence-detect engine).
+    Returns a ZIP of numbered segment files."""
+    if mode not in ("equal", "silence"):
+        raise HTTPException(status_code=400, detail="mode must be 'equal' or 'silence'")
+    _validate_output_format(output_format)
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    if mode == "equal":
+        if count is None or count < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="mode=equal requires count >= 2",
+            )
+        try:
+            segments = await asyncio.to_thread(
+                split_audio_equal, raw, filename, output_format, count
+            )
+        except AudioConversionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        eng = ENGINES.get("silence-detect")
+        if eng is None or not is_silence_engine(eng):
+            raise HTTPException(
+                status_code=404,
+                detail="silence-detect engine not configured",
+            )
+        try:
+            result = await eng.detect(
+                raw,
+                filename,
+                threshold_db=threshold_db,
+                min_duration_sec=min_duration_sec,
+            )
+        except AudioConversionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        non_silent_ranges = result.get("non_silent_ranges", [])
+        if not non_silent_ranges:
+            raise HTTPException(status_code=400, detail="no non-silent segments found")
+        segments = []
+        for r in non_silent_ranges:
+            try:
+                seg = await asyncio.to_thread(
+                    trim_audio, raw, filename,
+                    r["start_sec"], r["end_sec"], output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            segments.append(seg)
+
+    zip_dict = {f"segment_{i:03d}": seg for i, seg in enumerate(segments)}
+    zip_bytes = multi_stream_zip(zip_dict, output_format)
+    return await write_output(
+        zip_bytes,
+        media_type="application/zip",
+        filename="split.zip",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"segments": len(segments), "mode": mode},
+    )
+
+
+# ── /v1/audio/pan — stereo pan ───────────────────────────────────────────────
+
+
+@app.post("/v1/audio/pan")
+async def pan(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    position: float = Form(default=0.0),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Pan audio in the stereo field. position: -1.0=hard left, 0.0=center, 1.0=hard right."""
+    _validate_output_format(output_format)
+    if not (-1.0 <= position <= 1.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"position must be in [-1.0, 1.0], got {position}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            pan_audio, raw, filename, output_format, position
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"panned.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"position": position},
+    )
+
+
+# ── /v1/audio/eq — parametric EQ ─────────────────────────────────────────────
+
+
+@app.post("/v1/audio/eq")
+async def eq(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    bands: str = Form(...),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Parametric EQ via ffmpeg equalizer filter.
+    bands is a JSON array: [{"freq": 1000, "gain_db": 3.0, "width_hz": 100}, ...]"""
+    _validate_output_format(output_format)
+    try:
+        band_list = json.loads(bands)
+        if not isinstance(band_list, list):
+            raise ValueError("bands must be a JSON array")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid bands JSON: {exc}",
+        ) from exc
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            eq_audio, raw, filename, output_format, band_list
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"eq.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"band_count": len(band_list)},
+    )
+
+
+# ── /v1/audio/key-match — detect key + pitch-shift to target ─────────────────
+
+
+@app.post("/v1/audio/key-match")
+async def key_match(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    target_key: str = Form(...),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Detect source key via chord-detect then pitch-shift to target_key.
+    target_key: note name, e.g. C, F#, Bb, D#. Case-insensitive.
+    Requires chord-detect and stretch engines."""
+    _validate_output_format(output_format)
+    target_semitone = _parse_key_root(target_key)
+    chord_detect_eng = ENGINES.get("chord-detect")
+    if chord_detect_eng is None or not is_chord_detect_engine(chord_detect_eng):
+        raise HTTPException(
+            status_code=404,
+            detail="chord-detect engine not configured",
+        )
+    stretch_eng = ENGINES.get("stretch")
+    if stretch_eng is None or not is_stretch_engine(stretch_eng):
+        raise HTTPException(
+            status_code=404,
+            detail="stretch engine not configured",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        source_result = await chord_detect_eng.detect_chords(raw, filename)
+        source_key = source_result["key"]
+        source_semitone = _parse_key_root(source_key)
+        diff = (target_semitone - source_semitone) % 12
+        if diff > 6:
+            diff -= 12
+        audio_bytes = await stretch_eng.stretch(
+            raw,
+            filename,
+            tempo_factor=1.0,
+            pitch_semitones=float(diff),
+            output_format=output_format,
+        )
+    except HTTPException:
+        raise
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"key_matched.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "source_key": source_key,
+            "target_key": target_key.strip(),
+            "semitones": diff,
+        },
+    )
+
+
+# ── /v1/audio/sidechain-duck — sidechain compression / ducking ───────────────
+
+
+@app.post("/v1/audio/sidechain-duck")
+async def sidechain_duck_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    trigger_file: UploadFile | None = File(default=None),
+    trigger_file_path: str | None = Form(default=None),
+    trigger_file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    threshold_db: float = Form(default=-20.0),
+    ratio: float = Form(default=4.0),
+    attack_ms: float = Form(default=10.0),
+    release_ms: float = Form(default=200.0),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Duck primary audio when trigger audio is loud (voiceover-over-music effect).
+    threshold_db: trigger level. ratio: compression ratio. attack_ms/release_ms: timing."""
+    _validate_output_format(output_format)
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    trigger_raw, trigger_filename = await resolve_input(
+        file=trigger_file,
+        file_path=trigger_file_path,
+        file_url=trigger_file_url,
+        field_prefix="trigger_file",
+    )
+    try:
+        audio_bytes = await asyncio.to_thread(
+            sidechain_duck,
+            raw, filename,
+            trigger_raw, trigger_filename,
+            output_format,
+            threshold_db, ratio, attack_ms, release_ms,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"ducked.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"threshold_db": threshold_db, "ratio": ratio},
     )
 
 

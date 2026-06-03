@@ -1508,6 +1508,231 @@ def build_mcp_server(
             raise ValueError(str(exc)) from exc
         return await _emit_audio(audio_bytes, output_format, output_url)
 
+    # ── split / pan / eq / key-match / sidechain-duck ─────────────────────────
+
+    @mcp.tool()
+    async def split(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        mode: str = "equal",
+        count: int | None = None,
+        threshold_db: float = -30.0,
+        min_duration_sec: float = 0.5,
+        output_format: str = "wav",
+    ) -> dict[str, Any]:
+        """Split audio into segments.
+        mode=equal: requires count>=2, splits into equal time parts.
+        mode=silence: splits on quiet gaps (uses threshold_db/min_duration_sec).
+        Returns {segments: [{name, audio_base64}, ...]}."""
+        import asyncio as _asyncio  # noqa: PLC0415
+        from .audio import (  # noqa: PLC0415
+            split_audio_equal as _split_equal,
+            trim_audio as _trim,
+        )
+        from .engines import is_silence_engine as _is_silence  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        if mode == "equal":
+            if count is None or count < 2:
+                raise ValueError("mode=equal requires count >= 2")
+            try:
+                segs = await _asyncio.to_thread(
+                    _split_equal, raw, name, output_format, count
+                )
+            except AudioConversionError as exc:
+                raise ValueError(str(exc)) from exc
+        elif mode == "silence":
+            eng = engines.get("silence-detect")
+            if eng is None or not _is_silence(eng):
+                raise ValueError("silence-detect engine not configured")
+            try:
+                result = await eng.detect(
+                    raw, name,
+                    threshold_db=threshold_db,
+                    min_duration_sec=min_duration_sec,
+                )
+            except AudioConversionError as exc:
+                raise ValueError(str(exc)) from exc
+            non_silent_ranges = result.get("non_silent_ranges", [])
+            if not non_silent_ranges:
+                raise ValueError("no non-silent segments found")
+            segs = []
+            for r in non_silent_ranges:
+                try:
+                    seg = await _asyncio.to_thread(
+                        _trim, raw, name,
+                        r["start_sec"], r["end_sec"], output_format,
+                    )
+                except AudioConversionError as exc:
+                    raise ValueError(str(exc)) from exc
+                segs.append(seg)
+        else:
+            raise ValueError("mode must be 'equal' or 'silence'")
+        return {
+            "segments": [
+                {
+                    "name": f"segment_{i:03d}.{output_format}",
+                    "audio_base64": base64.b64encode(seg).decode(),
+                }
+                for i, seg in enumerate(segs)
+            ],
+            "count": len(segs),
+        }
+
+    @mcp.tool()
+    async def pan(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        position: float = 0.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Pan audio in the stereo field.
+        position: -1.0=hard left, 0.0=center, 1.0=hard right.
+        Returns base64 audio."""
+        import asyncio as _asyncio  # noqa: PLC0415
+        from .audio import pan_audio as _pan  # noqa: PLC0415
+
+        if not (-1.0 <= position <= 1.0):
+            raise ValueError(f"position must be in [-1.0, 1.0], got {position}")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(
+                _pan, raw, name, output_format, position
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def eq(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        bands: list[dict[str, Any]] = [],
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Parametric EQ. bands: [{freq, gain_db, width_hz (opt)}].
+        Returns base64 audio."""
+        import asyncio as _asyncio  # noqa: PLC0415
+        from .audio import eq_audio as _eq  # noqa: PLC0415
+
+        if not bands:
+            raise ValueError("bands must contain at least one entry")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(
+                _eq, raw, name, output_format, bands
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def key_match(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        target_key: str = "C",
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Detect source key then pitch-shift to target_key (e.g. C, F#, Bb).
+        Returns base64 audio + {source_key, target_key, semitones}.
+        Requires chord-detect + stretch engines."""
+        from .engines import (  # noqa: PLC0415
+            is_chord_detect_engine as _is_chord,
+            is_stretch_engine as _is_stretch,
+        )
+
+        _NOTE_MAP: dict[str, int] = {
+            "C": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
+            "E": 4, "F": 5, "F#": 6, "GB": 6, "G": 7, "G#": 8,
+            "AB": 8, "A": 9, "A#": 10, "BB": 10, "B": 11,
+        }
+        _MODE_SFX = frozenset({"MAJOR", "MINOR", "MAJ", "MIN", "M"})
+
+        def _parse_root(key_str: str) -> int:
+            parts = key_str.strip().upper().split()
+            root = parts[0]
+            for sfx in sorted(_MODE_SFX, key=len, reverse=True):
+                if root.endswith(sfx) and len(root) > len(sfx):
+                    root = root[: -len(sfx)]
+                    break
+            val = _NOTE_MAP.get(root)
+            if val is None:
+                raise ValueError(
+                    f"unrecognised key root {root!r}; "
+                    f"valid roots: {list(_NOTE_MAP.keys())}"
+                )
+            return val
+
+        target_semitone = _parse_root(target_key)
+        chord_eng = engines.get("chord-detect")
+        if chord_eng is None or not _is_chord(chord_eng):
+            raise ValueError("chord-detect engine not configured")
+        stretch_eng = engines.get("stretch")
+        if stretch_eng is None or not _is_stretch(stretch_eng):
+            raise ValueError("stretch engine not configured")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            source_result = await chord_eng.detect_chords(raw, name)
+            source_key = source_result["key"]
+            source_semitone = _parse_root(source_key)
+            diff = (target_semitone - source_semitone) % 12
+            if diff > 6:
+                diff -= 12
+            audio_bytes = await stretch_eng.stretch(
+                raw, name,
+                tempo_factor=1.0,
+                pitch_semitones=float(diff),
+                output_format=output_format,
+            )
+        except (AudioConversionError, ValueError):
+            raise
+        except Exception as exc:
+            raise ValueError(str(exc)) from exc
+        result = await _emit_audio(audio_bytes, output_format, output_url)
+        result["source_key"] = source_key
+        result["target_key"] = target_key.strip()
+        result["semitones"] = diff
+        return result
+
+    @mcp.tool()
+    async def sidechain_duck(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        trigger_file_path: str | None = None,
+        trigger_file_url: str | None = None,
+        threshold_db: float = -20.0,
+        ratio: float = 4.0,
+        attack_ms: float = 10.0,
+        release_ms: float = 200.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Duck primary audio when trigger audio is loud.
+        Provide primary via file_path/file_url, trigger via
+        trigger_file_path/trigger_file_url.
+        Returns base64 audio."""
+        import asyncio as _asyncio  # noqa: PLC0415
+        from .audio import sidechain_duck as _duck  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        trigger_raw, trigger_name = await _load_input(
+            trigger_file_path, trigger_file_url, field_prefix="trigger_file"
+        )
+        try:
+            audio_bytes = await _asyncio.to_thread(
+                _duck,
+                raw, name,
+                trigger_raw, trigger_name,
+                output_format,
+                threshold_db, ratio, attack_ms, release_ms,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
     # ── audio utilities: concat / speed / convert / similar / midi_quantize ──
 
     @mcp.tool()
@@ -1768,5 +1993,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 53 tools")
+    _log.info("mcp server initialised: 58 tools")
     return mcp
