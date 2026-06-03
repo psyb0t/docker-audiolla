@@ -88,3 +88,59 @@ class EmbedEngine(EngineBase):
         finally:
             if in_path and os.path.exists(in_path):
                 os.unlink(in_path)
+
+    async def classify(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        labels: list[str],
+    ) -> dict:
+        model = await self.get_model()
+        result = await asyncio.to_thread(self._classify_sync, raw, filename, labels, model)
+        self._touch()
+        return result
+
+    def _classify_sync(
+        self, raw: bytes, filename: str, labels: list[str], model: object
+    ) -> dict:
+        import librosa  # noqa: PLC0415
+
+        torch = self._torch
+        in_path: str | None = None
+        try:
+            in_path = write_temp_input(raw, filename)
+            y, _ = librosa.load(in_path, sr=48000, mono=True)
+
+            inputs = self._processor(audios=y, return_tensors="pt", sampling_rate=48000)
+            with torch.no_grad():
+                audio_features = model.get_audio_features(**inputs)  # type: ignore[union-attr]
+            audio_features = audio_features / audio_features.norm(p=2, dim=-1, keepdim=True)
+
+            text_inputs = self._processor(
+                text=labels, return_tensors="pt", padding=True
+            )
+            with torch.no_grad():
+                text_features = model.get_text_features(  # type: ignore[union-attr]
+                    **text_inputs
+                )
+            text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
+
+            similarities = (audio_features @ text_features.T)[0].tolist()
+            scored = sorted(
+                [
+                    {"label": lbl, "score": round(float(sim), 4)}
+                    for lbl, sim in zip(labels, similarities)
+                ],
+                key=lambda x: x["score"],
+                reverse=True,
+            )
+            return {"results": scored}
+
+        except AudioConversionError:
+            raise
+        except Exception as exc:
+            raise AudioConversionError(f"audio classification failed: {exc}") from exc
+        finally:
+            if in_path and os.path.exists(in_path):
+                os.unlink(in_path)

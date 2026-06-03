@@ -1289,6 +1289,96 @@ def build_mcp_server(
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
 
+    # ── audio utilities (info / trim / mix / classify) ─────────────────────
+
+    @mcp.tool()
+    async def info(
+        file_path: str | None = None,
+        file_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Probe audio file metadata — duration, sample_rate, channels, codec,
+        bit_depth, format, size_bytes. No engine required; works on any format."""
+        from .audio import audio_info as _audio_info  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            return await _asyncio.to_thread(_audio_info, raw, name)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def trim(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        start_sec: float = 0.0,
+        end_sec: float = 0.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Cut audio to [start_sec, end_sec). end_sec required and must be > start_sec.
+        Returns base64 audio unless output_url is set (presigned PUT)."""
+        from .audio import trim_audio as _trim  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        if end_sec <= start_sec:
+            raise ValueError("end_sec must be > start_sec")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(
+                _trim, raw, name, start_sec, end_sec, output_format
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def mix(
+        tracks: list[dict[str, Any]],
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Mix multiple audio tracks with per-track gain.
+        tracks: list of {file_path or file_url, gain_db (optional, default 0.0)}.
+        Requires at least 2 tracks. Returns base64 audio unless output_url is set."""
+        from .audio import mix_audio as _mix  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        if len(tracks) < 2:
+            raise ValueError("mix requires at least 2 tracks")
+        mix_inputs: list[tuple[bytes, str, float]] = []
+        for i, spec in enumerate(tracks):
+            fp = spec.get("file_path") or None
+            fu = spec.get("file_url") or None
+            gain_db = float(spec.get("gain_db", 0.0))
+            try:
+                raw, name = await _load_input(fp, fu)
+            except ValueError as exc:
+                raise ValueError(f"track {i}: {exc}") from exc
+            mix_inputs.append((raw, name, gain_db))
+        try:
+            audio_bytes = await _asyncio.to_thread(_mix, mix_inputs, output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def classify(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        labels: list[str] = [],
+    ) -> dict[str, Any]:
+        """Zero-shot audio classification via CLAP. Provide a list of labels
+        (genres, moods, instruments — any free-form text). Returns results sorted
+        by descending similarity score. Requires clap-embed model cache."""
+        if not labels:
+            raise ValueError("labels must be a non-empty list of strings")
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("clap-embed")
+        if eng is None or not hasattr(eng, "classify"):
+            raise ValueError("clap-embed engine not configured")
+        try:
+            return await eng.classify(raw, name, labels=labels)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
     # ── HPSS + noise reduction ──────────────────────────────────────────────
 
     @mcp.tool()
@@ -1421,5 +1511,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 39 tools")
+    _log.info("mcp server initialised: 43 tools")
     return mcp

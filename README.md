@@ -5,7 +5,7 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-**Thirty audio engines. One port. Zero cloud.**
+**Thirty audio engines. One port. Zero cloud. Four new primitives.**
 
 You needed Demucs for stems. Then librosa for BPM and key. Then basic-pitch for MIDI transcription. Then pyannote for speaker diarization. Then DeepFilterNet for speech enhancement. Then you spent three days debugging Python version conflicts and now you hate everything.
 
@@ -40,6 +40,10 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | ⏩ **Time-stretch** | Independent tempo factor + pitch shift via librosa phase vocoder |
 | 🏷️ **Audio tagging** | Top-K AudioSet class labels via Audio Spectrogram Transformer |
 | 🔗 **Audio embeddings** | 512-dim semantic embeddings via LAION CLAP + optional text similarity |
+| 🏷️ **Zero-shot classify** | CLAP cosine similarity against any free-form text labels — genres, moods, instruments |
+| 📋 **Audio info** | ffprobe metadata — duration, sample rate, channels, codec, bit depth |
+| ✂️ **Trim** | Cut a clip by start/end seconds — any format in, any format out |
+| 🎚️ **Mix** | Combine N staged tracks with per-track gain_db — pure ffmpeg, no model |
 
 ---
 
@@ -69,6 +73,10 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Time-stretch and pitch-shift](#time-stretch-and-pitch-shift)
   - [Audio tagging](#audio-tagging)
   - [Audio embeddings](#audio-embeddings)
+  - [Zero-shot classification](#zero-shot-classification)
+  - [Audio info](#audio-info)
+  - [Trim](#trim)
+  - [Mix](#mix)
   - [Effects chain](#effects-chain)
   - [Compose MIDI](#compose-midi)
   - [Inspect MIDI](#inspect-midi)
@@ -647,6 +655,117 @@ curl -X POST http://localhost:8000/v1/audio/embed \
 
 `similarity` is cosine similarity in [-1, 1]. Requires HF model cache — same first-run download caveat as audio tagging.
 
+### Zero-shot classification
+
+Given audio and a list of free-form text labels, return cosine similarity scores for each using the existing CLAP model. No extra model download — uses the same `clap-embed` engine. Works for genres, moods, instruments, sonic descriptors — anything CLAP understands.
+
+```bash
+# Genre detection
+curl -X POST http://localhost:8000/v1/audio/classify \
+  -F "file=@track.wav" \
+  -F 'labels=["jazz", "hip-hop", "classical", "electronic", "rock"]'
+# → {"results": [
+#     {"label": "hip-hop", "score": 0.42},
+#     {"label": "electronic", "score": 0.38},
+#     ...
+#   ]}
+
+# Mood / energy
+curl -X POST http://localhost:8000/v1/audio/classify \
+  -F "file=@track.wav" \
+  -F 'labels=["energetic", "calm", "melancholic", "aggressive", "uplifting"]'
+
+# Speaker gender
+curl -X POST http://localhost:8000/v1/audio/classify \
+  -F "file=@interview.wav" \
+  -F 'labels=["male voice", "female voice", "child voice", "multiple speakers"]'
+```
+
+Results are sorted by descending score. Scores are cosine similarities in [-1, 1] — higher = more similar. Requires `clap-embed` model cache.
+
+### Audio info
+
+Probe any audio file for metadata without loading it into memory for processing. Uses ffprobe — handles any format.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/info \
+  -F "file=@track.wav"
+# → {
+#     "size_bytes": 52428800,
+#     "duration_sec": 297.241,
+#     "sample_rate": 44100,
+#     "channels": 2,
+#     "codec": "pcm_s16le",
+#     "sample_fmt": "s16",
+#     "format": "wav",
+#     "bit_depth": 16,
+#     "bit_rate": 1411200
+#   }
+
+# Works on staged files too
+curl -X POST http://localhost:8000/v1/audio/info \
+  -F "file_path=recordings/interview.mp3"
+# → {"codec": "mp3", "bit_rate": 192000, ...}
+```
+
+### Trim
+
+Cut a precise time range out of any audio file. Common use: extract a chorus, clip a sample, chop a stem at bar boundaries.
+
+```bash
+# Extract seconds 30–90 from a track
+curl -X POST http://localhost:8000/v1/audio/trim \
+  -F "file=@track.wav" \
+  -F "start_sec=30.0" \
+  -F "end_sec=90.0" \
+  -o chorus.wav
+
+# Clip a specific beat range, export as mp3
+curl -X POST http://localhost:8000/v1/audio/trim \
+  -F "file=@stem.wav" \
+  -F "start_sec=0.0" \
+  -F "end_sec=8.0" \
+  -F "output_format=mp3" \
+  -o loop.mp3
+
+# From staged file, write to staging
+curl -X POST http://localhost:8000/v1/audio/trim \
+  -F "file_path=sessions/full.wav" \
+  -F "start_sec=120.5" \
+  -F "end_sec=180.0" \
+  -F "output_path=clips/verse.wav"
+```
+
+`start_sec` defaults to 0. `end_sec` is required and must be greater than `start_sec`. Supports all standard `output_format` values.
+
+### Mix
+
+Combine multiple staged or URL-accessible tracks into one. Per-track `gain_db` lets you balance levels before mixing. Useful for bouncing separated stems back together at custom levels, layering synth parts, or combining click-track + music.
+
+```bash
+# Mix drums and bass at equal levels
+curl -X POST http://localhost:8000/v1/audio/mix \
+  -F 'tracks=[{"file_path":"stems/drums.wav"},{"file_path":"stems/bass.wav"}]' \
+  -o rhythm.wav
+
+# Stems at custom levels (drums -3 dB, bass 0 dB, vocals +2 dB)
+curl -X POST http://localhost:8000/v1/audio/mix \
+  -F 'tracks=[
+    {"file_path":"stems/drums.wav","gain_db":-3},
+    {"file_path":"stems/bass.wav","gain_db":0},
+    {"file_path":"stems/vocals.wav","gain_db":2}
+  ]' \
+  -F "output_format=wav" \
+  -o custom_mix.wav
+
+# Write to staging
+curl -X POST http://localhost:8000/v1/audio/mix \
+  -F 'tracks=[{"file_path":"stems/harmonic.wav"},{"file_path":"stems/percussive.wav","gain_db":-6}]' \
+  -F "output_path=mixed/recombined.wav"
+```
+
+`tracks` is a required JSON array. Each entry needs `file_path` or `file_url` and an optional `gain_db` (default 0.0). Requires at least 2 tracks. Shorter tracks are padded with silence to match the longest.
+
 ### Effects chain
 
 Apply an ordered chain of pedalboard effects — full catalog, you pick the order and params. Different from `/v1/audio/master` (which runs preset mastering chains).
@@ -936,6 +1055,10 @@ bytes.
 | `POST` | `/v1/audio/stretch` | audio bytes |
 | `POST` | `/v1/audio/tag` | JSON — top-K AudioSet labels with confidence scores |
 | `POST` | `/v1/audio/embed` | JSON — 512-dim embedding; with `query_text` also returns cosine similarity |
+| `POST` | `/v1/audio/classify` | JSON — `{results: [{label, score}]}` sorted descending; requires `clap-embed` |
+| `POST` | `/v1/audio/info` | JSON — duration, sample_rate, channels, codec, bit_depth, format |
+| `POST` | `/v1/audio/trim` | audio bytes — `start_sec` + `end_sec` required |
+| `POST` | `/v1/audio/mix` | audio bytes — `tracks` JSON array required (≥2 entries) |
 | `POST` | `/v1/audio/fx` | audio bytes |
 
 ### MIDI
@@ -1010,6 +1133,10 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `stretch` | Time-stretch + pitch-shift via librosa phase vocoder |
 | `tag` | Audio tagging via AST — top-K AudioSet labels with confidence scores |
 | `embed` | 512-dim CLAP audio embedding; with `query_text` returns cosine similarity |
+| `classify` | Zero-shot CLAP classification — cosine similarity against any list of text labels |
+| `info` | Probe audio metadata — duration, sample_rate, channels, codec, bit_depth |
+| `trim` | Cut audio to [start_sec, end_sec) — returns base64 audio |
+| `mix` | Mix N tracks with per-track gain — `tracks` list of {file_path/url, gain_db} |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
 | `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
 | `midi_inspect` | Read MIDI structure — tempo, tracks, channels, note counts |

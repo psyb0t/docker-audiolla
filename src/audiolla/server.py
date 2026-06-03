@@ -48,8 +48,11 @@ from . import files as files_mod
 from .audio import (
     SUPPORTED_OUTPUT_FORMATS,
     AudioConversionError,
+    audio_info,
     content_type_for,
+    mix_audio,
     multi_stream_zip,
+    trim_audio,
 )
 from .auth import BearerAuthMiddleware
 from .engines import (
@@ -72,6 +75,7 @@ from .engines import (
     is_midi_transform_engine,
     is_onsets_engine,
     is_segments_engine,
+    is_classify_engine,
     is_embed_engine,
     is_hpss_engine,
     is_noise_reduce_engine,
@@ -2102,6 +2106,149 @@ async def noise_reduce(
             "output_format": output_format,
         },
     )
+
+
+# ── /v1/audio/info — ffprobe metadata ────────────────────────────────────────
+
+
+@app.post("/v1/audio/info")
+async def audio_info_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+) -> JSONResponse:
+    """Probe audio file: duration, sample_rate, channels, codec, bit_depth, format."""
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await asyncio.to_thread(audio_info, raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/trim — cut to time range ───────────────────────────────────────
+
+
+@app.post("/v1/audio/trim")
+async def trim(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    start_sec: float = Form(default=0.0),
+    end_sec: float = Form(...),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Cut audio to [start_sec, end_sec). end_sec required."""
+    _validate_output_format(output_format)
+    if start_sec < 0:
+        raise HTTPException(status_code=400, detail="start_sec must be >= 0")
+    if end_sec <= start_sec:
+        raise HTTPException(status_code=400, detail="end_sec must be > start_sec")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            trim_audio, raw, filename, start_sec, end_sec, output_format
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"trimmed.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"start_sec": start_sec, "end_sec": end_sec, "output_format": output_format},
+    )
+
+
+# ── /v1/audio/mix — multi-track mix ──────────────────────────────────────────
+
+
+@app.post("/v1/audio/mix")
+async def mix(
+    tracks: str = Form(...),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Mix multiple staged/URL tracks with per-track gain.
+    tracks is a JSON array: [{"file_path":"...", "gain_db": 0.0}, ...]
+    Each entry has file_path OR file_url plus optional gain_db (default 0.0).
+    Requires at least 2 tracks."""
+    _validate_output_format(output_format)
+    try:
+        track_specs = json.loads(tracks)
+        if not isinstance(track_specs, list) or len(track_specs) < 2:
+            raise ValueError("tracks must be a JSON array with at least 2 entries")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid tracks JSON: {exc}") from exc
+
+    mix_inputs: list[tuple[bytes, str, float]] = []
+    for i, spec in enumerate(track_specs):
+        if not isinstance(spec, dict):
+            raise HTTPException(status_code=400, detail=f"track {i}: must be an object")
+        fp = spec.get("file_path") or None
+        fu = spec.get("file_url") or None
+        try:
+            gain_db = float(spec.get("gain_db", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"track {i}: invalid gain_db") from exc
+        try:
+            raw, filename = await resolve_input(file=None, file_path=fp, file_url=fu)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=f"track {i}: {exc.detail}"
+            ) from exc
+        mix_inputs.append((raw, filename, gain_db))
+
+    try:
+        audio_bytes = await asyncio.to_thread(mix_audio, mix_inputs, output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"mixed.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"track_count": len(mix_inputs), "output_format": output_format},
+    )
+
+
+# ── /v1/audio/classify — zero-shot CLAP classification ───────────────────────
+
+
+@app.post("/v1/audio/classify")
+async def classify(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    labels: str = Form(...),
+) -> JSONResponse:
+    """Zero-shot audio classification via CLAP. labels is a JSON array of strings.
+    Returns results sorted by descending similarity score.
+    Example labels: ["jazz", "hip-hop", "classical"] or ["male voice", "female voice"].
+    Requires clap-embed model cache."""
+    try:
+        label_list = json.loads(labels)
+        if not isinstance(label_list, list) or len(label_list) < 1:
+            raise ValueError("labels must be a non-empty JSON array of strings")
+        if not all(isinstance(lb, str) for lb in label_list):
+            raise ValueError("all labels must be strings")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid labels: {exc}") from exc
+
+    eng = ENGINES.get("clap-embed")
+    if eng is None or not is_classify_engine(eng):
+        raise HTTPException(status_code=404, detail="clap-embed engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await eng.classify(raw, filename, labels=label_list)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
 
 
 def _resolve_files_path(raw: str) -> tuple[Any, str]:

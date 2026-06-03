@@ -222,3 +222,7 @@ def is_hpss_engine(engine: Any) -> bool:
 
 def is_noise_reduce_engine(engine: Any) -> bool:
     return hasattr(engine, "reduce")
+
+
+def is_classify_engine(engine: Any) -> bool:
+    return hasattr(engine, "classify")

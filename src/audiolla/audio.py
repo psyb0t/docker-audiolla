@@ -104,6 +104,163 @@ def encode_audio(wav_path: str, output_format: str) -> tuple[bytes, str]:
     return data, content_type_for(output_format)
 
 
+_SAMPLE_FMT_BIT_DEPTH: dict[str, int] = {
+    "u8": 8, "u8p": 8,
+    "s16": 16, "s16p": 16,
+    "s32": 32, "s32p": 32, "flt": 32, "fltp": 32,
+    "dbl": 64, "dblp": 64, "s64": 64, "s64p": 64,
+}
+
+
+def audio_info(raw_bytes: bytes, original_filename: str) -> dict:
+    """Probe audio metadata via ffprobe. Returns duration, codec, channels, etc."""
+    import json as _json
+
+    in_path = write_temp_input(raw_bytes, original_filename)
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams", "-show_format",
+                in_path,
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise AudioConversionError(f"ffprobe failed: {stderr or 'unknown error'}")
+        data = _json.loads(proc.stdout.decode("utf-8", errors="replace"))
+    finally:
+        os.unlink(in_path)
+
+    streams = data.get("streams", [])
+    audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    fmt = data.get("format", {})
+
+    if audio_stream is None:
+        raise AudioConversionError("no audio stream found in file")
+
+    sample_fmt = audio_stream.get("sample_fmt", "")
+    bit_depth = _SAMPLE_FMT_BIT_DEPTH.get(sample_fmt)
+
+    raw_bit_rate = audio_stream.get("bit_rate") or fmt.get("bit_rate")
+    bit_rate: int | None = None
+    if raw_bit_rate is not None:
+        try:
+            bit_rate = int(raw_bit_rate)
+        except (ValueError, TypeError):
+            pass
+
+    frames: int | None = None
+    raw_frames = audio_stream.get("nb_frames")
+    if raw_frames is not None:
+        try:
+            frames = int(raw_frames)
+        except (ValueError, TypeError):
+            pass
+
+    raw_duration = audio_stream.get("duration") or fmt.get("duration")
+    try:
+        duration_sec = round(float(raw_duration), 6) if raw_duration is not None else 0.0
+    except (ValueError, TypeError):
+        duration_sec = 0.0
+
+    result: dict = {
+        "size_bytes": len(raw_bytes),
+        "duration_sec": duration_sec,
+        "sample_rate": int(audio_stream.get("sample_rate", 0)),
+        "channels": int(audio_stream.get("channels", 0)),
+        "codec": audio_stream.get("codec_name", ""),
+        "sample_fmt": sample_fmt,
+        "format": fmt.get("format_name", ""),
+    }
+    if bit_depth is not None:
+        result["bit_depth"] = bit_depth
+    if bit_rate is not None:
+        result["bit_rate"] = bit_rate
+    if frames is not None:
+        result["frames"] = frames
+    return result
+
+
+def trim_audio(
+    raw_bytes: bytes,
+    original_filename: str,
+    start_sec: float,
+    end_sec: float,
+    output_format: str,
+) -> bytes:
+    """Cut audio to [start_sec, end_sec) and re-encode to output_format."""
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_path = write_temp_input(raw_bytes, original_filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-trim-")
+    os.close(out_fd)
+    try:
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-ss", str(start_sec), "-to", str(end_sec), "-i", in_path]
+            + codec_args
+            + [out_path]
+        )
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def mix_audio(inputs: list[tuple[bytes, str, float]], output_format: str) -> bytes:
+    """Mix N audio tracks with per-track gain_db. Requires at least 2 inputs."""
+    if len(inputs) < 2:
+        raise AudioConversionError("mix_audio requires at least 2 inputs")
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_paths: list[str] = []
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-mix-")
+    os.close(out_fd)
+    try:
+        for raw_bytes, filename, _ in inputs:
+            in_paths.append(write_temp_input(raw_bytes, filename))
+
+        filter_parts: list[str] = []
+        for i, (_, _, gain_db) in enumerate(inputs):
+            linear = 10 ** (gain_db / 20.0)
+            filter_parts.append(f"[{i}:a]volume={linear}[a{i}]")
+        mixed_inputs = "".join(f"[a{i}]" for i in range(len(inputs)))
+        filter_parts.append(
+            f"{mixed_inputs}amix=inputs={len(inputs)}:duration=longest:normalize=0[out]"
+        )
+        filter_complex = ";".join(filter_parts)
+
+        cmd = ["ffmpeg", "-y"]
+        for p in in_paths:
+            cmd += ["-i", p]
+        cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
+        cmd += codec_args
+        cmd.append(out_path)
+
+        _run_ffmpeg(cmd)
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        for p in in_paths:
+            if os.path.exists(p):
+                os.unlink(p)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
 def _run_ffmpeg(args: list[str]) -> None:
     proc = subprocess.run(args, capture_output=True, timeout=600)
     if proc.returncode != 0:
