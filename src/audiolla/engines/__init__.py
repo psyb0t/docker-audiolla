@@ -11,6 +11,7 @@ from .chord_detect_engine import ChordDetectEngine
 from .deepfilter_engine import DeepFilterNetEngine
 from .demucs import DemucsEngine
 from .diarize_pyannote_engine import DiarizeEngine
+from .embed_engine import EmbedEngine
 from .ffmpeg_render import FfmpegRenderEngine
 from .fx_chain import FxChainEngine
 from .librosa_analyze import LibrosaAnalyzeEngine
@@ -20,6 +21,8 @@ from .midi_render import MidiRenderEngine
 from .pedalboard_chain import PedalboardChainEngine
 from .silence_detect import SilenceDetectEngine
 from .sox_transform import SoxTransformEngine
+from .stretch_engine import StretchEngine
+from .tag_engine import TagEngine
 from .uvr_separator import UVRSeparatorEngine
 from .vad_engine import VADEngine
 
@@ -83,6 +86,15 @@ def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
             continue
         if executor == "diarize_pyannote":
             out[slug] = DiarizeEngine(slug=slug, entry=entry)
+            continue
+        if executor == "stretch":
+            out[slug] = StretchEngine(slug=slug, entry=entry)
+            continue
+        if executor == "ast_tag":
+            out[slug] = TagEngine(slug=slug, entry=entry)
+            continue
+        if executor == "clap_embed":
+            out[slug] = EmbedEngine(slug=slug, entry=entry)
             continue
         raise ValueError(f"unknown executor {executor!r} for engine {slug!r}")
     return out
@@ -182,3 +194,15 @@ def is_vad_engine(engine: Any) -> bool:
 
 def is_diarize_engine(engine: Any) -> bool:
     return hasattr(engine, "diarize")
+
+
+def is_stretch_engine(engine: Any) -> bool:
+    return hasattr(engine, "stretch")
+
+
+def is_tag_engine(engine: Any) -> bool:
+    return hasattr(engine, "tag")
+
+
+def is_embed_engine(engine: Any) -> bool:
+    return hasattr(engine, "embed")

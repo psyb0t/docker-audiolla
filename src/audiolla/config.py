@@ -183,6 +183,9 @@ _VALID_EXECUTORS = frozenset(
         "chord_detect",
         "vad",
         "diarize_pyannote",
+        "stretch",
+        "ast_tag",
+        "clap_embed",
     }
 )
 

@@ -1201,6 +1201,89 @@ def build_mcp_server(
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
 
+    # ── stretch / tag / embed ───────────────────────────────────────────────
+
+    @mcp.tool()
+    async def stretch(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        output_path: str | None = None,
+        tempo_factor: float = 1.0,
+        pitch_semitones: float = 0.0,
+        output_format: str = "wav",
+    ) -> dict[str, Any]:
+        """Time-stretch and/or pitch-shift audio. tempo_factor=0.5 halves speed;
+        pitch_semitones=12 shifts one octave up. Returns base64 audio (or writes
+        to output_path in staging)."""
+        from .engines import is_stretch_engine  # noqa: PLC0415
+        from .audio import content_type_for  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("stretch")
+        if eng is None or not is_stretch_engine(eng):
+            raise ValueError("stretch engine not configured")
+        try:
+            audio_bytes = await eng.stretch(
+                raw, name,
+                tempo_factor=tempo_factor,
+                pitch_semitones=pitch_semitones,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_path:
+            try:
+                rel = files_mod.sanitize_path(output_path)
+                dest = files_mod.resolve_under(config.FILES_DIR, rel)
+            except files_mod.FilePathError as exc:
+                raise ValueError(str(exc)) from exc
+            files_mod.write_atomic(dest, audio_bytes)
+            return {"path": str(rel), "size": len(audio_bytes)}
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "content_type": content_type_for(output_format),
+            "size": len(audio_bytes),
+        }
+
+    @mcp.tool()
+    async def tag(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        top_k: int = 10,
+    ) -> dict[str, Any]:
+        """Audio tagging via Audio Spectrogram Transformer — returns top-K
+        AudioSet class labels with confidence scores. Requires HF model cache."""
+        from .engines import is_tag_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("ast-tag")
+        if eng is None or not is_tag_engine(eng):
+            raise ValueError("ast-tag engine not configured")
+        try:
+            return await eng.tag(raw, name, top_k=top_k)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def embed(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        query_text: str | None = None,
+    ) -> dict[str, Any]:
+        """512-dim L2-normalised audio embedding via LAION CLAP. With query_text,
+        also returns cosine similarity to the text description.
+        Requires HF model cache."""
+        from .engines import is_embed_engine  # noqa: PLC0415
+
+        raw, name = await _load_input(file_path, file_url)
+        eng = engines.get("clap-embed")
+        if eng is None or not is_embed_engine(eng):
+            raise ValueError("clap-embed engine not configured")
+        try:
+            return await eng.embed(raw, name, query_text=query_text)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
     # ── file staging tools ──────────────────────────────────────────────────
 
     @mcp.tool()
@@ -1256,5 +1339,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 18 tools")
+    _log.info("mcp server initialised: 21 tools")
     return mcp

@@ -72,8 +72,11 @@ from .engines import (
     is_midi_transform_engine,
     is_onsets_engine,
     is_segments_engine,
+    is_embed_engine,
     is_separation_engine,
     is_silence_engine,
+    is_stretch_engine,
+    is_tag_engine,
     is_transform_engine,
     is_uvr_restore_engine,
     is_vad_engine,
@@ -1919,6 +1922,94 @@ async def diarize(
             min_speakers=min_speakers,
             max_speakers=max_speakers,
         )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/stretch — time-stretch + pitch-shift ───────────────────────────
+
+
+@app.post("/v1/audio/stretch")
+async def stretch(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    tempo_factor: float = Form(default=1.0),
+    pitch_semitones: float = Form(default=0.0),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Independently control playback speed (tempo_factor) and key (pitch_semitones).
+    tempo_factor=0.5 = half speed; pitch_semitones=12 = one octave up."""
+    _validate_output_format(output_format)
+    eng = ENGINES.get("stretch")
+    if eng is None or not is_stretch_engine(eng):
+        raise HTTPException(status_code=404, detail="stretch engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await eng.stretch(
+            raw,
+            filename,
+            tempo_factor=tempo_factor,
+            pitch_semitones=pitch_semitones,
+            output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"stretched.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"tempo_factor": tempo_factor, "pitch_semitones": pitch_semitones},
+    )
+
+
+# ── /v1/audio/tag — AudioSet tagging via AST ─────────────────────────────────
+
+
+@app.post("/v1/audio/tag")
+async def tag(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    top_k: int = Form(default=10),
+) -> JSONResponse:
+    """Top-K AudioSet label predictions via Audio Spectrogram Transformer.
+    Requires model cache (set HF_HUB_OFFLINE=0 on first run to download)."""
+    eng = ENGINES.get("ast-tag")
+    if eng is None or not is_tag_engine(eng):
+        raise HTTPException(status_code=404, detail="ast-tag engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await eng.tag(raw, filename, top_k=top_k)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/embed — CLAP audio embeddings ──────────────────────────────────
+
+
+@app.post("/v1/audio/embed")
+async def embed(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    query_text: str | None = Form(default=None),
+) -> JSONResponse:
+    """512-dim L2-normalised audio embedding via LAION CLAP. With query_text,
+    also returns cosine similarity to the text description.
+    Requires model cache (set HF_HUB_OFFLINE=0 on first run to download)."""
+    eng = ENGINES.get("clap-embed")
+    if eng is None or not is_embed_engine(eng):
+        raise HTTPException(status_code=404, detail="clap-embed engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await eng.embed(raw, filename, query_text=query_text)
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(result)

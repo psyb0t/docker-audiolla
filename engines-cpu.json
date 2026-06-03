@@ -104,6 +104,20 @@
     "pyannote": {
       "executor": "diarize_pyannote",
       "description": "Speaker diarization via pyannote/speaker-diarization-3.1 — who spoke when (requires HUGGINGFACE_TOKEN)"
+    },
+    "stretch": {
+      "executor": "stretch",
+      "description": "Time-stretch + pitch-shift via librosa phase vocoder — independent tempo factor and semitone offset, all audio formats"
+    },
+    "ast-tag": {
+      "executor": "ast_tag",
+      "hf_model": "MIT/ast-finetuned-audioset-10-10-0.4593",
+      "description": "Audio tagging via Audio Spectrogram Transformer — top-K AudioSet class labels with confidence scores (requires HF model cache)"
+    },
+    "clap-embed": {
+      "executor": "clap_embed",
+      "hf_model": "laion/larger_clap_music_and_speech",
+      "description": "512-dim audio embeddings via LAION CLAP — semantic audio search; optional text query returns cosine similarity (requires HF model cache)"
     }
   }
 }
