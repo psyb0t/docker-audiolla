@@ -5,7 +5,7 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-**Thirty audio engines. One port. Zero cloud. Four new primitives.**
+**Thirty audio engines. One port. Zero cloud. Five more primitives.**
 
 You needed Demucs for stems. Then librosa for BPM and key. Then basic-pitch for MIDI transcription. Then pyannote for speaker diarization. Then DeepFilterNet for speech enhancement. Then you spent three days debugging Python version conflicts and now you hate everything.
 
@@ -44,6 +44,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | 📋 **Audio info** | ffprobe metadata — duration, sample rate, channels, codec, bit depth |
 | ✂️ **Trim** | Cut a clip by start/end seconds — any format in, any format out |
 | 🎚️ **Mix** | Combine N staged tracks with per-track gain_db — pure ffmpeg, no model |
+| 🔗 **Concat** | Stitch N audio files end-to-end in order |
+| ⏩ **Speed** | Change playback speed without pitch shift (0.1× – 10×) via ffmpeg atempo |
+| 🔄 **Convert** | Re-encode: format, sample rate, channel count in one call |
+| 🔍 **Similar** | Cosine similarity between two audio files via CLAP embeddings |
+| 🎹 **MIDI quantize** | Snap MIDI note timings to a rhythmic grid (16th, 8th, quarter…) |
 
 ---
 
@@ -77,6 +82,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Audio info](#audio-info)
   - [Trim](#trim)
   - [Mix](#mix)
+  - [Concat](#concat)
+  - [Speed](#speed)
+  - [Convert](#convert)
+  - [Similar](#similar)
+  - [MIDI quantize](#midi-quantize)
   - [Effects chain](#effects-chain)
   - [Compose MIDI](#compose-midi)
   - [Inspect MIDI](#inspect-midi)
@@ -766,6 +776,111 @@ curl -X POST http://localhost:8000/v1/audio/mix \
 
 `tracks` is a required JSON array. Each entry needs `file_path` or `file_url` and an optional `gain_db` (default 0.0). Requires at least 2 tracks. Shorter tracks are padded with silence to match the longest.
 
+### Concat
+
+Stitch N audio files together in order. Handles different sample rates and channel counts automatically (ffmpeg resamples on the fly).
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/concat \
+  -F 'files=[{"file_path":"intro.wav"},{"file_path":"verse.wav"},{"file_path":"outro.wav"}]' \
+  -o full_track.wav
+
+# output_format and staging also work
+curl -X POST http://localhost:8000/v1/audio/concat \
+  -F 'files=[{"file_path":"a.wav"},{"file_path":"b.wav"}]' \
+  -F "output_format=mp3" \
+  -F "output_path=concat/result.mp3"
+```
+
+`files` is a required JSON array of `{file_path?, file_url?}` objects. Requires at least 2 entries.
+
+### Speed
+
+Change playback speed without pitch shifting — useful for auditioning at half/double speed, or creating slow-motion effects. Uses ffmpeg `atempo` filter chained for extreme multipliers.
+
+```bash
+# Half speed
+curl -X POST http://localhost:8000/v1/audio/speed \
+  -F "file=@track.wav" -F "speed=0.5" -o slow.wav
+
+# Double speed
+curl -X POST http://localhost:8000/v1/audio/speed \
+  -F "file=@track.wav" -F "speed=2.0" -o fast.wav
+
+# 4× speed (chains two atempo=2.0 filters internally)
+curl -X POST http://localhost:8000/v1/audio/speed \
+  -F "file_path=track.wav" -F "speed=4.0" -F "output_format=mp3" -o fast.mp3
+```
+
+`speed` is required. Range: 0.1–10.0. Note: this changes duration but not pitch. For pitch-preserving tempo changes use `/v1/audio/stretch`.
+
+### Convert
+
+Re-encode audio to a different format, sample rate, or channel count in a single call.
+
+```bash
+# WAV → 16 kHz mono FLAC (for speech models)
+curl -X POST http://localhost:8000/v1/audio/convert \
+  -F "file=@recording.wav" \
+  -F "output_format=flac" \
+  -F "sample_rate=16000" \
+  -F "channels=1" \
+  -o prepared.flac
+
+# Stereo → mono WAV
+curl -X POST http://localhost:8000/v1/audio/convert \
+  -F "file_path=stereo.wav" \
+  -F "channels=1" \
+  -o mono.wav
+
+# Any format → Opus at 48 kHz
+curl -X POST http://localhost:8000/v1/audio/convert \
+  -F "file=@audio.mp3" \
+  -F "output_format=opus" \
+  -F "sample_rate=48000" \
+  -o out.opus
+```
+
+`output_format` defaults to `wav`. `sample_rate` and `channels` are optional; if omitted, the source values are preserved.
+
+### Similar
+
+Compute cosine similarity between two audio files using CLAP embeddings. Returns a score in [-1, 1] — 1 = identical sound, 0 = unrelated, negative = acoustically opposite. Useful for duplicate detection, cover matching, or finding the closest sample in a library.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/similar \
+  -F "file=@original.wav" \
+  -F "reference_file=@remix.wav"
+# → {"similarity": 0.847, "dim": 512}
+
+# Using staged files
+curl -X POST http://localhost:8000/v1/audio/similar \
+  -F "file_path=stems/vocals.wav" \
+  -F "reference_file_path=stems/vocals_ref.wav"
+```
+
+Primary file: `file` / `file_path` / `file_url`. Reference file: `reference_file` / `reference_file_path` / `reference_file_url`. Requires `clap-embed` engine.
+
+### MIDI quantize
+
+Snap all note timings in a MIDI file to the nearest rhythmic grid. Cleaner dedicated endpoint than `/v1/midi/transform`'s `quantize_grid_beats` param.
+
+```bash
+# Quantize to 16th notes (0.25 beats)
+curl -X POST http://localhost:8000/v1/midi/quantize \
+  -F "file=@sloppy.mid" \
+  -F "grid_beats=0.25" \
+  -o tight.mid
+
+# 8th note grid
+curl -X POST http://localhost:8000/v1/midi/quantize \
+  -F "file_path=recorded.mid" \
+  -F "grid_beats=0.5" \
+  -F "output_path=midi/quantized.mid"
+```
+
+`grid_beats`: grid size in beats — `0.25` = 16th note, `0.5` = 8th, `1.0` = quarter note. Default: `0.25`.
+
 ### Effects chain
 
 Apply an ordered chain of pedalboard effects — full catalog, you pick the order and params. Different from `/v1/audio/master` (which runs preset mastering chains).
@@ -1059,6 +1174,10 @@ bytes.
 | `POST` | `/v1/audio/info` | JSON — duration, sample_rate, channels, codec, bit_depth, format |
 | `POST` | `/v1/audio/trim` | audio bytes — `start_sec` + `end_sec` required |
 | `POST` | `/v1/audio/mix` | audio bytes — `tracks` JSON array required (≥2 entries) |
+| `POST` | `/v1/audio/concat` | audio bytes — `files` JSON array required (≥2 entries) |
+| `POST` | `/v1/audio/speed` | audio bytes — `speed` float required (0.1–10.0) |
+| `POST` | `/v1/audio/convert` | audio bytes — format/sample_rate/channels conversion |
+| `POST` | `/v1/audio/similar` | JSON — `{similarity, dim}`; requires `clap-embed` |
 | `POST` | `/v1/audio/fx` | audio bytes |
 
 ### MIDI
@@ -1068,6 +1187,7 @@ bytes.
 | `POST` | `/v1/midi/compose` | MIDI bytes (`audio/midi`) — body is `application/json` song spec |
 | `POST` | `/v1/midi/inspect` | JSON — tempo, tracks, channels, note counts, time/key signatures |
 | `POST` | `/v1/midi/transform` | MIDI bytes — transpose, quantize, tempo override, channel filter |
+| `POST` | `/v1/midi/quantize` | MIDI bytes — `grid_beats` snaps all note timings to a rhythmic grid |
 | `POST` | `/v1/midi/render` | audio bytes — input MIDI via `file` / `file_path` / `file_url` |
 | `POST` | `/v1/midi/generate` | audio bytes — body is `application/json` song spec (compose + render in one) |
 
@@ -1137,6 +1257,11 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `info` | Probe audio metadata — duration, sample_rate, channels, codec, bit_depth |
 | `trim` | Cut audio to [start_sec, end_sec) — returns base64 audio |
 | `mix` | Mix N tracks with per-track gain — `tracks` list of {file_path/url, gain_db} |
+| `concat` | Stitch N audio files end-to-end in order — `files` list of {file_path/url} |
+| `speed` | Change playback speed without pitch shift — `speed` float (0.1–10.0) |
+| `convert` | Re-encode: format, sample_rate, channels in one call |
+| `similar` | Cosine similarity between two audio files via CLAP — returns `{similarity, dim}` |
+| `midi_quantize` | Snap MIDI note timings to a rhythmic grid — `grid_beats` in beats |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
 | `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
 | `midi_inspect` | Read MIDI structure — tempo, tracks, channels, note counts |

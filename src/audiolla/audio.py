@@ -261,6 +261,132 @@ def mix_audio(inputs: list[tuple[bytes, str, float]], output_format: str) -> byt
             os.unlink(out_path)
 
 
+def concat_audio(inputs: list[tuple[bytes, str]], output_format: str) -> bytes:
+    """Concatenate N audio files in order. Requires at least 2 inputs."""
+    if len(inputs) < 2:
+        raise AudioConversionError("concat_audio requires at least 2 inputs")
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_paths: list[str] = []
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-concat-")
+    os.close(out_fd)
+    try:
+        for raw_bytes, filename in inputs:
+            in_paths.append(write_temp_input(raw_bytes, filename))
+
+        n = len(inputs)
+        input_labels = "".join(f"[{i}:a]" for i in range(n))
+        filter_complex = f"{input_labels}concat=n={n}:v=0:a=1[out]"
+
+        cmd = ["ffmpeg", "-y"]
+        for p in in_paths:
+            cmd += ["-i", p]
+        cmd += ["-filter_complex", filter_complex, "-map", "[out]"]
+        cmd += codec_args
+        cmd.append(out_path)
+
+        _run_ffmpeg(cmd)
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        for p in in_paths:
+            if os.path.exists(p):
+                os.unlink(p)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def speed_audio(
+    raw_bytes: bytes,
+    original_filename: str,
+    speed: float,
+    output_format: str,
+) -> bytes:
+    """Change playback speed without pitch shift via ffmpeg atempo.
+    speed=0.5 → half speed; speed=2.0 → double speed.
+    atempo only supports [0.5, 2.0] per filter; chain multiple for extreme values."""
+    if not (0.1 <= speed <= 10.0):
+        raise AudioConversionError(
+            f"speed must be in [0.1, 10.0], got {speed}"
+        )
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_path = write_temp_input(raw_bytes, original_filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-speed-")
+    os.close(out_fd)
+    try:
+        remaining = speed
+        atempo_parts: list[str] = []
+        while remaining > 2.0:
+            atempo_parts.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < 0.5:
+            atempo_parts.append("atempo=0.5")
+            remaining /= 0.5
+        atempo_parts.append(f"atempo={remaining}")
+        atempo_filter = ",".join(atempo_parts)
+
+        _run_ffmpeg(
+            ["ffmpeg", "-y", "-i", in_path, "-af", atempo_filter]
+            + codec_args
+            + [out_path]
+        )
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        if os.path.exists(in_path):
+            os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def convert_audio(
+    raw_bytes: bytes,
+    original_filename: str,
+    output_format: str,
+    sample_rate: int | None = None,
+    channels: int | None = None,
+) -> bytes:
+    """Re-encode audio: format, sample_rate, and/or channel count conversion."""
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    if sample_rate is not None and sample_rate <= 0:
+        raise AudioConversionError(f"sample_rate must be > 0, got {sample_rate}")
+    if channels is not None and channels not in (1, 2):
+        raise AudioConversionError(f"channels must be 1 or 2, got {channels}")
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_path = write_temp_input(raw_bytes, original_filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-conv-")
+    os.close(out_fd)
+    try:
+        cmd = ["ffmpeg", "-y", "-i", in_path]
+        if sample_rate is not None:
+            cmd += ["-ar", str(sample_rate)]
+        if channels is not None:
+            cmd += ["-ac", str(channels)]
+        cmd += codec_args
+        cmd.append(out_path)
+        _run_ffmpeg(cmd)
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        if os.path.exists(in_path):
+            os.unlink(in_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
 def _run_ffmpeg(args: list[str]) -> None:
     proc = subprocess.run(args, capture_output=True, timeout=600)
     if proc.returncode != 0:

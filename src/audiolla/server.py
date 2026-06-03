@@ -49,9 +49,12 @@ from .audio import (
     SUPPORTED_OUTPUT_FORMATS,
     AudioConversionError,
     audio_info,
+    concat_audio,
     content_type_for,
+    convert_audio,
     mix_audio,
     multi_stream_zip,
+    speed_audio,
     trim_audio,
 )
 from .auth import BearerAuthMiddleware
@@ -2214,6 +2217,213 @@ async def mix(
         output_path=output_path,
         output_url=output_url,
         extra_json={"track_count": len(mix_inputs), "output_format": output_format},
+    )
+
+
+# ── /v1/audio/concat — concatenate N audio files ─────────────────────────────
+
+
+@app.post("/v1/audio/concat")
+async def concat(
+    files: str = Form(...),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Concatenate N audio files in order.
+    files is a JSON array: [{"file_path": "..."}, {"file_url": "..."}, ...]
+    Each entry has file_path OR file_url. Requires at least 2."""
+    _validate_output_format(output_format)
+    try:
+        file_specs = json.loads(files)
+        if not isinstance(file_specs, list) or len(file_specs) < 2:
+            raise ValueError("files must be a JSON array with at least 2 entries")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid files JSON: {exc}") from exc
+
+    concat_inputs: list[tuple[bytes, str]] = []
+    for i, spec in enumerate(file_specs):
+        if not isinstance(spec, dict):
+            raise HTTPException(status_code=400, detail=f"file {i}: must be an object")
+        fp = spec.get("file_path") or None
+        fu = spec.get("file_url") or None
+        try:
+            raw, filename = await resolve_input(file=None, file_path=fp, file_url=fu)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=f"file {i}: {exc.detail}"
+            ) from exc
+        concat_inputs.append((raw, filename))
+
+    try:
+        audio_bytes = await asyncio.to_thread(concat_audio, concat_inputs, output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"concat.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"file_count": len(concat_inputs), "output_format": output_format},
+    )
+
+
+# ── /v1/audio/speed — change playback speed ───────────────────────────────────
+
+
+@app.post("/v1/audio/speed")
+async def speed(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    speed: float = Form(...),
+    output_format: str = Form(default="wav"),
+) -> Response:
+    """Change playback speed without pitch shift via ffmpeg atempo.
+    speed=0.5 halves speed; speed=2.0 doubles. Range: 0.1–10.0."""
+    _validate_output_format(output_format)
+    if not (0.1 <= speed <= 10.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"speed must be in [0.1, 10.0], got {speed}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(speed_audio, raw, filename, speed, output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"speed.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"speed": speed, "output_format": output_format},
+    )
+
+
+# ── /v1/audio/convert — re-encode audio ─────────────────────────────────────
+
+
+@app.post("/v1/audio/convert")
+async def convert(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+    sample_rate: int | None = Form(default=None),
+    channels: int | None = Form(default=None),
+) -> Response:
+    """Re-encode audio to a different format, sample rate, or channel count."""
+    _validate_output_format(output_format)
+    if sample_rate is not None and sample_rate <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sample_rate must be > 0, got {sample_rate}",
+        )
+    if channels is not None and channels not in (1, 2):
+        raise HTTPException(
+            status_code=400,
+            detail=f"channels must be 1 or 2, got {channels}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        audio_bytes = await asyncio.to_thread(
+            convert_audio, raw, filename, output_format, sample_rate, channels
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"converted.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "output_format": output_format,
+            "sample_rate": sample_rate,
+            "channels": channels,
+        },
+    )
+
+
+# ── /v1/audio/similar — cosine similarity via CLAP ───────────────────────────
+
+
+@app.post("/v1/audio/similar")
+async def similar(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    reference_file: UploadFile | None = File(default=None),
+    reference_file_path: str | None = Form(default=None),
+    reference_file_url: str | None = Form(default=None),
+) -> JSONResponse:
+    """Cosine similarity between two audio files via CLAP embeddings."""
+    eng = ENGINES.get("clap-embed")
+    if eng is None or not is_embed_engine(eng):
+        raise HTTPException(status_code=404, detail="clap-embed engine not configured")
+    raw_a, name_a = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    raw_b, name_b = await resolve_input(
+        file=reference_file,
+        file_path=reference_file_path,
+        file_url=reference_file_url,
+        field_prefix="reference_file",
+    )
+    try:
+        result = await eng.similar(raw_a, name_a, raw_b, name_b)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/midi/quantize — snap MIDI note timings to rhythmic grid ───────────────
+
+
+@app.post("/v1/midi/quantize")
+async def midi_quantize(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    grid_beats: float = Form(default=0.25),
+) -> Response:
+    """Snap MIDI note timings to the nearest rhythmic grid.
+    grid_beats: grid size in beats (0.25=16th, 0.5=8th, 1.0=quarter).
+    Wraps /v1/midi/transform with only quantize_grid_beats set."""
+    if grid_beats <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"grid_beats must be > 0, got {grid_beats}",
+        )
+    eng = ENGINES.get("midi-compose")
+    if eng is None or not is_midi_transform_engine(eng):
+        raise HTTPException(
+            status_code=404,
+            detail="midi-compose engine not configured",
+        )
+    raw, _filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        out_bytes = await eng.transform(raw, quantize_grid_beats=grid_beats)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        out_bytes,
+        media_type="audio/midi",
+        filename="quantized.mid",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": "midi-compose",
+            "size": len(out_bytes),
+            "grid_beats": grid_beats,
+        },
     )
 
 

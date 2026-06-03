@@ -1379,6 +1379,134 @@ def build_mcp_server(
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
 
+    # ── audio utilities: concat / speed / convert / similar / midi_quantize ──
+
+    @mcp.tool()
+    async def concat(
+        files: list[dict[str, Any]],
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Concatenate N audio files in order.
+        files: list of {file_path or file_url}. Requires at least 2.
+        Returns base64 audio unless output_url is set."""
+        from .audio import concat_audio as _concat  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        if len(files) < 2:
+            raise ValueError("concat requires at least 2 files")
+        concat_inputs: list[tuple[bytes, str]] = []
+        for i, spec in enumerate(files):
+            fp = spec.get("file_path") or None
+            fu = spec.get("file_url") or None
+            try:
+                raw, name = await _load_input(fp, fu)
+            except ValueError as exc:
+                raise ValueError(f"file {i}: {exc}") from exc
+            concat_inputs.append((raw, name))
+        try:
+            audio_bytes = await _asyncio.to_thread(_concat, concat_inputs, output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def speed(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        speed: float = 1.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Change playback speed without pitch shift via ffmpeg atempo.
+        speed=0.5 halves speed; speed=2.0 doubles. Range: 0.1–10.0.
+        Returns base64 audio unless output_url is set."""
+        from .audio import speed_audio as _speed  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        if not (0.1 <= speed <= 10.0):
+            raise ValueError(f"speed must be in [0.1, 10.0], got {speed}")
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(_speed, raw, name, speed, output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def convert(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        output_format: str = "wav",
+        sample_rate: int | None = None,
+        channels: int | None = None,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-encode audio to a different format, sample rate, or channel count.
+        output_format: wav/mp3/flac/opus/aac/pcm. sample_rate: e.g. 16000, 44100, 48000.
+        channels: 1 (mono) or 2 (stereo). Returns base64 audio unless output_url is set."""
+        from .audio import convert_audio as _convert  # noqa: PLC0415
+        import asyncio as _asyncio  # noqa: PLC0415
+        raw, name = await _load_input(file_path, file_url)
+        try:
+            audio_bytes = await _asyncio.to_thread(
+                _convert, raw, name, output_format, sample_rate, channels
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(audio_bytes, output_format, output_url)
+
+    @mcp.tool()
+    async def similar(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        reference_file_path: str | None = None,
+        reference_file_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Cosine similarity between two audio files via CLAP embeddings.
+        Returns {similarity: float [-1,1], dim: 512}. Requires clap-embed model cache."""
+        from .engines import is_embed_engine  # noqa: PLC0415
+        raw_a, name_a = await _load_input(file_path, file_url)
+        raw_b, name_b = await _load_input(
+            reference_file_path, reference_file_url, field_prefix="reference_file"
+        )
+        eng = engines.get("clap-embed")
+        if eng is None or not is_embed_engine(eng):
+            raise ValueError("clap-embed engine not configured")
+        try:
+            return await eng.similar(raw_a, name_a, raw_b, name_b)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool()
+    async def midi_quantize(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        grid_beats: float = 0.25,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Snap MIDI note timings to the nearest rhythmic grid.
+        grid_beats: 0.25=16th note, 0.5=8th, 1.0=quarter. Returns base64 MIDI."""
+        if grid_beats <= 0:
+            raise ValueError(f"grid_beats must be > 0, got {grid_beats}")
+        raw, _name = await _load_input(file_path, file_url)
+        eng = engines.get("midi-compose")
+        if eng is None or not hasattr(eng, "transform"):
+            raise ValueError("midi-compose engine not configured")
+        try:
+            out = await eng.transform(raw, quantize_grid_beats=grid_beats)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            try:
+                await fetch.upload_bytes(output_url, out, "audio/midi")
+            except fetch.FetchError as exc:
+                raise ValueError(str(exc)) from exc
+            return {"url": output_url, "size": len(out), "grid_beats": grid_beats}
+        return {
+            "midi_base64": base64.b64encode(out).decode("ascii"),
+            "size": len(out),
+            "grid_beats": grid_beats,
+        }
+
     # ── HPSS + noise reduction ──────────────────────────────────────────────
 
     @mcp.tool()
@@ -1511,5 +1639,5 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 43 tools")
+    _log.info("mcp server initialised: 48 tools")
     return mcp

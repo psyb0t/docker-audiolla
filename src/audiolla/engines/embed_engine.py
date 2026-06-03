@@ -89,6 +89,57 @@ class EmbedEngine(EngineBase):
             if in_path and os.path.exists(in_path):
                 os.unlink(in_path)
 
+    async def similar(
+        self,
+        raw_a: bytes, filename_a: str,
+        raw_b: bytes, filename_b: str,
+    ) -> dict:
+        """Cosine similarity between two audio files via CLAP embeddings.
+        Both embeddings are L2-normalised so cosine similarity = dot product."""
+        model = await self.get_model()
+        result = await asyncio.to_thread(
+            self._similar_sync, raw_a, filename_a, raw_b, filename_b, model
+        )
+        self._touch()
+        return result
+
+    def _similar_sync(
+        self, raw_a: bytes, filename_a: str, raw_b: bytes, filename_b: str, model: object
+    ) -> dict:
+        import librosa  # noqa: PLC0415
+
+        torch = self._torch
+        path_a: str | None = None
+        path_b: str | None = None
+        try:
+            path_a = write_temp_input(raw_a, filename_a)
+            y_a, _ = librosa.load(path_a, sr=48000, mono=True)
+            inputs_a = self._processor(audios=y_a, return_tensors="pt", sampling_rate=48000)
+            with torch.no_grad():
+                feats_a = model.get_audio_features(**inputs_a)  # type: ignore[union-attr]
+            feats_a = feats_a / feats_a.norm(p=2, dim=-1, keepdim=True)
+            emb_a = feats_a[0].tolist()
+
+            path_b = write_temp_input(raw_b, filename_b)
+            y_b, _ = librosa.load(path_b, sr=48000, mono=True)
+            inputs_b = self._processor(audios=y_b, return_tensors="pt", sampling_rate=48000)
+            with torch.no_grad():
+                feats_b = model.get_audio_features(**inputs_b)  # type: ignore[union-attr]
+            feats_b = feats_b / feats_b.norm(p=2, dim=-1, keepdim=True)
+
+            similarity = (feats_a @ feats_b.T)[0, 0].item()
+            return {"similarity": round(float(similarity), 4), "dim": len(emb_a)}
+
+        except AudioConversionError:
+            raise
+        except Exception as exc:
+            raise AudioConversionError(f"audio similarity failed: {exc}") from exc
+        finally:
+            if path_a and os.path.exists(path_a):
+                os.unlink(path_a)
+            if path_b and os.path.exists(path_b):
+                os.unlink(path_b)
+
     async def classify(
         self,
         raw: bytes,
