@@ -49,10 +49,11 @@ asyncio_mode = "auto"
 # Supply-chain defense: only install pkg versions older than `exclude-newer`.
 # Bumped by `make pkg-*` targets (pkg-add / pkg-update / pkg-upgrade /
 # pkg-remove) before any dep mutation via scripts/bump_exclude_newer.sh,
-# which rewrites this line to today's UTC midnight. NEVER drift forward
-# automatically — the whole point is to catch newly-published wheels in the
-# supply-chain attack window (hours-to-days post-release). Manual edits to
-# this line are fine but go through the make targets for normal mutations.
+# which rewrites this line to UTC midnight 7 days ago. The 7-day floor is
+# the supply-chain attack window — fresh wheels published in the last week
+# are invisible to the resolver, giving the community time to catch and
+# yank malicious uploads before they enter our lockfile. NEVER drift forward
+# automatically. Manual edits are fine but go through the make targets.
 exclude-newer = "2026-06-03T00:00:00Z"
 
 [tool.mypy]
