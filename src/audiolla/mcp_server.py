@@ -650,6 +650,7 @@ def build_mcp_server(
     async def visualize(
         file_path: str | None = None,
         file_url: str | None = None,
+        engine: str = "ffmpeg-render",
         mode: str = "spectrum",
         width: int = 1280,
         height: int = 720,
@@ -659,33 +660,36 @@ def build_mcp_server(
         container: str = "mp4",
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Render audio visualization. ``mode`` controls the output type:
+        """Render audio visualization.
+
+        ``engine`` selects the visualization engine (default: ``ffmpeg-render``).
+        ``mode`` controls the output type:
 
         - ``spectrogram`` — static PNG via ffmpeg showspectrumpic (color + scale apply)
-        - ``waveform`` — static PNG via ffmpeg showwavespic (color applies)
+        - ``waveform`` — static PNG via ffmpeg showwavespic (color applies, no scale/fps/container)
         - ``spectrum`` / ``waves`` / ``cqt`` / ``freqs`` / ``volume`` /
           ``vectorscope`` / ``phasemeter`` / ``histogram`` — animated MP4/WebM video
 
-        PNG modes return ``{image_base64, size, mode}``; video modes return
-        ``{video_base64, size, mode, container}``. Pass ``output_url`` to PUT instead.
+        PNG modes return ``{image_base64, size, engine, mode}``; video modes return
+        ``{video_base64, size, engine, mode, container}``. Pass ``output_url`` to PUT instead.
         """
         raw, name = await _load_input(file_path, file_url)
-        eng = engines.get("ffmpeg-render")
+        eng = engines.get(engine)
         if eng is None:
-            raise ValueError("ffmpeg-render engine not configured")
+            raise ValueError(f"engine {engine!r} not configured")
         try:
             if mode == "spectrogram":
                 out = await eng.spectrogram(raw, name, width=width, height=height, color=color, scale=scale)
                 if output_url:
                     await fetch.upload_bytes(output_url, out, "image/png")
-                    return {"url": output_url, "size": len(out), "mode": mode}
-                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "mode": mode}
+                    return {"url": output_url, "size": len(out), "engine": engine, "mode": mode}
+                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "engine": engine, "mode": mode}
             if mode == "waveform":
                 out = await eng.waveform(raw, name, width=width, height=height, color=color)
                 if output_url:
                     await fetch.upload_bytes(output_url, out, "image/png")
-                    return {"url": output_url, "size": len(out), "mode": mode}
-                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "mode": mode}
+                    return {"url": output_url, "size": len(out), "engine": engine, "mode": mode}
+                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "engine": engine, "mode": mode}
             out = await eng.visualize(raw, name, mode=mode, width=width, height=height, fps=fps, container=container)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
@@ -695,10 +699,11 @@ def build_mcp_server(
                 await fetch.upload_bytes(output_url, out, media_type)
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
-            return {"url": output_url, "size": len(out), "mode": mode, "container": container}
+            return {"url": output_url, "size": len(out), "engine": engine, "mode": mode, "container": container}
         return {
             "video_base64": base64.b64encode(out).decode("ascii"),
             "size": len(out),
+            "engine": engine,
             "mode": mode,
             "container": container,
         }

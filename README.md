@@ -333,25 +333,25 @@ curl -X POST http://localhost:8000/v1/audio/silence \
 
 ### Visualize (spectrogram, waveform, video)
 
-All visual output is under a single `POST /v1/audio/visualize/{mode}` endpoint. The mode is part of the URL path.
+Visual output splits into two sub-namespaces by output type:
 
 ```bash
-# Static PNG spectrogram
-curl -X POST http://localhost:8000/v1/audio/visualize/spectrogram \
+# Static PNG spectrogram (color + scale params)
+curl -X POST http://localhost:8000/v1/audio/visualize/image/spectrogram \
   -F "file=@track.wav" \
   -F "width=1280" \
   -F "height=720" \
   -o spec.png
 
-# Static PNG waveform
-curl -X POST http://localhost:8000/v1/audio/visualize/waveform \
+# Static PNG waveform (color param)
+curl -X POST http://localhost:8000/v1/audio/visualize/image/waveform \
   -F "file=@track.wav" \
   -F "width=1280" \
   -F "height=240" \
   -o wave.png
 
-# Animated MP4 spectrum analyser
-curl -X POST http://localhost:8000/v1/audio/visualize/spectrum \
+# Animated MP4 spectrum analyser (fps + container params)
+curl -X POST http://localhost:8000/v1/audio/visualize/video/spectrum \
   -F "file=@track.wav" \
   -F "width=1280" \
   -F "height=720" \
@@ -360,9 +360,11 @@ curl -X POST http://localhost:8000/v1/audio/visualize/spectrum \
   -o viz.mp4
 ```
 
-**PNG modes** (`spectrogram`, `waveform`): return `image/png`. Params: `color` (default `intensity` for spectrogram; pass `lime` for waveform-style green), `scale` (`log`/`lin` for spectrogram).
+**`/image/spectrogram`**: returns `image/png`. Params: `width`, `height`, `color` (default `intensity`), `scale` (`log`/`lin`).
 
-**Video modes**: `spectrum` (scrolling FFT), `waves` (oscilloscope), `cqt` (constant-Q transform), `freqs` (bar-graph analyzer), `volume` (VU meter), `vectorscope` (stereo X/Y scope), `phasemeter`, `histogram`. Containers: `mp4` (default), `webm`.
+**`/image/waveform`**: returns `image/png`. Params: `width`, `height`, `color` (default `lime`).
+
+**`/video/{mode}`**: `spectrum` (scrolling FFT), `waves` (oscilloscope), `cqt` (constant-Q transform), `freqs` (bar-graph analyzer), `volume` (VU meter), `vectorscope` (stereo X/Y scope), `phasemeter`, `histogram`. Params: `width`, `height`, `fps`, `container` (`mp4` default, `webm`).
 
 ### Acoustic fingerprint
 
@@ -1804,7 +1806,7 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `midi-compose` | JSON spec → MIDI bytes. Also inspects and transforms existing MIDI files. Backs `/v1/midi/{compose,inspect,transform,generate}`. |
 | `midi-render` | MIDI → audio via fluidsynth + SoundFont. Backs `/v1/midi/render` and `/v1/midi/generate`. |
 | `silence-detect` | Locate silent gaps via ffmpeg `silencedetect`. Optional auto-trim. Backs `/v1/audio/silence`. |
-| `ffmpeg-render` | Static PNG spectrogram/waveform + 8-mode animated MP4/WebM video via ffmpeg filters. Backs `/v1/audio/visualize/{mode}`. |
+| `ffmpeg-render` | Static PNG spectrogram/waveform + 8-mode animated MP4/WebM video via ffmpeg filters. Backs `/v1/audio/visualize/image/*` and `/v1/audio/visualize/video/{mode}`. |
 | `audio-fingerprint` | Chromaprint acoustic fingerprint via `fpcalc`. Backs `/v1/audio/fingerprint`. |
 | `uvr-dereverb` | BS-Roformer de-reverb — removes room reverb; `primary_stem=No Reverb`. |
 | `uvr-deecho` | VR Architecture de-echo — normal and aggressive modes; pass `aggressive=true` for harder suppression. |
@@ -1850,7 +1852,9 @@ bytes.
 | `POST` | `/v1/audio/melody` | JSON — dominant melody contour; optional MIDI export |
 | `POST` | `/v1/audio/segments` | JSON — structural segment labels (A, B, C…) |
 | `POST` | `/v1/audio/silence` | JSON — silent/non-silent ranges; optional trimmed audio |
-| `POST` | `/v1/audio/visualize/{mode}` | PNG bytes (mode=`spectrogram`\|`waveform`); MP4/WebM bytes for 8 video modes |
+| `POST` | `/v1/audio/visualize/image/spectrogram` | PNG bytes — static spectrogram (`color`, `scale` params) |
+| `POST` | `/v1/audio/visualize/image/waveform` | PNG bytes — static waveform (`color` param) |
+| `POST` | `/v1/audio/visualize/video/{mode}` | MP4/WebM bytes — animated video (8 modes: `spectrum`, `waves`, `cqt`, …) |
 | `POST` | `/v1/audio/fingerprint` | JSON — Chromaprint fingerprint string |
 | `POST` | `/v1/audio/restore/{engine}` | audio bytes — reverb/echo/noise removed; `aggressive=true` for uvr-deecho hard mode |
 | `POST` | `/v1/audio/to_midi/{engine}` | MIDI bytes (`audio/midi`) — polyphonic transcription |
@@ -1972,7 +1976,7 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `melody` | Dominant melody contour in Hz; optional MIDI export |
 | `segments` | Structural segmentation — recurring section labels (A, B, C…) |
 | `silence` | Detect silent gaps; optional auto-trim (edges or all) |
-| `visualize` | PNG spectrogram/waveform or animated MP4/WebM — `mode` selects output type |
+| `visualize` | PNG spectrogram/waveform or animated MP4/WebM — `engine` + `mode` select output type |
 | `fingerprint` | Chromaprint acoustic fingerprint (AcoustID-compatible) |
 | `restore` | Remove reverb/echo/noise via UVR — `engine` selects model; `aggressive=true` for harder echo suppression |
 | `denoise` | Thin shim — prefer `restore` with `engine=uvr-denoise` or `noise_reduce` with `engine=uvr-denoise` |

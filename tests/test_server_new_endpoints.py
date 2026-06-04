@@ -3,7 +3,9 @@
   POST /v1/audio/restore/{engine}
   POST /v1/audio/to_midi
   POST /v1/audio/enhance
-  POST /v1/audio/visualize/{mode}
+  POST /v1/audio/visualize/image/spectrogram
+  POST /v1/audio/visualize/image/waveform
+  POST /v1/audio/visualize/video/{mode}
   POST /v1/audio/fingerprint
   POST /v1/audio/silence
 
@@ -110,7 +112,7 @@ def _client_for(engines: dict, registry: dict | None = None, tmp_files_dir: Path
         return TestClient(_server_mod.app)
 
 
-# ── /v1/audio/visualize/{mode} — spectrogram ────────────────────────────────────
+# ── /v1/audio/visualize/image/spectrogram ────────────────────────────────────────
 
 
 def test_spectrogram_200_returns_png():
@@ -124,7 +126,7 @@ def test_spectrogram_200_returns_png():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/spectrogram",
+                "/v1/audio/visualize/image/spectrogram",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -143,7 +145,7 @@ def test_spectrogram_404_when_no_engine_configured():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/spectrogram",
+                "/v1/audio/visualize/image/spectrogram",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -168,7 +170,7 @@ def test_spectrogram_404_when_engine_lacks_spectrogram_method():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/spectrogram",
+                "/v1/audio/visualize/image/spectrogram",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -186,7 +188,7 @@ def test_spectrogram_output_path_returns_json():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/spectrogram",
+                "/v1/audio/visualize/image/spectrogram",
                 data={"output_path": "viz/spec.png"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
@@ -196,7 +198,7 @@ def test_spectrogram_output_path_returns_json():
     assert body["path"] == "viz/spec.png"
 
 
-# ── /v1/audio/visualize/{mode} — waveform ───────────────────────────────────────
+# ── /v1/audio/visualize/image/waveform ───────────────────────────────────────────
 
 
 def test_waveform_200_returns_png():
@@ -210,7 +212,7 @@ def test_waveform_200_returns_png():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/waveform",
+                "/v1/audio/visualize/image/waveform",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -229,14 +231,14 @@ def test_waveform_404_when_no_engine_configured():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/waveform",
+                "/v1/audio/visualize/image/waveform",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
     assert r.status_code == 404
 
 
-# ── /v1/audio/visualize/{mode} ────────────────────────────────────────────────
+# ── /v1/audio/visualize/video/{mode} ────────────────────────────────────────────
 
 
 def test_visualize_200_returns_video():
@@ -250,7 +252,7 @@ def test_visualize_200_returns_video():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/spectrum",
+                "/v1/audio/visualize/video/spectrum",
                 data={"container": "mp4"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
@@ -271,7 +273,7 @@ def test_visualize_400_for_unknown_mode():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/notamode",
+                "/v1/audio/visualize/video/notamode",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -290,7 +292,7 @@ def test_visualize_webm_container():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize/waves",
+                "/v1/audio/visualize/video/waves",
                 data={"container": "webm"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )

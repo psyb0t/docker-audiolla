@@ -13,7 +13,9 @@ Endpoints:
   POST   /v1/audio/loudness          pyloudnorm LUFS measurement + normalization
   POST   /v1/audio/restore/{engine}  remove reverb/echo/noise (UVR); aggressive=true for deecho hard mode
   POST   /v1/audio/noise-reduce/{engine} noise reduction — engine=noise-reduce (DSP) or uvr-denoise (ML)
-  POST   /v1/audio/visualize/{mode}  PNG spectrogram|waveform or animated video (spectrum/waves/cqt/…)
+  POST   /v1/audio/visualize/image/spectrogram  static PNG spectrogram
+  POST   /v1/audio/visualize/image/waveform     static PNG waveform
+  POST   /v1/audio/visualize/video/{mode}       animated video (spectrum/waves/cqt/…)
   POST   /v1/audio/separate/hpss     harmonic+percussive separation via librosa HPSS
   GET    /v1/files                   list staged files
   PUT    /v1/files/{path}            stage a file
@@ -1523,20 +1525,16 @@ async def silence(
     return result
 
 
-# ── /v1/audio/visualize/{mode} — PNG (spectrogram|waveform) or animated video ─
+# ── /v1/audio/visualize/image/spectrogram  static PNG spectrogram ─────────────
+# ── /v1/audio/visualize/image/waveform     static PNG waveform ─────────────────
+# ── /v1/audio/visualize/video/{mode}       animated video ──────────────────────
+# spectrogram → ffmpeg showspectrumpic → PNG (color + scale params)
+# waveform    → ffmpeg showwavespic    → PNG (color param)
+# spectrum|waves|cqt|freqs|volume|vectorscope|phasemeter|histogram → MP4/WebM
 
 
-# ── /v1/audio/visualize/{mode} — PNG (spectrogram|waveform) or animated video ─
-# mode=spectrogram   → ffmpeg showspectrumpic  → PNG (color + scale params)
-# mode=waveform      → ffmpeg showwavespic     → PNG (color param)
-# mode=spectrum|waves|cqt|freqs|volume|vectorscope|phasemeter|histogram → MP4/WebM
-
-_IMAGE_VISUALIZE_MODES = {"spectrogram", "waveform"}
-
-
-@app.post("/v1/audio/visualize/{mode}")
-async def visualize(
-    mode: str,
+@app.post("/v1/audio/visualize/image/spectrogram")
+async def visualize_spectrogram(
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
@@ -1546,6 +1544,104 @@ async def visualize(
     height: int = Form(default=720),
     color: str = Form(default="intensity"),
     scale: str = Form(default="log"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    eng = ENGINES.get("ffmpeg-render")
+    if eng is None or not is_ffmpeg_render_engine(eng):
+        raise HTTPException(
+            status_code=404,
+            detail="ffmpeg-render engine not configured",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.png"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _spec_coro():
+            try:
+                _p = await _eng.spectrogram(_raw, _fn, width=width, height=height, color=color, scale=scale)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_op, output_url=None, extra_json={"mode": "spectrogram"})
+
+        return await _submit_job(_spec_coro(), endpoint="/v1/audio/visualize/image/spectrogram", webhook_url=webhook_url, job_id=job_id)
+
+    try:
+        png = await eng.spectrogram(raw, filename, width=width, height=height, color=color, scale=scale)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        png,
+        media_type="image/png",
+        filename="spectrogram.png",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"mode": "spectrogram"},
+    )
+
+
+@app.post("/v1/audio/visualize/image/waveform")
+async def visualize_waveform(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    width: int = Form(default=1280),
+    height: int = Form(default=720),
+    color: str = Form(default="lime"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    eng = ENGINES.get("ffmpeg-render")
+    if eng is None or not is_ffmpeg_render_engine(eng):
+        raise HTTPException(
+            status_code=404,
+            detail="ffmpeg-render engine not configured",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.png"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _waveform_coro():
+            try:
+                _p = await _eng.waveform(_raw, _fn, width=width, height=height, color=color)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_op, output_url=None, extra_json={"mode": "waveform"})
+
+        return await _submit_job(_waveform_coro(), endpoint="/v1/audio/visualize/image/waveform", webhook_url=webhook_url, job_id=job_id)
+
+    try:
+        png = await eng.waveform(raw, filename, width=width, height=height, color=color)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        png,
+        media_type="image/png",
+        filename="waveform.png",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"mode": "waveform"},
+    )
+
+
+@app.post("/v1/audio/visualize/video/{mode}")
+async def visualize_video(
+    mode: str,
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    width: int = Form(default=1280),
+    height: int = Form(default=720),
     fps: int = Form(default=30),
     container: str = Form(default="mp4"),
     async_job: bool = Form(default=False),
@@ -1557,75 +1653,14 @@ async def visualize(
             status_code=404,
             detail="ffmpeg-render engine not configured",
         )
-    _all_modes = sorted(_IMAGE_VISUALIZE_MODES | set(visualize_modes()))
-    if mode not in _all_modes:
+    _all_modes = sorted(visualize_modes())
+    if mode not in set(_all_modes):
         raise HTTPException(
             status_code=400,
             detail=f"unknown visualize mode {mode!r}; supported: {_all_modes}",
         )
-    raw, filename = await resolve_input(
-        file=file,
-        file_path=file_path,
-        file_url=file_url,
-    )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if mode == "spectrogram":
-        if async_job:
-            job_id = JOB_QUEUE.new_id()
-            _eff_op = output_path or f"jobs/{job_id}.png"
-            _raw, _fn, _eng = raw, filename, eng
-
-            async def _spec_coro():
-                try:
-                    _p = await _eng.spectrogram(_raw, _fn, width=width, height=height, color=color, scale=scale)
-                except AudioConversionError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
-                return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "mode": "spectrogram"})
-
-            return await _submit_job(_spec_coro(), endpoint="/v1/audio/visualize/spectrogram", webhook_url=webhook_url, job_id=job_id)
-
-        try:
-            png = await eng.spectrogram(raw, filename, width=width, height=height, color=color, scale=scale)
-        except AudioConversionError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return await write_output(
-            png,
-            media_type="image/png",
-            filename="spectrogram.png",
-            output_path=output_path,
-            output_url=output_url,
-            extra_json={"engine": "ffmpeg-render", "mode": "spectrogram"},
-        )
-
-    if mode == "waveform":
-        if async_job:
-            job_id = JOB_QUEUE.new_id()
-            _eff_op = output_path or f"jobs/{job_id}.png"
-            _raw, _fn, _eng = raw, filename, eng
-
-            async def _waveform_coro():
-                try:
-                    _p = await _eng.waveform(_raw, _fn, width=width, height=height, color=color)
-                except AudioConversionError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
-                return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "mode": "waveform"})
-
-            return await _submit_job(_waveform_coro(), endpoint="/v1/audio/visualize/waveform", webhook_url=webhook_url, job_id=job_id)
-
-        try:
-            png = await eng.waveform(raw, filename, width=width, height=height, color=color)
-        except AudioConversionError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return await write_output(
-            png,
-            media_type="image/png",
-            filename="waveform.png",
-            output_path=output_path,
-            output_url=output_url,
-            extra_json={"engine": "ffmpeg-render", "mode": "waveform"},
-        )
-
-    # animated video mode
     if async_job:
         job_id = JOB_QUEUE.new_id()
         _eff_op = output_path or f"jobs/{job_id}.{container}"
@@ -1637,9 +1672,9 @@ async def visualize(
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             _mt = "video/mp4" if container == "mp4" else "video/webm"
-            return await write_output(_v, media_type=_mt, filename=f"visualize.{container}", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "mode": mode, "container": container})
+            return await write_output(_v, media_type=_mt, filename=f"visualize.{container}", output_path=_eff_op, output_url=None, extra_json={"mode": mode, "container": container})
 
-        return await _submit_job(_viz_coro(), endpoint=f"/v1/audio/visualize/{mode}", webhook_url=webhook_url, job_id=job_id)
+        return await _submit_job(_viz_coro(), endpoint=f"/v1/audio/visualize/video/{mode}", webhook_url=webhook_url, job_id=job_id)
 
     try:
         video = await eng.visualize(raw, filename, mode=mode, width=width, height=height, fps=fps, container=container)
@@ -1654,7 +1689,6 @@ async def visualize(
         output_path=output_path,
         output_url=output_url,
         extra_json={
-            "engine": "ffmpeg-render",
             "mode": mode,
             "container": container,
             "width": width,

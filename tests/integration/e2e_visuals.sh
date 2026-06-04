@@ -1,5 +1,5 @@
 #!/bin/bash
-# Audio visualisations — /v1/audio/visualize/{mode}.
+# Audio visualisations — /v1/audio/visualize/image/{mode} and /v1/audio/visualize/video/{mode}.
 # Verifies that the bytes returned are actually valid PNG / MP4 / WebM
 # files, not just that the HTTP call succeeded.
 #
@@ -42,7 +42,7 @@ test_spectrogram_png() {
         -F "file=@${FIXTURE}" \
         -F "width=640" \
         -F "height=240" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/spectrogram")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/spectrogram")
     assert_eq "$code" "200" "visualize/spectrogram -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"
@@ -67,7 +67,7 @@ test_waveform_png() {
         -F "file=@${FIXTURE}" \
         -F "width=640" \
         -F "height=160" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/waveform")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/waveform")
     assert_eq "$code" "200" "visualize/waveform -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"
@@ -86,7 +86,7 @@ test_spectrogram_output_path() {
         -F "width=320" \
         -F "height=160" \
         -F "output_path=viz/spec.png" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/spectrogram")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/spectrogram")
     if ! echo "$body" | jq -e '.path == "viz/spec.png"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
     fi
@@ -114,7 +114,7 @@ test_visualize_spectrum_mp4() {
         -F "height=180" \
         -F "fps=15" \
         -F "container=mp4" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/spectrum")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/spectrum")
     assert_eq "$code" "200" "visualize/spectrum -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_mp4 "$tmp"; then
         echo "  FAIL: response is not an MP4"
@@ -141,7 +141,7 @@ test_visualize_waves_webm() {
         -F "height=180" \
         -F "fps=15" \
         -F "container=webm" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/waves")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/waves")
     assert_eq "$code" "200" "visualize/waves webm -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_webm "$tmp"; then
         echo "  FAIL: response is not a WebM"
@@ -162,7 +162,7 @@ test_visualize_cqt_mp4() {
         -F "width=320" \
         -F "height=180" \
         -F "fps=15" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/cqt")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/cqt")
     assert_eq "$code" "200" "visualize/cqt -> 200" || { rm -f "$tmp"; return 1; }
     _is_mp4 "$tmp" || { echo "  FAIL: not MP4"; rm -f "$tmp"; return 1; }
     rm -f "$tmp"
@@ -179,7 +179,7 @@ test_visualize_output_path() {
         -F "height=180" \
         -F "fps=15" \
         -F "output_path=viz/viz.mp4" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/spectrum")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/spectrum")
     if ! echo "$body" | jq -e '.path == "viz/viz.mp4"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
     fi
@@ -200,7 +200,7 @@ test_visualize_unknown_mode_400() {
     code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/notamode")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/notamode")
     body=$(cat "$tmp")
     rm -f "$tmp"
     assert_eq "$code" "400" "unknown mode -> 400" || return 1
@@ -220,7 +220,7 @@ test_spectrogram_color_scale() {
         -F "height=160" \
         -F "color=fire" \
         -F "scale=lin" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/spectrogram")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/spectrogram")
     assert_eq "$code" "200" "visualize/spectrogram color=fire scale=lin -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"
@@ -241,7 +241,7 @@ test_waveform_color() {
         -F "width=320" \
         -F "height=160" \
         -F "color=cyan" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/waveform")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/waveform")
     assert_eq "$code" "200" "visualize/waveform color=cyan -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"
