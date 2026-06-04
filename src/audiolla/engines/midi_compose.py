@@ -626,3 +626,60 @@ class MidiComposeEngine(EngineBase):
         buf = io.BytesIO()
         mid.save(file=buf)
         return buf.getvalue()
+
+    async def humanize(self, midi_bytes: bytes, *, timing_ms: float = 10.0, velocity_pct: float = 10.0, seed: int | None = None) -> bytes:
+        return await asyncio.to_thread(
+            self._humanize_sync, midi_bytes, timing_ms, velocity_pct, seed
+        )
+
+    def _humanize_sync(
+        self,
+        midi_bytes: bytes,
+        timing_ms: float,
+        velocity_pct: float,
+        seed: int | None,
+    ) -> bytes:
+        import random
+        import mido
+
+        if timing_ms < 0 or timing_ms > 500:
+            raise MidiComposeError(
+                f"timing_ms must be in [0, 500], got {timing_ms}"
+            )
+        if velocity_pct < 0 or velocity_pct > 50:
+            raise MidiComposeError(
+                f"velocity_pct must be in [0, 50], got {velocity_pct}"
+            )
+
+        rng = random.Random(seed)
+        mid = mido.MidiFile(file=io.BytesIO(midi_bytes))
+
+        for track in mid.tracks:
+            abs_time = 0
+            events: list[tuple[int, mido.Message]] = []
+            for msg in track:
+                abs_time += msg.time
+                events.append((abs_time, msg))
+
+            for i, (t, msg) in enumerate(events):
+                if msg.type not in ("note_on", "note_off"):
+                    continue
+                ticks_per_ms = mid.ticks_per_beat / (60000.0 / 120.0) if mid.ticks_per_beat else 1
+                jitter_ticks = int(rng.uniform(-timing_ms, timing_ms) * ticks_per_ms)
+                new_t = max(0, t + jitter_ticks)
+                if velocity_pct > 0 and msg.type == "note_on" and msg.velocity > 0:
+                    delta = int(rng.uniform(-velocity_pct, velocity_pct) / 100.0 * 127)
+                    new_vel = max(1, min(127, msg.velocity + delta))
+                    msg = msg.copy(velocity=new_vel)
+                events[i] = (new_t, msg)
+
+            events.sort(key=lambda x: x[0])
+            track.clear()
+            prev = 0
+            for t, msg in events:
+                track.append(msg.copy(time=max(0, t - prev)))
+                prev = t
+
+        buf = io.BytesIO()
+        mid.save(file=buf)
+        return buf.getvalue()

@@ -47,9 +47,12 @@ harness_preflight() {
             return 2
         }
     done
-    if ! docker image inspect "$HARNESS_IMAGE" >/dev/null 2>&1; then
-        echo "FATAL: image $HARNESS_IMAGE not on host — build it first (make build)" >&2
-        return 2
+    if [ "${HARNESS_SKIP_BUILD:-0}" != "1" ]; then
+        echo "[harness] building $HARNESS_IMAGE from current source..."
+        make -C "$_HARNESS_REPO_ROOT" build 2>&1 | tail -3 || {
+            echo "FATAL: image build failed" >&2
+            return 2
+        }
     fi
     mkdir -p "$HARNESS_CACHE_DIR"
     _harness_generate_fixtures || return $?
@@ -69,10 +72,7 @@ harness_preflight() {
 _harness_generate_fixtures() {
     local fx="${_HARNESS_REPO_ROOT}/tests/integration/.fixtures"
     mkdir -p "$fx"
-    if ! docker image inspect "$HARNESS_IMAGE" >/dev/null 2>&1; then
-        echo "FATAL: cannot generate fixtures — image $HARNESS_IMAGE missing" >&2
-        return 2
-    fi
+    # Image is guaranteed present at this point — harness_preflight builds it.
     echo "[harness] regenerating synthetic fixtures in ${fx}"
     docker run --rm \
         -u "$(id -u):$(id -g)" \

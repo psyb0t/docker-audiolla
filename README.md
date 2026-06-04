@@ -141,6 +141,10 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Convolution reverb](#convolution-reverb)
   - [Transient shaper](#transient-shaper)
   - [DJ prep](#dj-prep)
+  - [De-ess](#de-ess)
+  - [Stereo field analysis](#stereo-field-analysis)
+  - [Audio thumbnail](#audio-thumbnail)
+  - [MIDI humanize](#midi-humanize)
   - [Batch operations](#batch-operations)
   - [Async jobs and webhooks](#async-jobs-and-webhooks)
   - [Stage files](#stage-files)
@@ -1531,6 +1535,115 @@ curl -X POST http://localhost:8000/v1/audio/dj-prep \
 
 Camelot wheel positions let you quickly find harmonically compatible tracks for mixing.
 
+### De-ess
+
+Split-band high-frequency de-esser — attenuates sibilance above `frequency_hz` without affecting the rest of the signal. Implemented with a Butterworth HPF, envelope follower, and per-channel gain reduction. No engine required.
+
+```bash
+# Default settings (threshold -20 dB, 6 kHz, 4:1 ratio)
+curl -X POST http://localhost:8000/v1/audio/deess \
+  -F "file=@vocal.wav" \
+  -o deessed.wav
+
+# Gentle pass on a mix
+curl -X POST http://localhost:8000/v1/audio/deess \
+  -F "file=@mix.wav" \
+  -F "threshold_db=-15" \
+  -F "frequency_hz=7000" \
+  -F "ratio=2.5" \
+  -o mix_deessed.wav
+
+# Stage output
+curl -X POST http://localhost:8000/v1/audio/deess \
+  -F "file=@vocal.wav" \
+  -F "output_path=sessions/vocal_deessed.wav"
+# → {"path":"sessions/vocal_deessed.wav","threshold_db":-20.0,"frequency_hz":6000.0,"ratio":4.0,...}
+```
+
+Optional params: `threshold_db` (≤ 0, default -20), `frequency_hz` (2000–15000, default 6000), `ratio` (1.0–20.0, default 4.0), `output_format` (wav/mp3/flac…), `output_path`.
+
+### Stereo field analysis
+
+Measure stereo width, phase correlation, mid/side balance, and mono compatibility. No engine required — pure numpy.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/stereo-field \
+  -F "file=@stereo_mix.wav" | jq .
+# → {
+#     "correlation": 0.72,       # Pearson L/R correlation [-1,1]
+#     "width": 0.41,             # side_rms / mid_rms
+#     "balance_db": -0.3,        # L vs R level difference
+#     "mono_compatible": true,   # correlation >= 0.5
+#     "mid_level_db": -12.1,
+#     "side_level_db": -18.4,
+#     "phase_issues": false,
+#     "channels": 2,
+#     "sample_rate": 44100,
+#     "duration": 210.5
+#   }
+
+# Analyze a staged file
+curl -X POST http://localhost:8000/v1/audio/stereo-field \
+  -F "file_path=masters/track.wav" | jq '{correlation, width, mono_compatible}'
+```
+
+Mono files return `correlation=1.0`, `width=0.0`, `mono_compatible=true`. Use `correlation < 0` as a red flag for phase-cancelled material that will collapse on mono playback.
+
+### Audio thumbnail
+
+Extract the most energetic segment of an audio file — the passage with the highest onset density in a given window. Useful for generating preview clips, podcast teasers, or DJ cue points. Requires `librosa-analyze`.
+
+```bash
+# Default 30-second thumbnail
+curl -X POST http://localhost:8000/v1/audio/thumbnail \
+  -F "file=@long_track.wav" \
+  -o preview.wav
+
+# 10-second teaser
+curl -X POST http://localhost:8000/v1/audio/thumbnail \
+  -F "file=@podcast.wav" \
+  -F "duration_sec=10" \
+  -F "output_format=mp3" \
+  -o teaser.mp3
+
+# Stage + get timestamps
+curl -X POST http://localhost:8000/v1/audio/thumbnail \
+  -F "file=@album_track.wav" \
+  -F "duration_sec=20" \
+  -F "output_path=previews/track_thumb.wav"
+# → {"path":"previews/track_thumb.wav","start_sec":47.3,"end_sec":67.3,"duration_sec":20.0,...}
+```
+
+Optional params: `duration_sec` (1–300, default 30), `output_format`, `output_path`. When `output_path` is set the response JSON includes `start_sec` and `end_sec` so you know exactly where in the source the thumbnail was extracted.
+
+### MIDI humanize
+
+Add subtle timing and velocity variations to a MIDI file to make it sound less mechanical. Jitter is uniformly distributed and, when a `seed` is provided, fully deterministic. Requires `midi-compose`.
+
+```bash
+# Gentle humanize with defaults (±10 ms timing, ±10% velocity)
+curl -X POST http://localhost:8000/v1/midi/humanize \
+  -F "file=@rigid.mid" \
+  -o human.mid
+
+# Heavier feel with a fixed seed for reproducible results
+curl -X POST http://localhost:8000/v1/midi/humanize \
+  -F "file=@drums.mid" \
+  -F "timing_ms=20" \
+  -F "velocity_pct=15" \
+  -F "seed=42" \
+  -o drums_human.mid
+
+# Stage output
+curl -X POST http://localhost:8000/v1/midi/humanize \
+  -F "file=@pattern.mid" \
+  -F "timing_ms=8" \
+  -F "output_path=midi/pattern_human.mid"
+# → {"path":"midi/pattern_human.mid","timing_ms":8.0,"velocity_pct":10.0,...}
+```
+
+Optional params: `timing_ms` (0–500, default 10), `velocity_pct` (0–50, default 10), `seed` (any int, optional), `output_path`. Non-MIDI input returns 400. Requires `midi-compose`.
+
 ### Batch operations
 
 Run multiple operations on staged files in one HTTP call. Operations run sequentially; each gets an independent result entry even if earlier ops fail.
@@ -1781,6 +1894,9 @@ bytes.
 | `POST` | `/v1/audio/dj-prep` | JSON — bpm, key, camelot, integrated_lufs; requires `librosa-analyze` + `chord-detect` |
 | `POST` | `/v1/audio/loop-point` | JSON — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}`; requires `librosa-analyze` |
 | `POST` | `/v1/audio/chords-to-midi` | MIDI bytes — chord progression from audio; requires `chord-detect` |
+| `POST` | `/v1/audio/deess` | audio bytes — split-band sibilance attenuation; `threshold_db`, `frequency_hz`, `ratio` |
+| `POST` | `/v1/audio/stereo-field` | JSON — `{correlation, width, balance_db, mono_compatible, mid_level_db, side_level_db, phase_issues, …}` |
+| `POST` | `/v1/audio/thumbnail` | audio bytes — most energetic `duration_sec` segment; `start_sec`/`end_sec` in JSON when `output_path` set; requires `librosa-analyze` |
 
 ### Batch
 
@@ -1809,6 +1925,7 @@ Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` o
 | `POST` | `/v1/midi/render` | audio bytes — input MIDI via `file` / `file_path` / `file_url` |
 | `POST` | `/v1/midi/generate` | audio bytes — body is `application/json` song spec (compose + render in one) |
 | `POST` | `/v1/midi/drum` | MIDI bytes — body is `application/json` step-sequencer spec; requires `midi-compose` |
+| `POST` | `/v1/midi/humanize` | MIDI bytes — timing + velocity jitter; `timing_ms`, `velocity_pct`, `seed`; requires `midi-compose` |
 
 ### File staging
 
@@ -1910,6 +2027,10 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `transient_shaper` | Attack/sustain shaping — `attack_gain_db`, `sustain_gain_db` |
 | `dj_prep` | BPM + key + Camelot wheel + LUFS in one call |
 | `find_loop_point` | Find best seamless loop boundary — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}` |
+| `deess` | Split-band sibilance attenuation — `threshold_db`, `frequency_hz`, `ratio` |
+| `stereo_field` | Stereo field analysis — correlation, width, balance_db, mono_compatible, mid/side levels |
+| `audio_thumbnail` | Extract most energetic segment — `duration_sec`; returns base64 audio + `start_sec`/`end_sec` |
+| `midi_humanize` | Add timing + velocity jitter to MIDI — `timing_ms`, `velocity_pct`, optional `seed` for deterministic output |
 | `list_jobs` | List async jobs; optional `status` filter |
 | `get_job` | Poll one async job by `job_id` |
 | `cancel_job` | Cancel a running job or remove a completed one |

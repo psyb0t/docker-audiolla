@@ -1320,6 +1320,155 @@ def chords_to_midi_bytes(
     return buf.getvalue()
 
 
+def deess(
+    raw: bytes,
+    filename: str,
+    *,
+    threshold_db: float = -20.0,
+    frequency_hz: float = 6000.0,
+    ratio: float = 4.0,
+    output_format: str = "wav",
+) -> bytes:
+    """Split-band de-esser: detect sibilance above frequency_hz and compress it.
+
+    threshold_db: sibilance level above which compression kicks in (dBFS).
+    frequency_hz: highpass cutoff that isolates the sibilance band (Hz).
+    ratio: compression ratio applied to the sibilance band.
+    """
+    import numpy as np
+    import soundfile as sf
+    from scipy.signal import butter, sosfilt, lfilter  # noqa: PLC0415
+
+    if not (1.0 <= ratio <= 50.0):
+        raise AudioConversionError(f"ratio must be in [1.0, 50.0], got {ratio}")
+    if not (1000.0 <= frequency_hz <= 16000.0):
+        raise AudioConversionError(
+            f"frequency_hz must be in [1000, 16000], got {frequency_hz}"
+        )
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    out_wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-deess-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg(["ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+
+        nyq = sr / 2.0
+        freq_norm = min(frequency_hz / nyq, 0.99)
+        sos = butter(4, freq_norm, btype="high", output="sos")
+
+        threshold_lin = 10.0 ** (threshold_db / 20.0)
+        t_smooth = 0.010
+        a = float(np.exp(-1.0 / (sr * t_smooth)))
+
+        result = data.copy()
+        for ch in range(data.shape[1]):
+            col = data[:, ch].astype(np.float64)
+            high = sosfilt(sos, col)
+            env = lfilter([1.0 - a], [1.0, -a], np.abs(high))
+            gain = np.ones_like(env)
+            mask = env > threshold_lin
+            if np.any(mask):
+                compressed = threshold_lin + (env[mask] - threshold_lin) / ratio
+                gain[mask] = compressed / env[mask]
+            result[:, ch] = (col - high + high * gain).astype(np.float32)
+
+        out_wav_fd, out_wav_path = tempfile.mkstemp(
+            prefix="audiolla-deess-out-", suffix=".wav"
+        )
+        os.close(out_wav_fd)
+        sf.write(out_wav_path, result, sr, subtype="FLOAT")
+        out_bytes, _ = encode_audio(out_wav_path, output_format)
+        return out_bytes
+    finally:
+        for p in (in_path, wav_path, out_wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+def stereo_field(raw: bytes, filename: str) -> dict:
+    """Analyse the stereo field: correlation, width, balance, mono compatibility.
+
+    Returns a dict with correlation (-1..1), width (0=mono, 1=normal stereo),
+    balance_db (positive = L louder), mid/side levels, and diagnostic flags.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(
+            prefix="audiolla-stereofield-", suffix=".wav"
+        )
+        os.close(wav_fd)
+        _run_ffmpeg(["ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+        duration = round(float(len(data) / sr), 4)
+
+        if data.shape[1] == 1:
+            rms_db = round(float(20.0 * np.log10(
+                float(np.sqrt(np.mean(data[:, 0].astype(np.float64) ** 2))) + 1e-9
+            )), 2)
+            return {
+                "correlation": 1.0,
+                "width": 0.0,
+                "balance_db": 0.0,
+                "mono_compatible": True,
+                "mid_level_db": rms_db,
+                "side_level_db": -96.0,
+                "phase_issues": False,
+                "channels": 1,
+                "sample_rate": sr,
+                "duration": duration,
+            }
+
+        L = data[:, 0].astype(np.float64)
+        R = data[:, 1].astype(np.float64)
+
+        lc = L - float(np.mean(L))
+        rc = R - float(np.mean(R))
+        norm = float(np.linalg.norm(lc)) * float(np.linalg.norm(rc))
+        correlation = round(float(np.dot(lc, rc) / norm) if norm > 0.0 else 1.0, 4)
+
+        mid = (L + R) * 0.5
+        side = (L - R) * 0.5
+
+        mid_rms = float(np.sqrt(np.mean(mid ** 2))) + 1e-9
+        side_rms = float(np.sqrt(np.mean(side ** 2))) + 1e-9
+        l_rms = float(np.sqrt(np.mean(L ** 2))) + 1e-9
+        r_rms = float(np.sqrt(np.mean(R ** 2))) + 1e-9
+
+        width = round(side_rms / mid_rms, 4)
+        balance_db = round(float(20.0 * np.log10(l_rms / r_rms)), 2)
+        mid_db = round(float(20.0 * np.log10(mid_rms)), 2)
+        side_db = round(float(20.0 * np.log10(side_rms)), 2)
+
+        return {
+            "correlation": correlation,
+            "width": width,
+            "balance_db": balance_db,
+            "mono_compatible": correlation >= 0.5,
+            "mid_level_db": mid_db,
+            "side_level_db": side_db,
+            "phase_issues": correlation < 0.0,
+            "channels": int(data.shape[1]),
+            "sample_rate": int(sr),
+            "duration": duration,
+        }
+    finally:
+        for p in (in_path, wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
 def multi_stream_zip(
     streams: dict[str, bytes], output_format: str
 ) -> bytes:

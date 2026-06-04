@@ -23,8 +23,9 @@ command -v jq     >/dev/null 2>&1 || { echo "FATAL: jq not on PATH"     >&2; exi
 
 if [ "${AUDIOLLA_SKIP_BUILD:-0}" != "1" ]; then
     echo "[run] building CPU image..."
-    make build >/dev/null
+    make build 2>&1 | tail -3
 fi
+export HARNESS_SKIP_BUILD=1
 
 _DIR="$(dirname "${BASH_SOURCE[0]}")"
 

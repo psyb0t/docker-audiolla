@@ -2391,5 +2391,133 @@ def build_mcp_server(
             "key": chord_result.get("key", ""),
         }
 
-    _log.info("mcp server initialised: 77 tools")
+    # ── deess — sibilance suppressor ─────────────────────────────────────────
+
+    @mcp.tool()
+    async def deess(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        threshold_db: float = -20.0,
+        frequency_hz: float = 6000.0,
+        ratio: float = 4.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Split-band de-esser: detect sibilance above frequency_hz and compress it.
+        Returns audio base64 or uploads to output_url."""
+        from .audio import deess as _deess  # noqa: PLC0415
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            result = await asyncio.to_thread(
+                _deess, raw, filename,
+                threshold_db=threshold_db, frequency_hz=frequency_hz,
+                ratio=ratio, output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            import httpx  # noqa: PLC0415
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.put(output_url, content=result, headers={"Content-Type": content_type_for(output_format)})
+            return {"output_url": output_url, "size": len(result)}
+        return {
+            f"audio_{output_format}_base64": base64.b64encode(result).decode("ascii"),
+            "size": len(result),
+            "threshold_db": threshold_db,
+            "frequency_hz": frequency_hz,
+            "ratio": ratio,
+        }
+
+    # ── stereo_field — stereo field analysis ─────────────────────────────────
+
+    @mcp.tool()
+    async def stereo_field(
+        file_path: str | None = None,
+        file_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Analyse the stereo field: L/R correlation, width, balance, mono compatibility.
+        Returns correlation (-1..1), width (0=mono, 1=normal), balance_db, phase_issues flag."""
+        from .audio import stereo_field as _sf  # noqa: PLC0415
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            result = await asyncio.to_thread(_sf, raw, filename)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return result
+
+    # ── audio_thumbnail — extract most interesting segment ────────────────────
+
+    @mcp.tool()
+    async def audio_thumbnail(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        duration_sec: float = 30.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract the most energetically interesting segment of duration_sec.
+        Uses onset strength to locate the peak-activity region.
+        Returns audio base64 with start_sec/end_sec metadata."""
+        from .engines import is_thumbnail_engine  # noqa: PLC0415
+        eng = next((e for e in engines.values() if is_thumbnail_engine(e)), None)
+        if eng is None:
+            raise ValueError("thumbnail engine not configured")
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            audio_bytes, meta = await eng.thumbnail(
+                raw, filename, duration_sec=duration_sec, output_format=output_format
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            import httpx  # noqa: PLC0415
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.put(output_url, content=audio_bytes, headers={"Content-Type": content_type_for(output_format)})
+            return {"output_url": output_url, "size": len(audio_bytes), **meta}
+        return {
+            f"audio_{output_format}_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "size": len(audio_bytes),
+            **meta,
+        }
+
+    # ── midi_humanize — add timing jitter + velocity variation ────────────────
+
+    @mcp.tool()
+    async def midi_humanize(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        timing_ms: float = 10.0,
+        velocity_pct: float = 10.0,
+        seed: int | None = None,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Add random timing jitter and velocity variation to MIDI notes.
+        timing_ms: max ±offset per note in ms. velocity_pct: max ±velocity change as % of 127.
+        seed: optional RNG seed for reproducibility. Returns MIDI base64."""
+        from .engines import is_humanize_engine  # noqa: PLC0415
+        eng = next((e for e in engines.values() if is_humanize_engine(e)), None)
+        if eng is None:
+            raise ValueError("humanize engine not configured")
+        raw, _filename = await _load_input(file_path, file_url)
+        if not raw.startswith(b"MThd"):
+            raise ValueError("input is not a MIDI file")
+        try:
+            result = await eng.humanize(
+                raw, timing_ms=timing_ms, velocity_pct=velocity_pct, seed=seed
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            import httpx  # noqa: PLC0415
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.put(output_url, content=result, headers={"Content-Type": "audio/midi"})
+            return {"output_url": output_url, "size": len(result)}
+        return {
+            "midi_base64": base64.b64encode(result).decode("ascii"),
+            "size": len(result),
+            "timing_ms": timing_ms,
+            "velocity_pct": velocity_pct,
+        }
+
+    _log.info("mcp server initialised: 81 tools")
     return mcp

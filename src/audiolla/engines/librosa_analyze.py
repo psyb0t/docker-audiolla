@@ -840,6 +840,90 @@ class LibrosaAnalyzeEngine(EngineBase):
             except OSError:
                 pass
 
+    async def thumbnail(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        duration_sec: float = 30.0,
+        output_format: str = "wav",
+    ) -> tuple[bytes, dict]:
+        return await asyncio.to_thread(
+            self._thumbnail_sync, raw, filename, duration_sec, output_format
+        )
+
+    def _thumbnail_sync(
+        self,
+        raw: bytes,
+        filename: str,
+        duration_sec: float,
+        output_format: str,
+    ) -> tuple[bytes, dict]:
+        import librosa
+        import numpy as np
+        import soundfile as sf
+
+        wav_path = to_wav_float32(raw, filename)
+        try:
+            y, sr = librosa.load(wav_path, sr=None, mono=True)
+            total_dur = float(len(y) / sr)
+
+            if duration_sec >= total_dur:
+                out, _ = encode_audio(wav_path, output_format)
+                return out, {
+                    "start_sec": 0.0,
+                    "end_sec": round(total_dur, 4),
+                    "duration_sec": round(total_dur, 4),
+                }
+
+            hop = 512
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+            win_frames = int(librosa.time_to_frames(duration_sec, sr=sr, hop_length=hop))
+            win_frames = max(1, min(win_frames, len(onset_env) - 1))
+
+            window_sum = np.convolve(onset_env, np.ones(win_frames), mode="valid")
+            best_frame = int(np.argmax(window_sum))
+            start_sec = round(
+                float(librosa.frames_to_time(best_frame, sr=sr, hop_length=hop)), 4
+            )
+            end_sec = round(min(start_sec + duration_sec, total_dur), 4)
+
+            y_all, sr_all = librosa.load(wav_path, sr=None, mono=False)
+            mono = y_all.ndim == 1
+            if mono:
+                y_all = y_all[np.newaxis, :]
+
+            start_sample = int(start_sec * sr_all)
+            end_sample = min(int(end_sec * sr_all), y_all.shape[1])
+            segment = y_all[:, start_sample:end_sample]
+
+            out_fd, out_path = tempfile.mkstemp(
+                prefix="audiolla-thumb-", suffix=".wav"
+            )
+            os.close(out_fd)
+            try:
+                if mono:
+                    sf.write(out_path, segment[0], sr_all, subtype="FLOAT")
+                else:
+                    sf.write(out_path, segment.T, sr_all, subtype="FLOAT")
+                out_bytes, _ = encode_audio(out_path, output_format)
+            finally:
+                try:
+                    os.unlink(out_path)
+                except OSError:
+                    pass
+
+            return out_bytes, {
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "duration_sec": round(end_sec - start_sec, 4),
+            }
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
 
 def _lufs_from_wav(wav_path: str) -> float:
     import pyloudnorm as pyln

@@ -56,6 +56,7 @@ from .audio import (
     content_type_for,
     conv_reverb,
     convert_audio,
+    deess,
     eq_audio,
     fade_audio,
     loop_audio,
@@ -70,6 +71,7 @@ from .audio import (
     sidechain_duck,
     speed_audio,
     split_audio_equal,
+    stereo_field,
     stereo_width_audio,
     transient_shape,
     trim_audio,
@@ -86,6 +88,8 @@ from .engines import (
     is_diarize_engine,
     is_drum_pattern_engine,
     is_ffmpeg_render_engine,
+    is_humanize_engine,
+    is_thumbnail_engine,
     is_fingerprint_engine,
     is_fx_engine,
     is_loop_point_engine,
@@ -4664,6 +4668,220 @@ async def chords_to_midi(
             "tempo_bpm": bpm,
             "size": len(midi_bytes),
         },
+    )
+
+
+
+# ── /v1/audio/deess — split-band de-esser ───────────────────────────────────
+
+
+@app.post("/v1/audio/deess")
+async def deess_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    threshold_db: float = Form(default=-20.0),
+    frequency_hz: float = Form(default=6000.0),
+    ratio: float = Form(default=4.0),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Split-band de-esser: compress sibilance above frequency_hz.
+    threshold_db: level at which compression begins (dBFS, default -20).
+    frequency_hz: highpass cutoff that isolates sibilance (default 6000 Hz).
+    ratio: compression ratio (default 4.0)."""
+    _validate_output_format(output_format)
+    if not (1.0 <= ratio <= 50.0):
+        raise HTTPException(
+            status_code=400, detail=f"ratio must be in [1.0, 50.0], got {ratio}"
+        )
+    if not (1000.0 <= frequency_hz <= 16000.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"frequency_hz must be in [1000, 16000], got {frequency_hz}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+
+        async def _deess_coro():
+            try:
+                result = await asyncio.to_thread(
+                    deess, _raw, _fn,
+                    threshold_db=threshold_db, frequency_hz=frequency_hz,
+                    ratio=ratio, output_format=output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                result, media_type=content_type_for(output_format),
+                filename=f"deessed.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"threshold_db": threshold_db, "frequency_hz": frequency_hz, "ratio": ratio},
+            )
+
+        return await _submit_job(
+            _deess_coro(), endpoint="/v1/audio/deess",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        result = await asyncio.to_thread(
+            deess, raw, filename,
+            threshold_db=threshold_db, frequency_hz=frequency_hz,
+            ratio=ratio, output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        result,
+        media_type=content_type_for(output_format),
+        filename=f"deessed.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"threshold_db": threshold_db, "frequency_hz": frequency_hz, "ratio": ratio},
+    )
+
+
+# ── /v1/audio/stereo-field — stereo field analysis ──────────────────────────
+
+
+@app.post("/v1/audio/stereo-field")
+async def stereo_field_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+) -> JSONResponse:
+    """Analyse the stereo field: L/R correlation, width, balance, mono compatibility."""
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await asyncio.to_thread(stereo_field, raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/thumbnail — extract most-interesting segment ──────────────────
+
+
+@app.post("/v1/audio/thumbnail")
+async def thumbnail_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    duration_sec: float = Form(default=30.0),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Extract the most energetically interesting segment of duration_sec.
+    Uses onset strength to locate the peak-activity region. Requires librosa-analyze."""
+    _validate_output_format(output_format)
+    if not (1.0 <= duration_sec <= 300.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"duration_sec must be in [1, 300], got {duration_sec}",
+        )
+    eng = next((e for e in ENGINES.values() if is_thumbnail_engine(e)), None)
+    if eng is None:
+        raise HTTPException(status_code=404, detail="thumbnail engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _thumb_coro():
+            try:
+                audio_bytes, meta = await _eng.thumbnail(
+                    _raw, _fn, duration_sec=duration_sec, output_format=output_format
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                audio_bytes, media_type=content_type_for(output_format),
+                filename=f"thumbnail.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json=meta,
+            )
+
+        return await _submit_job(
+            _thumb_coro(), endpoint="/v1/audio/thumbnail",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        audio_bytes, meta = await eng.thumbnail(
+            raw, filename, duration_sec=duration_sec, output_format=output_format
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"thumbnail.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json=meta,
+    )
+
+
+# ── /v1/midi/humanize — add timing jitter + velocity variation ───────────────
+
+
+@app.post("/v1/midi/humanize")
+async def midi_humanize(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    timing_ms: float = Form(default=10.0),
+    velocity_pct: float = Form(default=10.0),
+    seed: int | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+) -> Response:
+    """Add random timing jitter and velocity variation to MIDI notes.
+    timing_ms: max ±timing offset per note in milliseconds (default 10).
+    velocity_pct: max ±velocity change as % of 127 (default 10).
+    seed: optional RNG seed for reproducibility."""
+    if not (0.0 <= timing_ms <= 500.0):
+        raise HTTPException(
+            status_code=400, detail=f"timing_ms must be in [0, 500], got {timing_ms}"
+        )
+    if not (0.0 <= velocity_pct <= 50.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"velocity_pct must be in [0, 50], got {velocity_pct}",
+        )
+    eng = next((e for e in ENGINES.values() if is_humanize_engine(e)), None)
+    if eng is None:
+        raise HTTPException(status_code=404, detail="humanize engine not configured")
+
+    raw, _filename = await resolve_input(file=file, file_path=file_path, file_url=None)
+    if not raw.startswith(b"MThd"):
+        raise HTTPException(status_code=400, detail="input is not a MIDI file")
+
+    try:
+        result = await eng.humanize(
+            raw, timing_ms=timing_ms, velocity_pct=velocity_pct, seed=seed
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        result,
+        media_type="audio/midi",
+        filename="humanized.mid",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"timing_ms": timing_ms, "velocity_pct": velocity_pct},
     )
 
 

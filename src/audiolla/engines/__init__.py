@@ -246,3 +246,11 @@ def is_loop_point_engine(engine: Any) -> bool:
 
 def is_drum_pattern_engine(engine: Any) -> bool:
     return hasattr(engine, "drum_pattern")
+
+
+def is_thumbnail_engine(engine: Any) -> bool:
+    return hasattr(engine, "thumbnail")
+
+
+def is_humanize_engine(engine: Any) -> bool:
+    return hasattr(engine, "humanize")
