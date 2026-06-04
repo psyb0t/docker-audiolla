@@ -476,7 +476,7 @@ async def separate(
     if async_job:
         job_id = JOB_QUEUE.new_id()
         _raw, _fn, _req, _fmt, _op = raw, filename, requested, output_format, output_path
-        _eff_op = _op or f"jobs/{job_id}.zip"
+        _eff_path = _op or (None if output_url else f"jobs/{job_id}.zip")
 
         async def _coro():
             await _evict_siblings(engine)
@@ -488,12 +488,12 @@ async def separate(
                 sn = _req[0]
                 return await write_output(
                     stem_results[sn], media_type=content_type_for(_fmt),
-                    filename=f"{sn}.{_fmt}", output_path=_eff_op, output_url=None,
+                    filename=f"{sn}.{_fmt}", output_path=_eff_path, output_url=output_url,
                     extra_json={"engine": engine, "stem": sn, "output_format": _fmt},
                 )
             return await write_output(
                 multi_stream_zip(stem_results, _fmt), media_type="application/zip",
-                filename=f"{engine}-stems.zip", output_path=_eff_op, output_url=None,
+                filename=f"{engine}-stems.zip", output_path=_eff_path, output_url=output_url,
                 extra_json={"engine": engine, "stems": list(stem_results.keys()), "output_format": _fmt},
             )
 
@@ -613,7 +613,7 @@ async def master(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _rr, _rfn = raw, filename, ref_raw, ref_filename
         _esl, _eng = engine_slug, eng
 
@@ -634,7 +634,7 @@ async def master(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return await write_output(
                 _b, media_type=content_type_for(output_format),
-                filename=f"mastered.{output_format}", output_path=_eff_op, output_url=None,
+                filename=f"mastered.{output_format}", output_path=_eff_path, output_url=output_url,
                 extra_json={"engine": _esl, "mode": mode, "output_format": output_format},
             )
 
@@ -782,7 +782,7 @@ async def transform(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _transform_coro():
@@ -792,7 +792,7 @@ async def transform(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return await write_output(
                 _b, media_type=content_type_for(output_format),
-                filename=f"transformed.{output_format}", output_path=_eff_op, output_url=None,
+                filename=f"transformed.{output_format}", output_path=_eff_path, output_url=output_url,
                 extra_json={"engine": engine_slug, "operations": ops, "output_format": output_format},
             )
 
@@ -861,7 +861,7 @@ async def normalize(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _norm_coro():
@@ -871,7 +871,7 @@ async def normalize(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return await write_output(
                 _b, media_type=content_type_for(output_format),
-                filename=f"normalized.{output_format}", output_path=_eff_op, output_url=None,
+                filename=f"normalized.{output_format}", output_path=_eff_path, output_url=output_url,
                 extra_json={"measured_lufs": _lufs, "target_lufs": target_lufs, "output_format": output_format},
             )
 
@@ -949,7 +949,7 @@ async def fx(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng, _esl = raw, filename, eng, engine_slug
 
         async def _fx_coro():
@@ -959,7 +959,7 @@ async def fx(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return await write_output(
                 _b, media_type=content_type_for(output_format),
-                filename=f"fx.{output_format}", output_path=_eff_op, output_url=None,
+                filename=f"fx.{output_format}", output_path=_eff_path, output_url=output_url,
                 extra_json={"engine": _esl, "effects": chain, "output_format": output_format},
             )
 
@@ -1279,7 +1279,7 @@ async def beats(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _beats_coro():
@@ -1288,11 +1288,11 @@ async def beats(
                 _result = await _eng.beats(_raw, _fn, click_track=click_track, output_format=output_format, start_bpm=start_bpm)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if click_track and _eff_op:
+            if click_track and (_eff_path or output_url):
                 _ab = _b64.b64decode(_result.pop("click_track_base64"))
                 return await write_output(
                     _ab, media_type=content_type_for(output_format),
-                    filename=f"clicks.{output_format}", output_path=_eff_op, output_url=None, extra_json=_result,
+                    filename=f"clicks.{output_format}", output_path=_eff_path, output_url=output_url, extra_json=_result,
                 )
             return _result
 
@@ -1380,7 +1380,7 @@ async def melody(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.mid"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.mid")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _melody_coro():
@@ -1389,10 +1389,10 @@ async def melody(
                 _result = await _eng.melody(_raw, _fn, fmin=fmin, fmax=fmax, as_midi=as_midi)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if as_midi and _eff_op:
+            if as_midi and (_eff_path or output_url):
                 _mb = _b64.b64decode(_result.pop("midi_base64"))
                 _result.pop("midi_size", None)
-                return await write_output(_mb, media_type="audio/midi", filename="melody.mid", output_path=_eff_op, output_url=None, extra_json=_result)
+                return await write_output(_mb, media_type="audio/midi", filename="melody.mid", output_path=_eff_path, output_url=output_url, extra_json=_result)
             return _result
 
         return await _submit_job(_melody_coro(), endpoint="/v1/audio/melody", webhook_url=webhook_url, job_id=job_id)
@@ -1482,7 +1482,7 @@ async def silence(
     )
     if async_job and trim_mode:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _silence_coro():
@@ -1491,9 +1491,9 @@ async def silence(
                 _result = await _eng.detect(_raw, _fn, threshold_db=threshold_db, min_duration_sec=min_duration_sec, trim_mode=trim_mode, output_format=output_format)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if trim_mode and _eff_op:
+            if trim_mode and (_eff_path or output_url):
                 _ab = _b64.b64decode(_result.pop("trimmed_audio_base64"))
-                return await write_output(_ab, media_type=content_type_for(output_format), filename=f"trimmed.{output_format}", output_path=_eff_op, output_url=None, extra_json=_result)
+                return await write_output(_ab, media_type=content_type_for(output_format), filename=f"trimmed.{output_format}", output_path=_eff_path, output_url=output_url, extra_json=_result)
             return _result
 
         return await _submit_job(_silence_coro(), endpoint="/v1/audio/silence", webhook_url=webhook_url, job_id=job_id)
@@ -1557,7 +1557,7 @@ async def visualize_spectrogram(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.png"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.png")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _spec_coro():
@@ -1565,7 +1565,7 @@ async def visualize_spectrogram(
                 _p = await _eng.spectrogram(_raw, _fn, width=width, height=height, color=color, scale=scale)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_op, output_url=None, extra_json={"mode": "spectrogram"})
+            return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_path, output_url=output_url, extra_json={"mode": "spectrogram"})
 
         return await _submit_job(_spec_coro(), endpoint="/v1/audio/visualize/image/spectrogram", webhook_url=webhook_url, job_id=job_id)
 
@@ -1606,7 +1606,7 @@ async def visualize_waveform(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.png"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.png")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _waveform_coro():
@@ -1614,7 +1614,7 @@ async def visualize_waveform(
                 _p = await _eng.waveform(_raw, _fn, width=width, height=height, color=color)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_op, output_url=None, extra_json={"mode": "waveform"})
+            return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_path, output_url=output_url, extra_json={"mode": "waveform"})
 
         return await _submit_job(_waveform_coro(), endpoint="/v1/audio/visualize/image/waveform", webhook_url=webhook_url, job_id=job_id)
 
@@ -1663,7 +1663,7 @@ async def visualize_video(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{container}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{container}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _viz_coro():
@@ -1672,7 +1672,7 @@ async def visualize_video(
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             _mt = "video/mp4" if container == "mp4" else "video/webm"
-            return await write_output(_v, media_type=_mt, filename=f"visualize.{container}", output_path=_eff_op, output_url=None, extra_json={"mode": mode, "container": container})
+            return await write_output(_v, media_type=_mt, filename=f"visualize.{container}", output_path=_eff_path, output_url=output_url, extra_json={"mode": mode, "container": container})
 
         return await _submit_job(_viz_coro(), endpoint=f"/v1/audio/visualize/video/{mode}", webhook_url=webhook_url, job_id=job_id)
 
@@ -1770,7 +1770,7 @@ async def restore(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng, _agg = raw, filename, eng, aggressive
 
         async def _restore_coro():
@@ -1778,7 +1778,7 @@ async def restore(
                 _b = await _eng.restore(_raw, _fn, output_format=output_format, aggressive=_agg)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_b, media_type=content_type_for(output_format), filename=f"restore.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "aggressive": _agg, "output_format": output_format})
+            return await write_output(_b, media_type=content_type_for(output_format), filename=f"restore.{output_format}", output_path=_eff_path, output_url=output_url, extra_json={"engine": engine, "aggressive": _agg, "output_format": output_format})
 
         return await _submit_job(_restore_coro(), endpoint=f"/v1/audio/restore/{engine}", webhook_url=webhook_url, job_id=job_id)
 
@@ -1934,7 +1934,7 @@ async def to_midi(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.mid"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.mid")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _tomidi_coro():
@@ -1948,7 +1948,7 @@ async def to_midi(
                 )
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_mb, media_type="audio/midi", filename="output.mid", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": "mid", "size": len(_mb)})
+            return await write_output(_mb, media_type="audio/midi", filename="output.mid", output_path=_eff_path, output_url=output_url, extra_json={"engine": engine, "output_format": "mid", "size": len(_mb)})
 
         return await _submit_job(_tomidi_coro(), endpoint=f"/v1/audio/to_midi/{engine}", webhook_url=webhook_url, job_id=job_id)
 
@@ -2020,7 +2020,7 @@ async def audio_enhance(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _enhance_coro():
@@ -2029,7 +2029,7 @@ async def audio_enhance(
                 _b = await _eng.enhance(_raw, _fn, output_format=output_format)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_b, media_type=content_type_for(output_format), filename=f"enhanced.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
+            return await write_output(_b, media_type=content_type_for(output_format), filename=f"enhanced.{output_format}", output_path=_eff_path, output_url=output_url, extra_json={"engine": engine, "output_format": output_format})
 
         return await _submit_job(_enhance_coro(), endpoint=f"/v1/audio/enhance/{engine}", webhook_url=webhook_url, job_id=job_id)
 
@@ -2198,7 +2198,7 @@ async def stretch(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
         _tf, _ps = tempo_factor, pitch_semitones
 
@@ -2213,7 +2213,7 @@ async def stretch(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"stretched.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"tempo_factor": _tf, "pitch_semitones": _ps},
             )
 
@@ -2316,7 +2316,7 @@ async def hpss(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.zip"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.zip")
         _raw, _fn, _eng = raw, filename, eng
         _mg, _ks = margin, kernel_size
 
@@ -2329,7 +2329,7 @@ async def hpss(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return await write_output(
                 multi_stream_zip(_stems, output_format), media_type="application/zip",
-                filename="hpss-stems.zip", output_path=_eff_op, output_url=None,
+                filename="hpss-stems.zip", output_path=_eff_path, output_url=output_url,
                 extra_json={"stems": list(_stems.keys()), "output_format": output_format},
             )
 
@@ -2411,7 +2411,7 @@ async def noise_reduce(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
 
         async def _nr_coro():
             try:
@@ -2421,7 +2421,7 @@ async def noise_reduce(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"denoised.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json=_extra(),
             )
 
@@ -2488,7 +2488,7 @@ async def trim(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _ss, _es = start_sec, end_sec
 
@@ -2500,7 +2500,7 @@ async def trim(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"trimmed.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"start_sec": _ss, "end_sec": _es, "output_format": output_format},
             )
 
@@ -2569,7 +2569,7 @@ async def mix(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _inputs = mix_inputs
 
         async def _mix_coro():
@@ -2580,7 +2580,7 @@ async def mix(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"mixed.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"track_count": len(_inputs), "output_format": output_format},
             )
 
@@ -2642,7 +2642,7 @@ async def concat(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _inputs = concat_inputs
 
         async def _concat_coro():
@@ -2653,7 +2653,7 @@ async def concat(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"concat.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"file_count": len(_inputs), "output_format": output_format},
             )
 
@@ -2703,7 +2703,7 @@ async def speed(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _sp = raw, filename, speed
 
         async def _speed_coro():
@@ -2714,7 +2714,7 @@ async def speed(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"speed.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"speed": _sp, "output_format": output_format},
             )
 
@@ -2769,7 +2769,7 @@ async def convert(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _sr, _ch = sample_rate, channels
 
@@ -2781,7 +2781,7 @@ async def convert(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"converted.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"output_format": output_format, "sample_rate": _sr, "channels": _ch},
             )
 
@@ -2948,7 +2948,7 @@ async def fade(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _fi, _fo, _cv = fade_in, fade_out, curve
 
@@ -2963,7 +2963,7 @@ async def fade(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"faded.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"fade_in": _fi, "fade_out": _fo, "curve": _cv},
             )
 
@@ -3009,7 +3009,7 @@ async def reverse(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
 
         async def _reverse_coro():
@@ -3020,7 +3020,7 @@ async def reverse(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"reversed.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
             )
 
         return await _submit_job(
@@ -3069,7 +3069,7 @@ async def loop(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _ct = raw, filename, count
 
         async def _loop_coro():
@@ -3080,7 +3080,7 @@ async def loop(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"looped.{output_format}",
-                output_path=_eff_op, output_url=None, extra_json={"count": _ct},
+                output_path=_eff_path, output_url=output_url, extra_json={"count": _ct},
             )
 
         return await _submit_job(
@@ -3144,7 +3144,7 @@ async def bpm_match(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _le, _se = librosa_eng, stretch_eng
         _tb, _ps = target_bpm, pitch_semitones
@@ -3168,7 +3168,7 @@ async def bpm_match(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"bpm_matched.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={
                     "source_bpm": round(_src_bpm, 2), "target_bpm": _tb,
                     "tempo_factor": round(_tf, 4), "pitch_semitones": _ps,
@@ -3240,7 +3240,7 @@ async def stereo_width(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _w = raw, filename, width
 
         async def _sw_coro():
@@ -3251,7 +3251,7 @@ async def stereo_width(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"stereo_width.{output_format}",
-                output_path=_eff_op, output_url=None, extra_json={"width": _w},
+                output_path=_eff_path, output_url=output_url, extra_json={"width": _w},
             )
 
         return await _submit_job(
@@ -3378,14 +3378,14 @@ async def split(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.zip"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.zip")
         _zb, _mode = zip_bytes, mode
         _seg_count = len(segments)
 
         async def _split_coro():
             return await write_output(
                 _zb, media_type="application/zip", filename="split.zip",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"segments": _seg_count, "mode": _mode},
             )
 
@@ -3430,7 +3430,7 @@ async def pan(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _pos = raw, filename, position
 
         async def _pan_coro():
@@ -3441,7 +3441,7 @@ async def pan(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"panned.{output_format}",
-                output_path=_eff_op, output_url=None, extra_json={"position": _pos},
+                output_path=_eff_path, output_url=output_url, extra_json={"position": _pos},
             )
 
         return await _submit_job(
@@ -3496,7 +3496,7 @@ async def eq(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _bl = raw, filename, band_list
 
         async def _eq_coro():
@@ -3507,7 +3507,7 @@ async def eq(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"eq.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"band_count": len(_bl)},
             )
 
@@ -3568,7 +3568,7 @@ async def key_match(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _cde, _se = chord_detect_eng, stretch_eng
         _ts, _tk = target_semitone, target_key
@@ -3589,7 +3589,7 @@ async def key_match(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"key_matched.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"source_key": _skey, "target_key": _tk.strip(), "semitones": _diff},
             )
 
@@ -3664,7 +3664,7 @@ async def sidechain_duck_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _traw, _tfn = trigger_raw, trigger_filename
         _tdb, _r, _a, _rel = threshold_db, ratio, attack_ms, release_ms
@@ -3680,7 +3680,7 @@ async def sidechain_duck_endpoint(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"ducked.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"threshold_db": _tdb, "ratio": _r},
             )
 
@@ -3790,7 +3790,7 @@ async def mid_side(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _mode = raw, filename, mode
 
         async def _ms_coro():
@@ -3804,7 +3804,7 @@ async def mid_side(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"mid_side_{_mode}.{output_format}",
-                output_path=_eff_op, output_url=None, extra_json={"mode": _mode},
+                output_path=_eff_path, output_url=output_url, extra_json={"mode": _mode},
             )
 
         return await _submit_job(
@@ -3853,7 +3853,7 @@ async def beat_slice_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.zip"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.zip")
         _raw, _fn, _le = raw, filename, librosa_eng
 
         async def _bs_coro():
@@ -3867,7 +3867,7 @@ async def beat_slice_endpoint(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return await write_output(
                 _b, media_type="application/zip", filename="beat_slices.zip",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"beat_count": len(beat_times), "output_format": output_format},
             )
 
@@ -3930,7 +3930,7 @@ async def conv_reverb_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _ir_raw, _ir_fn = ir_raw, ir_filename
         _wm = wet_mix
@@ -3946,7 +3946,7 @@ async def conv_reverb_endpoint(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"conv_reverb.{output_format}",
-                output_path=_eff_op, output_url=None, extra_json={"wet_mix": _wm},
+                output_path=_eff_path, output_url=output_url, extra_json={"wet_mix": _wm},
             )
 
         return await _submit_job(
@@ -3995,7 +3995,7 @@ async def transient_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
         _ag, _sg = attack_gain_db, sustain_gain_db
 
@@ -4011,7 +4011,7 @@ async def transient_endpoint(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"transient.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"attack_gain_db": _ag, "sustain_gain_db": _sg},
             )
 
@@ -4082,7 +4082,7 @@ async def remix(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
         _sms = stem_mix_spec
 
@@ -4108,7 +4108,7 @@ async def remix(
             return await write_output(
                 bounced, media_type=content_type_for(output_format),
                 filename=f"remix.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"engine": engine, "stems": list(stems.keys())},
             )
 
@@ -4266,7 +4266,7 @@ async def pitch_correct_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _pc_coro():
@@ -4277,7 +4277,7 @@ async def pitch_correct_endpoint(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"pitch_correct.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"strength": strength},
             )
 
@@ -4325,7 +4325,7 @@ async def repair_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
 
         async def _rep_coro():
@@ -4340,7 +4340,7 @@ async def repair_endpoint(
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"repaired.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"declip": declip, "dehum": dehum, "hum_freq": hum_freq},
             )
 
@@ -4563,7 +4563,7 @@ async def deess_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn = raw, filename
 
         async def _deess_coro():
@@ -4578,7 +4578,7 @@ async def deess_endpoint(
             return await write_output(
                 result, media_type=content_type_for(output_format),
                 filename=f"deessed.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json={"threshold_db": threshold_db, "frequency_hz": frequency_hz, "ratio": ratio},
             )
 
@@ -4653,7 +4653,7 @@ async def thumbnail_endpoint(
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
         _raw, _fn, _eng = raw, filename, eng
 
         async def _thumb_coro():
@@ -4666,7 +4666,7 @@ async def thumbnail_endpoint(
             return await write_output(
                 audio_bytes, media_type=content_type_for(output_format),
                 filename=f"thumbnail.{output_format}",
-                output_path=_eff_op, output_url=None,
+                output_path=_eff_path, output_url=output_url,
                 extra_json=meta,
             )
 

@@ -1680,7 +1680,7 @@ curl -X POST http://localhost:8000/v1/batch \
 Every audio endpoint accepts `async_job=true` — the request returns immediately with a job ID and the work happens in the background. Poll for status or register a webhook.
 
 ```bash
-# Submit async — returns 202-style JSON immediately
+# Submit async with staging path — result written to /v1/files/stems/...
 curl -X POST http://localhost:8000/v1/audio/separate \
   -F "file=@track.wav" \
   -F "engine=htdemucs" \
@@ -1688,6 +1688,13 @@ curl -X POST http://localhost:8000/v1/audio/separate \
   -F "webhook_url=https://my-server.com/hooks/audio" \
   -F "output_path=stems/track-vocals.wav"
 # → {"job_id":"abc123","status":"pending"}
+
+# Submit async with presigned S3 PUT URL — result uploaded on completion
+curl -X POST http://localhost:8000/v1/audio/master \
+  -F "file=@track.wav" \
+  -F "async_job=true" \
+  -F "output_url=https://bucket.s3.amazonaws.com/result.wav?X-Amz-..."
+# → {"job_id":"def456","status":"pending"}
 
 # Poll
 curl http://localhost:8000/v1/jobs/abc123 | jq '{status, duration_sec, result}'
