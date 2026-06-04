@@ -647,126 +647,58 @@ def build_mcp_server(
     # ── visualisations (ffmpeg) ─────────────────────────────────────────────
 
     @mcp.tool()
-    async def spectrogram(
-        file_path: str | None = None,
-        file_url: str | None = None,
-        width: int = 1920,
-        height: int = 1080,
-        color: str = "intensity",
-        scale: str = "log",
-        output_url: str | None = None,
-    ) -> dict[str, Any]:
-        """Render a static PNG spectrogram. Returns base64 PNG by default,
-        or PUTs to ``output_url`` if set."""
-        raw, name = await _load_input(file_path, file_url)
-        eng = engines.get("ffmpeg-render")
-        if eng is None or not hasattr(eng, "spectrogram"):
-            raise ValueError("ffmpeg-render engine not configured")
-        try:
-            png = await eng.spectrogram(
-                raw,
-                name,
-                width=width,
-                height=height,
-                color=color,
-                scale=scale,
-            )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        if output_url:
-            try:
-                await fetch.upload_bytes(output_url, png, "image/png")
-            except fetch.FetchError as exc:
-                raise ValueError(str(exc)) from exc
-            return {"url": output_url, "size": len(png), "kind": "spectrogram"}
-        return {
-            "image_base64": base64.b64encode(png).decode("ascii"),
-            "size": len(png),
-            "kind": "spectrogram",
-        }
-
-    @mcp.tool()
-    async def waveform(
-        file_path: str | None = None,
-        file_url: str | None = None,
-        width: int = 1920,
-        height: int = 320,
-        color: str = "lime",
-        output_url: str | None = None,
-    ) -> dict[str, Any]:
-        """Render a static PNG waveform. Returns base64 PNG by default."""
-        raw, name = await _load_input(file_path, file_url)
-        eng = engines.get("ffmpeg-render")
-        if eng is None or not hasattr(eng, "waveform"):
-            raise ValueError("ffmpeg-render engine not configured")
-        try:
-            png = await eng.waveform(
-                raw,
-                name,
-                width=width,
-                height=height,
-                color=color,
-            )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        if output_url:
-            try:
-                await fetch.upload_bytes(output_url, png, "image/png")
-            except fetch.FetchError as exc:
-                raise ValueError(str(exc)) from exc
-            return {"url": output_url, "size": len(png), "kind": "waveform"}
-        return {
-            "image_base64": base64.b64encode(png).decode("ascii"),
-            "size": len(png),
-            "kind": "waveform",
-        }
-
-    @mcp.tool()
     async def visualize(
         file_path: str | None = None,
         file_url: str | None = None,
         mode: str = "spectrum",
         width: int = 1280,
         height: int = 720,
+        color: str = "intensity",
+        scale: str = "log",
         fps: int = 30,
         container: str = "mp4",
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Render an animated audio-reactive video. ``mode`` selects the
-        ffmpeg filter: spectrum / waves / cqt / freqs / volume /
-        vectorscope / phasemeter / histogram. Returns base64 video by
-        default, or PUTs to ``output_url`` if set."""
+        """Render audio visualization. ``mode`` controls the output type:
+
+        - ``spectrogram`` — static PNG via ffmpeg showspectrumpic (color + scale apply)
+        - ``waveform`` — static PNG via ffmpeg showwavespic (color applies)
+        - ``spectrum`` / ``waves`` / ``cqt`` / ``freqs`` / ``volume`` /
+          ``vectorscope`` / ``phasemeter`` / ``histogram`` — animated MP4/WebM video
+
+        PNG modes return ``{image_base64, size, mode}``; video modes return
+        ``{video_base64, size, mode, container}``. Pass ``output_url`` to PUT instead.
+        """
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("ffmpeg-render")
-        if eng is None or not hasattr(eng, "visualize"):
+        if eng is None:
             raise ValueError("ffmpeg-render engine not configured")
         try:
-            video = await eng.visualize(
-                raw,
-                name,
-                mode=mode,
-                width=width,
-                height=height,
-                fps=fps,
-                container=container,
-            )
+            if mode == "spectrogram":
+                out = await eng.spectrogram(raw, name, width=width, height=height, color=color, scale=scale)
+                if output_url:
+                    await fetch.upload_bytes(output_url, out, "image/png")
+                    return {"url": output_url, "size": len(out), "mode": mode}
+                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "mode": mode}
+            if mode == "waveform":
+                out = await eng.waveform(raw, name, width=width, height=height, color=color)
+                if output_url:
+                    await fetch.upload_bytes(output_url, out, "image/png")
+                    return {"url": output_url, "size": len(out), "mode": mode}
+                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "mode": mode}
+            out = await eng.visualize(raw, name, mode=mode, width=width, height=height, fps=fps, container=container)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         media_type = "video/mp4" if container == "mp4" else "video/webm"
         if output_url:
             try:
-                await fetch.upload_bytes(output_url, video, media_type)
+                await fetch.upload_bytes(output_url, out, media_type)
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
-            return {
-                "url": output_url,
-                "size": len(video),
-                "mode": mode,
-                "container": container,
-            }
+            return {"url": output_url, "size": len(out), "mode": mode, "container": container}
         return {
-            "video_base64": base64.b64encode(video).decode("ascii"),
-            "size": len(video),
+            "video_base64": base64.b64encode(out).decode("ascii"),
+            "size": len(out),
             "mode": mode,
             "container": container,
         }
@@ -800,19 +732,24 @@ def build_mcp_server(
     # ── UVR audio restoration tools ────────────────────────────────────────
 
     @mcp.tool()
-    async def dereverb(
+    async def restore(
         file_path: str | None = None,
         file_url: str | None = None,
         engine: str = "uvr-dereverb",
+        aggressive: bool = False,
         output_format: str = "wav",
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Remove room reverb from audio using UVR BS-Roformer model.
+        """Remove reverb, echo, or noise from audio using UVR models.
 
-        Input: file_path (staged file) or file_url (remote URL).
+        engine=uvr-dereverb (default): BS-Roformer reverb removal.
+        engine=uvr-deecho: VR Architecture echo removal.
+          Set aggressive=True for harder echo removal.
+        engine=uvr-denoise: MelBand Roformer noise removal (SDR 28).
+          For DSP-based noise reduction use noise_reduce with engine=noise-reduce.
+
         Returns {audio_base64, size, engine, output_format} or
         {url, size, engine, output_format} if output_url is set.
-        engine options: uvr-dereverb (default).
         """
         from .engines import is_uvr_restore_engine  # noqa: PLC0415
 
@@ -823,75 +760,20 @@ def build_mcp_server(
         if not is_uvr_restore_engine(eng):
             raise ValueError(f"engine {engine!r} does not support restore operations")
         try:
-            audio_bytes = await eng.restore(raw, name, output_format=output_format)
+            audio_bytes = await eng.restore(raw, name, output_format=output_format, aggressive=aggressive)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         if output_url:
             try:
-                await fetch.upload_bytes(
-                    output_url,
-                    audio_bytes,
-                    content_type_for(output_format),
-                )
+                await fetch.upload_bytes(output_url, audio_bytes, content_type_for(output_format))
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
-            return {
-                "url": output_url,
-                "size": len(audio_bytes),
-                "engine": engine,
-                "output_format": output_format,
-            }
+            return {"url": output_url, "size": len(audio_bytes), "engine": engine, "aggressive": aggressive, "output_format": output_format}
         return {
             "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
             "size": len(audio_bytes),
             "engine": engine,
-            "output_format": output_format,
-        }
-
-    @mcp.tool()
-    async def deecho(
-        file_path: str | None = None,
-        file_url: str | None = None,
-        engine: str = "uvr-deecho",
-        output_format: str = "wav",
-        output_url: str | None = None,
-    ) -> dict[str, Any]:
-        """Remove echo from audio using UVR VR Architecture model.
-
-        engine options: uvr-deecho (default, normal),
-        uvr-deecho-aggressive.
-        """
-        from .engines import is_uvr_restore_engine  # noqa: PLC0415
-
-        raw, name = await _load_input(file_path, file_url)
-        eng = engines.get(engine)
-        if eng is None:
-            raise ValueError(f"unknown engine {engine!r}")
-        if not is_uvr_restore_engine(eng):
-            raise ValueError(f"engine {engine!r} does not support restore operations")
-        try:
-            audio_bytes = await eng.restore(raw, name, output_format=output_format)
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        if output_url:
-            try:
-                await fetch.upload_bytes(
-                    output_url,
-                    audio_bytes,
-                    content_type_for(output_format),
-                )
-            except fetch.FetchError as exc:
-                raise ValueError(str(exc)) from exc
-            return {
-                "url": output_url,
-                "size": len(audio_bytes),
-                "engine": engine,
-                "output_format": output_format,
-            }
-        return {
-            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
-            "size": len(audio_bytes),
-            "engine": engine,
+            "aggressive": aggressive,
             "output_format": output_format,
         }
 
@@ -903,9 +785,11 @@ def build_mcp_server(
         output_format: str = "wav",
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Remove broadband background noise using UVR MelBand Roformer (SDR 28).
+        """Remove broadband background noise (ML path via UVR MelBand Roformer).
 
-        engine options: uvr-denoise (default).
+        Thin shim — prefer ``restore`` with engine=uvr-denoise, or
+        ``noise_reduce`` with engine=uvr-denoise for the same result.
+        engine default: uvr-denoise.
         """
         from .engines import is_uvr_restore_engine  # noqa: PLC0415
 
@@ -919,27 +803,7 @@ def build_mcp_server(
             audio_bytes = await eng.restore(raw, name, output_format=output_format)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        if output_url:
-            try:
-                await fetch.upload_bytes(
-                    output_url,
-                    audio_bytes,
-                    content_type_for(output_format),
-                )
-            except fetch.FetchError as exc:
-                raise ValueError(str(exc)) from exc
-            return {
-                "url": output_url,
-                "size": len(audio_bytes),
-                "engine": engine,
-                "output_format": output_format,
-            }
-        return {
-            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
-            "size": len(audio_bytes),
-            "engine": engine,
-            "output_format": output_format,
-        }
+        return await _emit_audio(audio_bytes, output_format, output_url)
 
     # ── MIDI inspect + transform (mido) ────────────────────────────────────
 
@@ -1908,34 +1772,38 @@ def build_mcp_server(
     async def noise_reduce(
         file_path: str | None = None,
         file_url: str | None = None,
+        engine: str = "noise-reduce",
         stationary: bool = False,
         prop_decrease: float = 1.0,
         output_format: str = "wav",
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Spectral noise reduction via noisereduce (no GPU required).
+        """Noise reduction — DSP or ML depending on engine.
 
-        Provide exactly one of `file_path` or `file_url`.
-        ``stationary=True`` targets constant noise (hum/hiss);
-        ``False`` uses adaptive non-stationary mode (default).
-        ``prop_decrease`` in [0,1] scales how aggressively noise is
-        removed (1.0 = full). Returns base64 audio unless ``output_url``
-        is set (presigned PUT).
+        engine=noise-reduce (default): DSP via noisereduce, no GPU.
+          stationary=True targets constant noise (hum/hiss); False = adaptive.
+          prop_decrease [0,1] scales reduction strength.
+        engine=uvr-denoise: ML via UVR MelBand Roformer (SDR 28), higher quality.
+          stationary and prop_decrease are ignored for ML engine.
         """
-        from .engines import is_noise_reduce_engine  # noqa: PLC0415
+        from .engines import is_noise_reduce_engine, is_uvr_restore_engine  # noqa: PLC0415
 
         raw, name = await _load_input(file_path, file_url)
-        eng = engines.get("noise-reduce")
-        if eng is None or not is_noise_reduce_engine(eng):
-            raise ValueError("noise-reduce engine not configured")
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(f"unknown engine {engine!r}")
         try:
-            audio_bytes = await eng.reduce(
-                raw,
-                name,
-                stationary=stationary,
-                prop_decrease=prop_decrease,
-                output_format=output_format,
-            )
+            if is_noise_reduce_engine(eng):
+                audio_bytes = await eng.reduce(
+                    raw, name,
+                    stationary=stationary,
+                    prop_decrease=prop_decrease,
+                    output_format=output_format,
+                )
+            elif is_uvr_restore_engine(eng):
+                audio_bytes = await eng.restore(raw, name, output_format=output_format)
+            else:
+                raise ValueError(f"engine {engine!r} does not support noise reduction")
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         return await _emit_audio(audio_bytes, output_format, output_url)

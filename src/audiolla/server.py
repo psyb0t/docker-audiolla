@@ -11,9 +11,10 @@ Endpoints:
   POST   /v1/audio/analyze           librosa MIR analysis
   POST   /v1/audio/transform         pysox DSP transform chain
   POST   /v1/audio/loudness          pyloudnorm LUFS measurement + normalization
-  POST   /v1/audio/dereverb          remove room reverb (UVR BS-Roformer)
-  POST   /v1/audio/deecho            remove echo (UVR VR Architecture)
-  POST   /v1/audio/denoise           remove background noise (UVR MelBand Roformer)
+  POST   /v1/audio/restore/{engine}  remove reverb/echo/noise (UVR); aggressive=true for deecho hard mode
+  POST   /v1/audio/noise-reduce/{engine} noise reduction — engine=noise-reduce (DSP) or uvr-denoise (ML)
+  POST   /v1/audio/visualize/{mode}  PNG spectrogram|waveform or animated video (spectrum/waves/cqt/…)
+  POST   /v1/audio/separate/hpss     harmonic+percussive separation via librosa HPSS
   GET    /v1/files                   list staged files
   PUT    /v1/files/{path}            stage a file
   GET    /v1/files/{path}            retrieve a staged file
@@ -1522,147 +1523,29 @@ async def silence(
     return result
 
 
-# ── /v1/audio/spectrogram — static PNG via ffmpeg showspectrumpic ──────────
+# ── /v1/audio/visualize/{mode} — PNG (spectrogram|waveform) or animated video ─
 
 
-@app.post("/v1/audio/spectrogram")
-async def spectrogram(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    width: int = Form(default=1920),
-    height: int = Form(default=1080),
-    color: str = Form(default="intensity"),
-    scale: str = Form(default="log"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
-    eng = ENGINES.get("ffmpeg-render")
-    if eng is None or not is_ffmpeg_render_engine(eng):
-        raise HTTPException(
-            status_code=404,
-            detail="ffmpeg-render engine not configured",
-        )
-    raw, filename = await resolve_input(
-        file=file,
-        file_path=file_path,
-        file_url=file_url,
-    )
+# ── /v1/audio/visualize/{mode} — PNG (spectrogram|waveform) or animated video ─
+# mode=spectrogram   → ffmpeg showspectrumpic  → PNG (color + scale params)
+# mode=waveform      → ffmpeg showwavespic     → PNG (color param)
+# mode=spectrum|waves|cqt|freqs|volume|vectorscope|phasemeter|histogram → MP4/WebM
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.png"
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _spec_coro():
-            try:
-                _p = await _eng.spectrogram(_raw, _fn, width=width, height=height, color=color, scale=scale)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "kind": "spectrogram"})
-
-        return await _submit_job(_spec_coro(), endpoint="/v1/audio/spectrogram", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        png = await eng.spectrogram(
-            raw,
-            filename,
-            width=width,
-            height=height,
-            color=color,
-            scale=scale,
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return await write_output(
-        png,
-        media_type="image/png",
-        filename="spectrogram.png",
-        output_path=output_path,
-        output_url=output_url,
-        extra_json={"engine": "ffmpeg-render", "kind": "spectrogram"},
-    )
+_IMAGE_VISUALIZE_MODES = {"spectrogram", "waveform"}
 
 
-# ── /v1/audio/waveform — static PNG via ffmpeg showwavespic ────────────────
-
-
-@app.post("/v1/audio/waveform")
-async def waveform(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    width: int = Form(default=1920),
-    height: int = Form(default=320),
-    color: str = Form(default="lime"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
-    eng = ENGINES.get("ffmpeg-render")
-    if eng is None or not is_ffmpeg_render_engine(eng):
-        raise HTTPException(
-            status_code=404,
-            detail="ffmpeg-render engine not configured",
-        )
-    raw, filename = await resolve_input(
-        file=file,
-        file_path=file_path,
-        file_url=file_url,
-    )
-
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.png"
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _waveform_coro():
-            try:
-                _p = await _eng.waveform(_raw, _fn, width=width, height=height, color=color)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "kind": "waveform"})
-
-        return await _submit_job(_waveform_coro(), endpoint="/v1/audio/waveform", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        png = await eng.waveform(
-            raw,
-            filename,
-            width=width,
-            height=height,
-            color=color,
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return await write_output(
-        png,
-        media_type="image/png",
-        filename="waveform.png",
-        output_path=output_path,
-        output_url=output_url,
-        extra_json={"engine": "ffmpeg-render", "kind": "waveform"},
-    )
-
-
-# ── /v1/audio/visualize — animated MP4/WebM video ──────────────────────────
-
-
-@app.post("/v1/audio/visualize")
+@app.post("/v1/audio/visualize/{mode}")
 async def visualize(
+    mode: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
-    mode: str = Form(default="spectrum"),
     width: int = Form(default=1280),
     height: int = Form(default=720),
+    color: str = Form(default="intensity"),
+    scale: str = Form(default="log"),
     fps: int = Form(default=30),
     container: str = Form(default="mp4"),
     async_job: bool = Form(default=False),
@@ -1674,10 +1557,11 @@ async def visualize(
             status_code=404,
             detail="ffmpeg-render engine not configured",
         )
-    if mode not in visualize_modes():
+    _all_modes = sorted(_IMAGE_VISUALIZE_MODES | set(visualize_modes()))
+    if mode not in _all_modes:
         raise HTTPException(
             status_code=400,
-            detail=f"unknown visualize mode {mode!r}; supported: {visualize_modes()}",
+            detail=f"unknown visualize mode {mode!r}; supported: {_all_modes}",
         )
     raw, filename = await resolve_input(
         file=file,
@@ -1685,6 +1569,63 @@ async def visualize(
         file_url=file_url,
     )
 
+    if mode == "spectrogram":
+        if async_job:
+            job_id = JOB_QUEUE.new_id()
+            _eff_op = output_path or f"jobs/{job_id}.png"
+            _raw, _fn, _eng = raw, filename, eng
+
+            async def _spec_coro():
+                try:
+                    _p = await _eng.spectrogram(_raw, _fn, width=width, height=height, color=color, scale=scale)
+                except AudioConversionError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "mode": "spectrogram"})
+
+            return await _submit_job(_spec_coro(), endpoint="/v1/audio/visualize/spectrogram", webhook_url=webhook_url, job_id=job_id)
+
+        try:
+            png = await eng.spectrogram(raw, filename, width=width, height=height, color=color, scale=scale)
+        except AudioConversionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await write_output(
+            png,
+            media_type="image/png",
+            filename="spectrogram.png",
+            output_path=output_path,
+            output_url=output_url,
+            extra_json={"engine": "ffmpeg-render", "mode": "spectrogram"},
+        )
+
+    if mode == "waveform":
+        if async_job:
+            job_id = JOB_QUEUE.new_id()
+            _eff_op = output_path or f"jobs/{job_id}.png"
+            _raw, _fn, _eng = raw, filename, eng
+
+            async def _waveform_coro():
+                try:
+                    _p = await _eng.waveform(_raw, _fn, width=width, height=height, color=color)
+                except AudioConversionError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "mode": "waveform"})
+
+            return await _submit_job(_waveform_coro(), endpoint="/v1/audio/visualize/waveform", webhook_url=webhook_url, job_id=job_id)
+
+        try:
+            png = await eng.waveform(raw, filename, width=width, height=height, color=color)
+        except AudioConversionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await write_output(
+            png,
+            media_type="image/png",
+            filename="waveform.png",
+            output_path=output_path,
+            output_url=output_url,
+            extra_json={"engine": "ffmpeg-render", "mode": "waveform"},
+        )
+
+    # animated video mode
     if async_job:
         job_id = JOB_QUEUE.new_id()
         _eff_op = output_path or f"jobs/{job_id}.{container}"
@@ -1698,18 +1639,10 @@ async def visualize(
             _mt = "video/mp4" if container == "mp4" else "video/webm"
             return await write_output(_v, media_type=_mt, filename=f"visualize.{container}", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "mode": mode, "container": container})
 
-        return await _submit_job(_viz_coro(), endpoint="/v1/audio/visualize", webhook_url=webhook_url, job_id=job_id)
+        return await _submit_job(_viz_coro(), endpoint=f"/v1/audio/visualize/{mode}", webhook_url=webhook_url, job_id=job_id)
 
     try:
-        video = await eng.visualize(
-            raw,
-            filename,
-            mode=mode,
-            width=width,
-            height=height,
-            fps=fps,
-            container=container,
-        )
+        video = await eng.visualize(raw, filename, mode=mode, width=width, height=height, fps=fps, container=container)
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1764,11 +1697,14 @@ async def fingerprint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-# ── /v1/audio/dereverb — UVR de-reverb ─────────────────────────────────────
+# ── /v1/audio/restore/{engine} — UVR audio restoration ──────────────────────
+# engine=uvr-dereverb  → BS-Roformer reverb removal
+# engine=uvr-deecho    → VR Architecture echo removal (aggressive=true for hard mode)
+# engine=uvr-denoise   → MelBand Roformer noise removal
 
 
-@app.post("/v1/audio/dereverb/{engine}")
-async def dereverb(
+@app.post("/v1/audio/restore/{engine}")
+async def restore(
     engine: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
@@ -1776,6 +1712,7 @@ async def dereverb(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    aggressive: bool = Form(default=False),
     async_job: bool = Form(default=False),
     webhook_url: str | None = Form(default=None),
 ) -> Response:
@@ -1800,150 +1737,28 @@ async def dereverb(
     if async_job:
         job_id = JOB_QUEUE.new_id()
         _eff_op = output_path or f"jobs/{job_id}.{output_format}"
-        _raw, _fn, _eng = raw, filename, eng
+        _raw, _fn, _eng, _agg = raw, filename, eng, aggressive
 
-        async def _dereverb_coro():
+        async def _restore_coro():
             try:
-                _b = await _eng.restore(_raw, _fn, output_format=output_format)
+                _b = await _eng.restore(_raw, _fn, output_format=output_format, aggressive=_agg)
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_b, media_type=content_type_for(output_format), filename=f"dereverb.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
+            return await write_output(_b, media_type=content_type_for(output_format), filename=f"restore.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "aggressive": _agg, "output_format": output_format})
 
-        return await _submit_job(_dereverb_coro(), endpoint=f"/v1/audio/dereverb/{engine}", webhook_url=webhook_url, job_id=job_id)
+        return await _submit_job(_restore_coro(), endpoint=f"/v1/audio/restore/{engine}", webhook_url=webhook_url, job_id=job_id)
 
     try:
-        audio_bytes = await eng.restore(raw, filename, output_format=output_format)
+        audio_bytes = await eng.restore(raw, filename, output_format=output_format, aggressive=aggressive)
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await write_output(
         audio_bytes,
         media_type=content_type_for(output_format),
-        filename=f"dereverb.{output_format}",
+        filename=f"restore.{output_format}",
         output_path=output_path,
         output_url=output_url,
-        extra_json={"engine": engine, "output_format": output_format},
-    )
-
-
-# ── /v1/audio/deecho — UVR de-echo ──────────────────────────────────────────
-
-
-@app.post("/v1/audio/deecho/{engine}")
-async def deecho(
-    engine: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
-    _validate_output_format(output_format)
-    eng = ENGINES.get(engine)
-    if eng is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
-        )
-    if not is_uvr_restore_engine(eng):
-        raise HTTPException(
-            status_code=400,
-            detail=f"engine {engine!r} does not support restore operations",
-        )
-    raw, filename = await resolve_input(
-        file=file,
-        file_path=file_path,
-        file_url=file_url,
-    )
-
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _deecho_coro():
-            try:
-                _b = await _eng.restore(_raw, _fn, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_b, media_type=content_type_for(output_format), filename=f"deecho.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
-
-        return await _submit_job(_deecho_coro(), endpoint=f"/v1/audio/deecho/{engine}", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        audio_bytes = await eng.restore(raw, filename, output_format=output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
-        media_type=content_type_for(output_format),
-        filename=f"deecho.{output_format}",
-        output_path=output_path,
-        output_url=output_url,
-        extra_json={"engine": engine, "output_format": output_format},
-    )
-
-
-# ── /v1/audio/denoise — UVR AI de-noise ─────────────────────────────────────
-
-
-@app.post("/v1/audio/denoise/{engine}")
-async def denoise(
-    engine: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
-    _validate_output_format(output_format)
-    eng = ENGINES.get(engine)
-    if eng is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
-        )
-    if not is_uvr_restore_engine(eng):
-        raise HTTPException(
-            status_code=400,
-            detail=f"engine {engine!r} does not support restore operations",
-        )
-    raw, filename = await resolve_input(
-        file=file,
-        file_path=file_path,
-        file_url=file_url,
-    )
-
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _denoise_coro():
-            try:
-                _b = await _eng.restore(_raw, _fn, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_b, media_type=content_type_for(output_format), filename=f"denoise.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
-
-        return await _submit_job(_denoise_coro(), endpoint=f"/v1/audio/denoise/{engine}", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        audio_bytes = await eng.restore(raw, filename, output_format=output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
-        media_type=content_type_for(output_format),
-        filename=f"denoise.{output_format}",
-        output_path=output_path,
-        output_url=output_url,
-        extra_json={"engine": engine, "output_format": output_format},
+        extra_json={"engine": engine, "aggressive": aggressive, "output_format": output_format},
     )
 
 
@@ -2440,10 +2255,10 @@ async def embed(
     return JSONResponse(result)
 
 
-# ── /v1/audio/hpss — harmonic/percussive source separation ───────────────────
+# ── /v1/audio/separate/hpss — harmonic/percussive source separation ─────────
 
 
-@app.post("/v1/audio/hpss")
+@app.post("/v1/audio/separate/hpss")
 async def hpss(
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
@@ -2485,7 +2300,7 @@ async def hpss(
             )
 
         return await _submit_job(
-            _hpss_coro(), endpoint="/v1/audio/hpss",
+            _hpss_coro(), endpoint="/v1/audio/separate/hpss",
             webhook_url=webhook_url, job_id=job_id,
         )
 
@@ -2505,11 +2320,14 @@ async def hpss(
     )
 
 
-# ── /v1/audio/noise-reduce — spectral noise reduction ────────────────────────
+# ── /v1/audio/noise-reduce/{engine} — noise reduction (DSP or ML) ────────────
+# engine=noise-reduce  → noisereduce DSP (stationary/prop_decrease params)
+# engine=uvr-denoise   → UVR MelBand Roformer ML (no extra params)
 
 
-@app.post("/v1/audio/noise-reduce")
+@app.post("/v1/audio/noise-reduce/{engine}")
 async def noise_reduce(
+    engine: str,
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),
     file_url: str | None = Form(default=None),
@@ -2521,57 +2339,65 @@ async def noise_reduce(
     async_job: bool = Form(default=False),
     webhook_url: str | None = Form(default=None),
 ) -> Response:
-    """Spectral noise reduction via noisereduce. stationary=True assumes a
-    constant noise profile (hum, tape hiss); default non-stationary adapts
-    the noise estimate over time. prop_decrease controls reduction strength
-    (1.0 = full, 0.0 = none)."""
     _validate_output_format(output_format)
-    if not (0.0 <= prop_decrease <= 1.0):
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    is_dsp = is_noise_reduce_engine(eng)
+    is_ml = is_uvr_restore_engine(eng)
+    if not is_dsp and not is_ml:
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support noise reduction",
+        )
+    if is_dsp and not (0.0 <= prop_decrease <= 1.0):
         raise HTTPException(
             status_code=400,
             detail=f"prop_decrease must be in [0.0, 1.0], got {prop_decrease}",
         )
-    eng = ENGINES.get("noise-reduce")
-    if eng is None or not is_noise_reduce_engine(eng):
-        raise HTTPException(status_code=404, detail="noise-reduce engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    async def _run() -> bytes:
+        if is_dsp:
+            return await eng.reduce(
+                raw, filename,
+                stationary=stationary,
+                prop_decrease=prop_decrease,
+                output_format=output_format,
+            )
+        return await eng.restore(raw, filename, output_format=output_format)
+
+    def _extra() -> dict:
+        if is_dsp:
+            return {"engine": engine, "stationary": stationary, "prop_decrease": prop_decrease, "output_format": output_format}
+        return {"engine": engine, "output_format": output_format}
 
     if async_job:
         job_id = JOB_QUEUE.new_id()
         _eff_op = output_path or f"jobs/{job_id}.{output_format}"
-        _raw, _fn, _eng = raw, filename, eng
-        _st, _pd = stationary, prop_decrease
 
         async def _nr_coro():
             try:
-                _b = await _eng.reduce(
-                    _raw, _fn, stationary=_st, prop_decrease=_pd,
-                    output_format=output_format,
-                )
+                _b = await _run()
             except AudioConversionError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return await write_output(
                 _b, media_type=content_type_for(output_format),
                 filename=f"denoised.{output_format}",
                 output_path=_eff_op, output_url=None,
-                extra_json={
-                    "stationary": _st, "prop_decrease": _pd,
-                    "output_format": output_format,
-                },
+                extra_json=_extra(),
             )
 
         return await _submit_job(
-            _nr_coro(), endpoint="/v1/audio/noise-reduce",
+            _nr_coro(), endpoint=f"/v1/audio/noise-reduce/{engine}",
             webhook_url=webhook_url, job_id=job_id,
         )
 
     try:
-        audio_bytes = await eng.reduce(
-            raw, filename,
-            stationary=stationary,
-            prop_decrease=prop_decrease,
-            output_format=output_format,
-        )
+        audio_bytes = await _run()
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await write_output(
@@ -2580,11 +2406,7 @@ async def noise_reduce(
         filename=f"denoised.{output_format}",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "stationary": stationary,
-            "prop_decrease": prop_decrease,
-            "output_format": output_format,
-        },
+        extra_json=_extra(),
     )
 
 
@@ -4355,10 +4177,10 @@ async def dj_prep(
     })
 
 
-# ── /v1/audio/loudness-curve — RMS envelope over time ───────────────────────
+# ── /v1/audio/loudness/curve — RMS envelope over time ────────────────────────
 
 
-@app.post("/v1/audio/loudness-curve")
+@app.post("/v1/audio/loudness/curve")
 async def loudness_curve_endpoint(
     file: UploadFile | None = File(default=None),
     file_path: str | None = Form(default=None),

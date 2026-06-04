@@ -57,14 +57,9 @@
     "uvr-deecho": {
       "executor": "uvr_separator",
       "model": "UVR-De-Echo-Normal.pth",
+      "model_aggressive": "UVR-De-Echo-Aggressive.pth",
       "primary_stem": "No Echo",
-      "description": "De-echo via VR Architecture — removes echo"
-    },
-    "uvr-deecho-aggressive": {
-      "executor": "uvr_separator",
-      "model": "UVR-De-Echo-Aggressive.pth",
-      "primary_stem": "No Echo",
-      "description": "Aggressive de-echo via VR Architecture"
+      "description": "De-echo via VR Architecture — normal and aggressive modes (aggressive=true param)"
     },
     "uvr-denoise": {
       "executor": "uvr_separator",

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Spectral noise reduction — /v1/audio/noise-reduce end-to-end.
+# Spectral noise reduction — /v1/audio/noise-reduce/{engine} end-to-end.
 #
 #     bash tests/integration/e2e_noise_reduce.sh
 
@@ -23,7 +23,7 @@ test_noise_reduce_returns_wav() {
     code=$(curl -s -o "$tmpout" -w "%{http_code}" --max-time 120 \
         -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce")
+        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce/noise-reduce")
     assert_eq "$code" "200" "noise-reduce -> 200" || { rm -f "$tmpout"; return 1; }
     if ! head -c 4 "$tmpout" | grep -q "RIFF"; then
         echo "  FAIL: response is not WAV"
@@ -42,7 +42,7 @@ test_noise_reduce_stationary_mode() {
         -X POST \
         -F "file=@${FIXTURE}" \
         -F "stationary=true" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce")
+        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce/noise-reduce")
     assert_eq "$code" "200" "noise-reduce stationary -> 200" || { rm -f "$tmpout"; return 1; }
     if ! head -c 4 "$tmpout" | grep -q "RIFF"; then
         echo "  FAIL: response is not WAV (stationary mode)"
@@ -61,7 +61,7 @@ test_noise_reduce_partial_decrease() {
         -X POST \
         -F "file=@${FIXTURE}" \
         -F "prop_decrease=0.5" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce")
+        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce/noise-reduce")
     assert_eq "$code" "200" "noise-reduce prop_decrease=0.5 -> 200" || { rm -f "$tmpout"; return 1; }
     if ! head -c 4 "$tmpout" | grep -q "RIFF"; then
         echo "  FAIL: response is not WAV (prop_decrease=0.5)"
@@ -80,7 +80,7 @@ test_noise_reduce_invalid_prop_decrease_400() {
         -X POST \
         -F "file=@${FIXTURE}" \
         -F "prop_decrease=1.5" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce")
+        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce/noise-reduce")
     body=$(cat "$tmpf" 2>/dev/null); rm -f "$tmpf"
     assert_eq "$code" "400" "prop_decrease=1.5 -> 400" || return 1
     if ! echo "$body" | grep -qi "prop_decrease"; then
@@ -91,14 +91,14 @@ test_noise_reduce_invalid_prop_decrease_400() {
 
 # ── missing file → 400 ──────────────────────────────────────────────────────
 
-test_noise_reduce_missing_file_400() {
+test_noise_reduce_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=nonexistent/phantom.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: noise_reduce_missing_file_400"
+        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce/noise-reduce")
+    assert_eq "$code" "404" "missing file_path -> 404" || return 1
+    echo "OK: noise_reduce_missing_file_404"
 }
 
 # ── output_format=mp3 returns MP3 (check Content-Type header) ───────────────
@@ -109,7 +109,7 @@ test_noise_reduce_output_format_mp3() {
         -X POST \
         -F "file=@${FIXTURE}" \
         -F "output_format=mp3" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce")
+        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce/noise-reduce")
     if [[ "$ct" != *"audio/mpeg"* && "$ct" != *"audio/mp3"* ]]; then
         echo "  FAIL: expected audio/mpeg content-type, got: $ct"; return 1
     fi
@@ -123,7 +123,7 @@ test_noise_reduce_output_not_empty() {
     tmpout=$(mktemp)
     curl -s --max-time 120 -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce" > "$tmpout"
+        "${AUDIOLLA_BASE_URL}/v1/audio/noise-reduce/noise-reduce" > "$tmpout"
     size=$(stat -c%s "$tmpout")
     rm -f "$tmpout"
     if [ "$size" -lt 1000 ]; then
@@ -137,6 +137,6 @@ harness_run_tests \
     test_noise_reduce_stationary_mode \
     test_noise_reduce_partial_decrease \
     test_noise_reduce_invalid_prop_decrease_400 \
-    test_noise_reduce_missing_file_400 \
+    test_noise_reduce_missing_file_404 \
     test_noise_reduce_output_format_mp3 \
     test_noise_reduce_output_not_empty

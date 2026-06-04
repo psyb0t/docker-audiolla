@@ -1,13 +1,9 @@
 """HTTP-level tests for new audiolla server endpoints:
 
-  POST /v1/audio/dereverb
-  POST /v1/audio/deecho
-  POST /v1/audio/denoise
+  POST /v1/audio/restore/{engine}
   POST /v1/audio/to_midi
   POST /v1/audio/enhance
-  POST /v1/audio/spectrogram
-  POST /v1/audio/waveform
-  POST /v1/audio/visualize
+  POST /v1/audio/visualize/{mode}
   POST /v1/audio/fingerprint
   POST /v1/audio/silence
 
@@ -114,7 +110,7 @@ def _client_for(engines: dict, registry: dict | None = None, tmp_files_dir: Path
         return TestClient(_server_mod.app)
 
 
-# ── /v1/audio/spectrogram ─────────────────────────────────────────────────────
+# ── /v1/audio/visualize/{mode} — spectrogram ────────────────────────────────────
 
 
 def test_spectrogram_200_returns_png():
@@ -128,7 +124,7 @@ def test_spectrogram_200_returns_png():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/spectrogram",
+                "/v1/audio/visualize/spectrogram",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -147,7 +143,7 @@ def test_spectrogram_404_when_no_engine_configured():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/spectrogram",
+                "/v1/audio/visualize/spectrogram",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -172,7 +168,7 @@ def test_spectrogram_404_when_engine_lacks_spectrogram_method():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/spectrogram",
+                "/v1/audio/visualize/spectrogram",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -190,7 +186,7 @@ def test_spectrogram_output_path_returns_json():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/spectrogram",
+                "/v1/audio/visualize/spectrogram",
                 data={"output_path": "viz/spec.png"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
@@ -200,7 +196,7 @@ def test_spectrogram_output_path_returns_json():
     assert body["path"] == "viz/spec.png"
 
 
-# ── /v1/audio/waveform ────────────────────────────────────────────────────────
+# ── /v1/audio/visualize/{mode} — waveform ───────────────────────────────────────
 
 
 def test_waveform_200_returns_png():
@@ -214,7 +210,7 @@ def test_waveform_200_returns_png():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/waveform",
+                "/v1/audio/visualize/waveform",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -233,14 +229,14 @@ def test_waveform_404_when_no_engine_configured():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/waveform",
+                "/v1/audio/visualize/waveform",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
     assert r.status_code == 404
 
 
-# ── /v1/audio/visualize ───────────────────────────────────────────────────────
+# ── /v1/audio/visualize/{mode} ────────────────────────────────────────────────
 
 
 def test_visualize_200_returns_video():
@@ -254,8 +250,8 @@ def test_visualize_200_returns_video():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize",
-                data={"mode": "spectrum", "container": "mp4"},
+                "/v1/audio/visualize/spectrum",
+                data={"container": "mp4"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -275,8 +271,7 @@ def test_visualize_400_for_unknown_mode():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize",
-                data={"mode": "notamode"},
+                "/v1/audio/visualize/notamode",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -295,8 +290,8 @@ def test_visualize_webm_container():
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/visualize",
-                data={"mode": "waves", "container": "webm"},
+                "/v1/audio/visualize/waves",
+                data={"container": "webm"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -469,7 +464,7 @@ def test_silence_output_path_when_trim_mode_set():
     assert body["path"] == "silence/trimmed.wav"
 
 
-# ── /v1/audio/dereverb ────────────────────────────────────────────────────────
+# ── /v1/audio/restore/{engine} — dereverb ───────────────────────────────────────
 
 
 def test_dereverb_200_returns_audio():
@@ -483,7 +478,7 @@ def test_dereverb_200_returns_audio():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb/uvr-dereverb",
+                "/v1/audio/restore/uvr-dereverb",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -502,7 +497,7 @@ def test_dereverb_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb/nonexistent",
+                "/v1/audio/restore/nonexistent",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -525,7 +520,7 @@ def test_dereverb_400_for_wrong_engine_type():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb/uvr-dereverb",
+                "/v1/audio/restore/uvr-dereverb",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -544,7 +539,7 @@ def test_dereverb_415_for_unsupported_output_format():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb/uvr-dereverb",
+                "/v1/audio/restore/uvr-dereverb",
                 data={"output_format": "xyz"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
@@ -563,7 +558,7 @@ def test_dereverb_output_path_returns_json():
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/dereverb/uvr-dereverb",
+                "/v1/audio/restore/uvr-dereverb",
                 data={"output_path": "dereverb/out.wav"},
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
@@ -572,7 +567,7 @@ def test_dereverb_output_path_returns_json():
     assert r.json()["path"] == "dereverb/out.wav"
 
 
-# ── /v1/audio/deecho ─────────────────────────────────────────────────────────
+# ── /v1/audio/restore/{engine} — deecho ─────────────────────────────────────────
 
 
 def test_deecho_200_returns_audio():
@@ -586,7 +581,7 @@ def test_deecho_200_returns_audio():
          patch.dict("audiolla.server.REGISTRY", {"uvr-deecho": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/deecho/uvr-deecho",
+                "/v1/audio/restore/uvr-deecho",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -604,7 +599,7 @@ def test_deecho_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/deecho/nope",
+                "/v1/audio/restore/nope",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -624,14 +619,14 @@ def test_deecho_400_for_wrong_engine_type():
          patch.dict("audiolla.server.REGISTRY", {"uvr-deecho": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/deecho/uvr-deecho",
+                "/v1/audio/restore/uvr-deecho",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
     assert r.status_code == 400
 
 
-# ── /v1/audio/denoise ────────────────────────────────────────────────────────
+# ── /v1/audio/restore/{engine} — denoise ────────────────────────────────────────
 
 
 def test_denoise_200_returns_audio():
@@ -645,7 +640,7 @@ def test_denoise_200_returns_audio():
          patch.dict("audiolla.server.REGISTRY", {"uvr-denoise": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/denoise/uvr-denoise",
+                "/v1/audio/restore/uvr-denoise",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 
@@ -663,7 +658,7 @@ def test_denoise_404_for_unknown_engine():
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
         with TestClient(_server_mod.app) as c:
             r = c.post(
-                "/v1/audio/denoise/nope",
+                "/v1/audio/restore/nope",
                 files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
             )
 

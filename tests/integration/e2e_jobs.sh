@@ -23,7 +23,7 @@ test_async_job_submit_and_poll() {
     submit_body=$(curl -s --max-time 30 -X POST \
         -F "file=@${FIXTURE}" \
         -F "async_job=true" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/waveform")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/waveform")
     job_id=$(echo "$submit_body" | jq -r '.job_id // empty')
     if [ -z "$job_id" ]; then
         echo "  FAIL: no job_id in submit response; body: $submit_body"; return 1
@@ -101,7 +101,7 @@ test_async_job_cancel() {
     submit_body=$(curl -s --max-time 30 -X POST \
         -F "file=@${FIXTURE}" \
         -F "async_job=true" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/waveform")
+        "${AUDIOLLA_BASE_URL}/v1/audio/visualize/waveform")
     job_id=$(echo "$submit_body" | jq -r '.job_id // empty')
     if [ -z "$job_id" ]; then
         echo "  FAIL: no job_id in submit response; body: $submit_body"; return 1

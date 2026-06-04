@@ -1,5 +1,5 @@
 #!/bin/bash
-# HPSS (harmonic/percussive source separation) — /v1/audio/hpss end-to-end.
+# HPSS (harmonic/percussive source separation) — /v1/audio/separate/hpss end-to-end.
 #
 #     bash tests/integration/e2e_hpss.sh
 
@@ -23,7 +23,7 @@ test_hpss_returns_zip() {
     code=$(curl -s -o "$tmpout" -w "%{http_code}" --max-time 120 \
         -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/hpss")
+        "${AUDIOLLA_BASE_URL}/v1/audio/separate/hpss")
     assert_eq "$code" "200" "hpss -> 200" || { rm -f "$tmpout"; return 1; }
     # ZIP magic bytes: 50 4b 03 04
     if ! head -c 2 "$tmpout" | od -A n -t x1 | grep -q "50 4b"; then
@@ -41,7 +41,7 @@ test_hpss_zip_contains_both_stems() {
     tmpout=$(mktemp)
     curl -s --max-time 120 -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/hpss" > "$tmpout"
+        "${AUDIOLLA_BASE_URL}/v1/audio/separate/hpss" > "$tmpout"
     entries=$(python3 -c "
 import zipfile, sys
 with zipfile.ZipFile(sys.argv[1]) as z:
@@ -65,7 +65,7 @@ test_hpss_stems_are_valid_wav() {
     tmpdir=$(mktemp -d)
     curl -s --max-time 120 -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/hpss" > "$tmpout"
+        "${AUDIOLLA_BASE_URL}/v1/audio/separate/hpss" > "$tmpout"
     python3 -c "
 import zipfile, sys
 with zipfile.ZipFile(sys.argv[1]) as z:
@@ -90,7 +90,7 @@ test_hpss_output_format_mp3() {
     curl -s --max-time 120 -X POST \
         -F "file=@${FIXTURE}" \
         -F "output_format=mp3" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/hpss" > "$tmpout"
+        "${AUDIOLLA_BASE_URL}/v1/audio/separate/hpss" > "$tmpout"
     entries=$(python3 -c "
 import zipfile, sys
 with zipfile.ZipFile(sys.argv[1]) as z:
@@ -110,7 +110,7 @@ test_hpss_missing_file_400() {
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=nonexistent/ghost.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/hpss")
+        "${AUDIOLLA_BASE_URL}/v1/audio/separate/hpss")
     assert_eq "$code" "400" "missing file -> 400" || return 1
     echo "OK: hpss_missing_file_400"
 }
@@ -122,7 +122,7 @@ test_hpss_output_path() {
     body=$(curl -s --max-time 120 -X POST \
         -F "file=@${FIXTURE}" \
         -F "output_path=hpss/stems.zip" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/hpss")
+        "${AUDIOLLA_BASE_URL}/v1/audio/separate/hpss")
     if ! echo "$body" | jq -e '.path == "hpss/stems.zip"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
     fi

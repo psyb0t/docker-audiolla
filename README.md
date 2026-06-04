@@ -87,7 +87,7 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Analyze](#analyze)
   - [Beats, onsets, melody, segments](#beats-onsets-melody-segments)
   - [Silence detection and trimming](#silence-detection-and-trimming)
-  - [Spectrogram, waveform, visualise](#spectrogram-waveform-visualise)
+  - [Visualize (spectrogram, waveform, video)](#visualize-spectrogram-waveform-video)
   - [Acoustic fingerprint](#acoustic-fingerprint)
   - [De-reverb, de-echo, de-noise](#de-reverb-de-echo-de-noise)
   - [Audio-to-MIDI transcription](#audio-to-midi-transcription)
@@ -204,7 +204,7 @@ curl -X POST http://localhost:8000/v1/midi/render \
   -F "file=@melody.mid" -o rendered.wav
 
 # strip background noise from a voice recording
-curl -X POST http://localhost:8000/v1/audio/denoise/uvr-denoise \
+curl -X POST http://localhost:8000/v1/audio/noise-reduce/uvr-denoise \
   -F "file=@interview.wav" -o clean.wav
 
 # who's speaking and when?
@@ -331,27 +331,28 @@ curl -X POST http://localhost:8000/v1/audio/silence \
 
 `trim_mode=edges` — chop leading + trailing silence only. `trim_mode=all` — remove every detected gap (compress a talk recording, tighten a loop). Without `trim_mode`, the response is JSON only: `silent_ranges`, `non_silent_ranges`, `duration`.
 
-### Spectrogram, waveform, visualise
+### Visualize (spectrogram, waveform, video)
+
+All visual output is under a single `POST /v1/audio/visualize/{mode}` endpoint. The mode is part of the URL path.
 
 ```bash
-# static PNG spectrogram
-curl -X POST http://localhost:8000/v1/audio/spectrogram \
+# Static PNG spectrogram
+curl -X POST http://localhost:8000/v1/audio/visualize/spectrogram \
   -F "file=@track.wav" \
   -F "width=1280" \
   -F "height=720" \
   -o spec.png
 
-# static PNG waveform
-curl -X POST http://localhost:8000/v1/audio/waveform \
+# Static PNG waveform
+curl -X POST http://localhost:8000/v1/audio/visualize/waveform \
   -F "file=@track.wav" \
   -F "width=1280" \
   -F "height=240" \
   -o wave.png
 
-# animated MP4 spectrum analyser
-curl -X POST http://localhost:8000/v1/audio/visualize \
+# Animated MP4 spectrum analyser
+curl -X POST http://localhost:8000/v1/audio/visualize/spectrum \
   -F "file=@track.wav" \
-  -F "mode=spectrum" \
   -F "width=1280" \
   -F "height=720" \
   -F "fps=30" \
@@ -359,7 +360,9 @@ curl -X POST http://localhost:8000/v1/audio/visualize \
   -o viz.mp4
 ```
 
-`visualize` modes: `spectrum` (scrolling FFT), `waves` (oscilloscope), `cqt` (constant-Q transform), `freqs` (bar-graph analyzer), `volume` (VU meter), `vectorscope` (stereo X/Y scope), `phasemeter`, `histogram`. Containers: `mp4`, `webm`.
+**PNG modes** (`spectrogram`, `waveform`): return `image/png`. Params: `color` (default `intensity` for spectrogram; pass `lime` for waveform-style green), `scale` (`log`/`lin` for spectrogram).
+
+**Video modes**: `spectrum` (scrolling FFT), `waves` (oscilloscope), `cqt` (constant-Q transform), `freqs` (bar-graph analyzer), `volume` (VU meter), `vectorscope` (stereo X/Y scope), `phasemeter`, `histogram`. Containers: `mp4` (default), `webm`.
 
 ### Acoustic fingerprint
 
@@ -379,29 +382,31 @@ The base64 fingerprint string is compatible with the [AcoustID](https://acoustid
 
 ### De-reverb, de-echo, de-noise
 
-AI audio restoration via UVR ecosystem models — BS-Roformer and MelBand Roformer. These operate on the signal itself, not silence thresholds.
-
-The engine slug is part of the URL path — pick the one you want:
+AI audio restoration via UVR ecosystem models — BS-Roformer and MelBand Roformer. All three are unified under `POST /v1/audio/restore/{engine}`.
 
 ```bash
 # Remove room reverb (BS-Roformer, SDR 19+)
-curl -X POST http://localhost:8000/v1/audio/dereverb/uvr-dereverb \
+curl -X POST http://localhost:8000/v1/audio/restore/uvr-dereverb \
   -F "file=@track.wav" \
   -o dry.wav
 
-# Remove echo — normal or aggressive variant
-curl -X POST http://localhost:8000/v1/audio/deecho/uvr-deecho \
-  -F "file=@track.wav" -o noecho.wav
-curl -X POST http://localhost:8000/v1/audio/deecho/uvr-deecho-aggressive \
+# Remove echo — normal mode
+curl -X POST http://localhost:8000/v1/audio/restore/uvr-deecho \
   -F "file=@track.wav" -o noecho.wav
 
-# Remove broadband background noise (MelBand Roformer, SDR 28)
-curl -X POST http://localhost:8000/v1/audio/denoise/uvr-denoise \
+# Remove echo — aggressive mode (same engine, harder suppression)
+curl -X POST http://localhost:8000/v1/audio/restore/uvr-deecho \
+  -F "file=@track.wav" \
+  -F "aggressive=true" \
+  -o noecho.wav
+
+# Remove broadband background noise — ML (MelBand Roformer, SDR 28)
+curl -X POST http://localhost:8000/v1/audio/restore/uvr-denoise \
   -F "file=@track.wav" \
   -o clean.wav
 ```
 
-All three support `output_format`, `output_path`, `output_url`.
+All support `output_format`, `output_path`, `output_url`. For DSP-based noise reduction (no GPU) use `noise-reduce/noise-reduce`.
 
 UVR engines also work through `/v1/audio/separate` — `uvr-vocal-bsr` (BS-Roformer, SDR 13) and `uvr-karaoke` return vocal + instrumental stems like Demucs but often with higher quality.
 
@@ -580,7 +585,7 @@ RMS envelope over time — returns a list of `{time_sec, rms_db}` points. Useful
 
 ```bash
 # Default hop (512 samples) — fine-grained envelope
-curl -X POST http://localhost:8000/v1/audio/loudness-curve \
+curl -X POST http://localhost:8000/v1/audio/loudness/curve \
   -F "file=@track.wav" | jq '.curve[:5]'
 # → [
 #     {"time_sec": 0.0,   "rms_db": -18.4},
@@ -589,7 +594,7 @@ curl -X POST http://localhost:8000/v1/audio/loudness-curve \
 #   ]
 
 # Coarser envelope (2048-sample hop)
-curl -X POST http://localhost:8000/v1/audio/loudness-curve \
+curl -X POST http://localhost:8000/v1/audio/loudness/curve \
   -F "file=@track.wav" \
   -F "hop_length=2048" | jq '{duration, sample_rate, points}'
 ```
@@ -620,19 +625,19 @@ Median-filter harmonic/percussive source separation via librosa. Harmonic = tona
 
 ```bash
 # Get both stems in a ZIP
-curl -X POST http://localhost:8000/v1/audio/hpss \
+curl -X POST http://localhost:8000/v1/audio/separate/hpss \
   -F "file=@track.wav" \
   -o stems.zip
 # → stems.zip contains harmonic.wav + percussive.wav
 
 # Wider margin = harder separation (more aggressive)
-curl -X POST http://localhost:8000/v1/audio/hpss \
+curl -X POST http://localhost:8000/v1/audio/separate/hpss \
   -F "file=@track.wav" \
   -F "margin=3.0" \
   -o stems.zip
 
 # Output to staging
-curl -X POST http://localhost:8000/v1/audio/hpss \
+curl -X POST http://localhost:8000/v1/audio/separate/hpss \
   -F "file=@track.wav" \
   -F "output_path=hpss/stems.zip"
 ```
@@ -641,30 +646,33 @@ Params: `margin` (default 1.0 — ≥1.0, higher = more aggressive), `kernel_siz
 
 ### Spectral noise reduction
 
-Stationary and non-stationary spectral noise reduction via noisereduce. No GPU, no model weights — pure spectral subtraction + Wiener filtering.
+Noise reduction with two engine options under the same endpoint — pick DSP for no-GPU fast cleanup or ML for higher-quality removal.
 
 ```bash
-# Non-stationary mode (adaptive, default — good for variable background noise)
-curl -X POST http://localhost:8000/v1/audio/noise-reduce \
+# DSP (noisereduce) — no GPU, pure spectral subtraction + Wiener filtering
+curl -X POST http://localhost:8000/v1/audio/noise-reduce/noise-reduce \
   -F "file=@recording.wav" \
   -o clean.wav
 
-# Stationary mode — targets constant hum, hiss, fan noise
-curl -X POST http://localhost:8000/v1/audio/noise-reduce \
+# Stationary mode — constant hum, hiss, fan noise
+curl -X POST http://localhost:8000/v1/audio/noise-reduce/noise-reduce \
   -F "file=@recording.wav" \
   -F "stationary=true" \
   -o clean.wav
 
 # Partial reduction — subtle noise floor cleanup
-curl -X POST http://localhost:8000/v1/audio/noise-reduce \
+curl -X POST http://localhost:8000/v1/audio/noise-reduce/noise-reduce \
   -F "file=@recording.wav" \
   -F "prop_decrease=0.5" \
   -o clean.wav
+
+# ML (UVR MelBand Roformer, SDR 28) — higher quality, GPU-accelerated
+curl -X POST http://localhost:8000/v1/audio/noise-reduce/uvr-denoise \
+  -F "file=@recording.wav" \
+  -o clean.wav
 ```
 
-Params: `stationary` (bool, default `false`), `prop_decrease` (0–1, default 1.0 = full reduction), `output_format`, `output_path`, `output_url`.
-
-For AI-based de-noise (higher quality, GPU-accelerated), use `/v1/audio/denoise/uvr-denoise` instead.
+DSP params (only apply to `noise-reduce` engine): `stationary` (bool, default `false`), `prop_decrease` (0–1, default 1.0). Both engines accept `output_format`, `output_path`, `output_url`.
 
 ### Time-stretch and pitch-shift
 
@@ -1796,11 +1804,10 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `midi-compose` | JSON spec → MIDI bytes. Also inspects and transforms existing MIDI files. Backs `/v1/midi/{compose,inspect,transform,generate}`. |
 | `midi-render` | MIDI → audio via fluidsynth + SoundFont. Backs `/v1/midi/render` and `/v1/midi/generate`. |
 | `silence-detect` | Locate silent gaps via ffmpeg `silencedetect`. Optional auto-trim. Backs `/v1/audio/silence`. |
-| `ffmpeg-render` | Static PNG spectrogram/waveform + 8-mode animated MP4/WebM video via ffmpeg filters. Backs `/v1/audio/{spectrogram,waveform,visualize}`. |
+| `ffmpeg-render` | Static PNG spectrogram/waveform + 8-mode animated MP4/WebM video via ffmpeg filters. Backs `/v1/audio/visualize/{mode}`. |
 | `audio-fingerprint` | Chromaprint acoustic fingerprint via `fpcalc`. Backs `/v1/audio/fingerprint`. |
 | `uvr-dereverb` | BS-Roformer de-reverb — removes room reverb; `primary_stem=No Reverb`. |
-| `uvr-deecho` | VR Architecture de-echo (normal) — removes echo. |
-| `uvr-deecho-aggressive` | VR Architecture de-echo (aggressive) — hard echo removal. |
+| `uvr-deecho` | VR Architecture de-echo — normal and aggressive modes; pass `aggressive=true` for harder suppression. |
 | `uvr-denoise` | MelBand Roformer de-noise (SDR 28) — removes broadband background noise. |
 | `uvr-karaoke` | MelBand Roformer karaoke — remove lead vocals, keep backing; works via `/v1/audio/separate`. |
 | `uvr-vocal-bsr` | BS-Roformer vocal/instrumental (SDR 13) — highest-quality vocal separation; works via `/v1/audio/separate`. |
@@ -1812,8 +1819,8 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `stretch` | Time-stretch + pitch-shift via librosa phase vocoder — independent tempo factor and semitone offset. Backs `/v1/audio/stretch`. |
 | `ast-tag` | Audio tagging via Audio Spectrogram Transformer (MIT/ast-finetuned-audioset-10-10-0.4593) — top-K AudioSet class labels. Requires HF model cache. Backs `/v1/audio/tag`. |
 | `clap-embed` | 512-dim L2-normalized audio embeddings via LAION CLAP (laion/larger_clap_music_and_speech) — semantic audio search. Requires HF model cache. Backs `/v1/audio/embed`. |
-| `hpss` | Harmonic/percussive source separation via librosa HPSS median filter — returns harmonic + percussive stems as a ZIP. Backs `/v1/audio/hpss`. |
-| `noise-reduce` | Spectral noise reduction via noisereduce — stationary (constant hum/hiss) and non-stationary (adaptive) modes, no GPU required. Backs `/v1/audio/noise-reduce`. |
+| `hpss` | Harmonic/percussive source separation via librosa HPSS median filter — returns harmonic + percussive stems as a ZIP. Backs `/v1/audio/separate/hpss`. |
+| `noise-reduce` | Spectral noise reduction via noisereduce — stationary (constant hum/hiss) and non-stationary (adaptive) modes, no GPU required. Backs `/v1/audio/noise-reduce/noise-reduce`. |
 | `metadata` | Read/write audio tags (ID3 for MP3, Vorbis for OGG/FLAC, INFO for WAV, MP4 for M4A) via mutagen. No ML weights. Backs `/v1/audio/metadata`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
@@ -1843,13 +1850,9 @@ bytes.
 | `POST` | `/v1/audio/melody` | JSON — dominant melody contour; optional MIDI export |
 | `POST` | `/v1/audio/segments` | JSON — structural segment labels (A, B, C…) |
 | `POST` | `/v1/audio/silence` | JSON — silent/non-silent ranges; optional trimmed audio |
-| `POST` | `/v1/audio/spectrogram` | PNG bytes |
-| `POST` | `/v1/audio/waveform` | PNG bytes |
-| `POST` | `/v1/audio/visualize` | MP4 bytes (default `container=mp4`); pass `container=webm` for WebM — 8 animation modes |
+| `POST` | `/v1/audio/visualize/{mode}` | PNG bytes (mode=`spectrogram`\|`waveform`); MP4/WebM bytes for 8 video modes |
 | `POST` | `/v1/audio/fingerprint` | JSON — Chromaprint fingerprint string |
-| `POST` | `/v1/audio/dereverb/{engine}` | audio bytes — room reverb removed |
-| `POST` | `/v1/audio/deecho/{engine}` | audio bytes — echo removed |
-| `POST` | `/v1/audio/denoise/{engine}` | audio bytes — broadband noise removed |
+| `POST` | `/v1/audio/restore/{engine}` | audio bytes — reverb/echo/noise removed; `aggressive=true` for uvr-deecho hard mode |
 | `POST` | `/v1/audio/to_midi/{engine}` | MIDI bytes (`audio/midi`) — polyphonic transcription |
 | `POST` | `/v1/audio/enhance/{engine}` | audio bytes — neural speech/vocal enhancement |
 | `POST` | `/v1/audio/chords` | JSON — detected key and chord progression |
@@ -1857,10 +1860,10 @@ bytes.
 | `POST` | `/v1/audio/diarize/{engine}` | JSON — per-speaker timestamped segments |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON — `{loudness_lufs}` (measure only, no audio) |
-| `POST` | `/v1/audio/loudness-curve` | JSON — `{curve:[{time_sec,rms_db}],duration,sample_rate,points}`; `hop_length` param |
+| `POST` | `/v1/audio/loudness/curve` | JSON — `{curve:[{time_sec,rms_db}],duration,sample_rate,points}`; `hop_length` param |
 | `POST` | `/v1/audio/normalize` | audio bytes — requires `target_lufs`; header `X-Loudness-LUFS` carries pre-normalization level |
-| `POST` | `/v1/audio/hpss` | ZIP containing `harmonic.<fmt>` + `percussive.<fmt>` |
-| `POST` | `/v1/audio/noise-reduce` | audio bytes |
+| `POST` | `/v1/audio/separate/hpss` | ZIP containing `harmonic.<fmt>` + `percussive.<fmt>` |
+| `POST` | `/v1/audio/noise-reduce/{engine}` | audio bytes — `engine=noise-reduce` (DSP, `stationary`/`prop_decrease`) or `uvr-denoise` (ML) |
 | `POST` | `/v1/audio/stretch` | audio bytes |
 | `POST` | `/v1/audio/pitch-correct` | audio bytes — `strength` [0.0–1.0]; requires `librosa-analyze` |
 | `POST` | `/v1/audio/repair` | audio bytes — `declip` bool, `dehum` bool, `hum_freq` Hz |
@@ -1969,13 +1972,10 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `melody` | Dominant melody contour in Hz; optional MIDI export |
 | `segments` | Structural segmentation — recurring section labels (A, B, C…) |
 | `silence` | Detect silent gaps; optional auto-trim (edges or all) |
-| `spectrogram` | Static PNG spectrogram via ffmpeg |
-| `waveform` | Static PNG waveform via ffmpeg |
-| `visualize` | Animated MP4/WebM — spectrum, waves, CQT, freqs, volume, vectorscope, phasemeter, histogram |
+| `visualize` | PNG spectrogram/waveform or animated MP4/WebM — `mode` selects output type |
 | `fingerprint` | Chromaprint acoustic fingerprint (AcoustID-compatible) |
-| `dereverb` | Remove room reverb via UVR BS-Roformer |
-| `deecho` | Remove echo via UVR VR Architecture |
-| `denoise` | Remove broadband background noise via UVR MelBand Roformer |
+| `restore` | Remove reverb/echo/noise via UVR — `engine` selects model; `aggressive=true` for harder echo suppression |
+| `denoise` | Thin shim — prefer `restore` with `engine=uvr-denoise` or `noise_reduce` with `engine=uvr-denoise` |
 | `audio_to_midi` | Polyphonic audio-to-MIDI transcription via basic-pitch (ONNX) — returns MIDI base64 |
 | `enhance` | Neural speech and vocal enhancement via DeepFilterNet DF3 |
 | `chords` | Chord and key detection via librosa — key + per-segment chord labels |
@@ -1986,7 +1986,7 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `loudness_curve` | RMS envelope over time — `{curve:[{time_sec,rms_db}],duration,sample_rate,points}` |
 | `normalize` | Normalize audio to a target LUFS level — returns base64 audio |
 | `hpss` | Harmonic/percussive separation — returns per-stem base64 audio |
-| `noise_reduce` | Spectral noise reduction — stationary or adaptive mode |
+| `noise_reduce` | Noise reduction — `engine=noise-reduce` (DSP, stationary/prop_decrease) or `engine=uvr-denoise` (ML) |
 | `stretch` | Time-stretch + pitch-shift via librosa phase vocoder |
 | `pitch_correct` | Auto-tune toward nearest chromatic semitone — `strength` [0.0–1.0]; requires `librosa-analyze` |
 | `repair_audio` | Declip + dehum — `declip` bool, `dehum` bool, `hum_freq` Hz |

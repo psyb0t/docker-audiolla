@@ -1,5 +1,5 @@
 #!/bin/bash
-# Loudness curve (RMS envelope) — /v1/audio/loudness-curve.
+# Loudness curve (RMS envelope) — /v1/audio/loudness/curve.
 #
 #     bash tests/integration/e2e_loudness_curve.sh
 
@@ -21,7 +21,7 @@ test_loudness_curve_shape() {
     local body
     body=$(curl -s --max-time 60 -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness-curve")
+        "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.curve | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: curve not an array; body: $body"; return 1
     fi
@@ -40,7 +40,7 @@ test_loudness_curve_entry_fields() {
     local body
     body=$(curl -s --max-time 60 -X POST \
         -F "file=@${FIXTURE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness-curve")
+        "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.curve[0].time_sec | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: time_sec missing in first entry; body: $body"; return 1
     fi
@@ -60,7 +60,7 @@ test_loudness_curve_file_path() {
     local body
     body=$(curl -s --max-time 60 -X POST \
         -F "file_path=lc_test/audio.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness-curve")
+        "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.curve | length > 0' >/dev/null 2>&1; then
         echo "  FAIL: no curve points; body: $body"; return 1
     fi
@@ -74,7 +74,7 @@ test_loudness_curve_custom_hop() {
     body=$(curl -s --max-time 60 -X POST \
         -F "file=@${FIXTURE}" \
         -F "hop_length=1024" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness-curve")
+        "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.hop_length == 1024' >/dev/null 2>&1; then
         echo "  FAIL: hop_length not reflected in response; body: $body"; return 1
     fi

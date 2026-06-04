@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import tempfile
+from typing import Any
 
 from .. import config
 from ..audio import AudioConversionError, encode_audio
@@ -34,7 +35,11 @@ class UVRSeparatorEngine(EngineBase):
     def __init__(self, slug: str, entry: dict) -> None:
         super().__init__(slug, entry)
         self._model_filename: str = entry["model"]
+        self._model_aggressive_filename: str | None = entry.get("model_aggressive")
         self._primary_stem: str | None = entry.get("primary_stem")
+        self._aggressive_sep: Any = None
+        self._aggressive_load_lock: asyncio.Lock = asyncio.Lock()
+        self._aggressive_run_lock: asyncio.Lock = asyncio.Lock()
 
     def _load_sync(self) -> object:
         from audio_separator.separator import Separator  # noqa: PLC0415
@@ -51,18 +56,59 @@ class UVRSeparatorEngine(EngineBase):
         self._log.info("UVR model %s ready", self._model_filename)
         return sep
 
+    def _load_aggressive_sync(self) -> object:
+        from audio_separator.separator import Separator  # noqa: PLC0415
+
+        os.makedirs(config.UVR_MODELS_DIR, exist_ok=True)
+        sep = Separator(
+            model_file_dir=str(config.UVR_MODELS_DIR),
+            output_format="WAV",
+            output_single_stem=self._primary_stem,
+            log_level=logging.WARNING,
+        )
+        self._log.info("loading UVR aggressive model %s", self._model_aggressive_filename)
+        sep.load_model(self._model_aggressive_filename)
+        self._log.info("UVR aggressive model %s ready", self._model_aggressive_filename)
+        return sep
+
+    async def _get_aggressive_model(self) -> Any:
+        self._touch()
+        if self._aggressive_sep is not None:
+            return self._aggressive_sep
+        async with self._aggressive_load_lock:
+            if self._aggressive_sep is not None:
+                return self._aggressive_sep
+            self._aggressive_sep = await asyncio.to_thread(self._load_aggressive_sync)
+            self._touch()
+        return self._aggressive_sep
+
     async def restore(
         self,
         raw: bytes,
         filename: str,
         *,
         output_format: str = "wav",
+        aggressive: bool = False,
     ) -> bytes:
-        """Run a restoration model. Returns primary (cleaned) stem bytes."""
-        await self.get_model()
-        async with self._lock:
+        """Run a restoration model. Returns primary (cleaned) stem bytes.
+
+        When aggressive=True, uses the model_aggressive variant (if configured).
+        """
+        if aggressive:
+            if not self._model_aggressive_filename:
+                raise UVRSeparatorError(
+                    f"engine {self.slug!r} has no aggressive model configured"
+                )
+            sep = await self._get_aggressive_model()
+            run_lock = self._aggressive_run_lock
+        else:
+            sep = await self.get_model()
+            run_lock = self._lock
+
+        async with run_lock:
             result = await asyncio.to_thread(
-                self._restore_sync,
+                self._restore_sync_with_sep,
+                sep,
                 raw,
                 filename,
                 output_format,
@@ -70,18 +116,20 @@ class UVRSeparatorEngine(EngineBase):
             self._touch()
             return result
 
-    def _restore_sync(self, raw: bytes, filename: str, output_format: str) -> bytes:
+    def _restore_sync_with_sep(
+        self, sep: Any, raw: bytes, filename: str, output_format: str
+    ) -> bytes:
         with tempfile.TemporaryDirectory(prefix="audiolla-uvr-") as tmpdir:
             in_path = os.path.join(tmpdir, filename)
             with open(in_path, "wb") as fh:
                 fh.write(raw)
 
-            self._model.output_dir = tmpdir
-            output_files: list[str] = self._model.separate(in_path)
+            sep.output_dir = tmpdir
+            output_files: list[str] = sep.separate(in_path)
 
             if not output_files:
                 raise UVRSeparatorError(
-                    f"model {self._model_filename!r} produced no output files"
+                    f"model produced no output files"
                 )
 
             target = output_files[0]
