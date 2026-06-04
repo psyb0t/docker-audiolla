@@ -1,0 +1,125 @@
+#!/bin/bash
+# Beat slicer — /v1/audio/beat-slice.
+# Requires librosa-analyze engine.
+#
+#     bash tests/integration/e2e_beat_slice.sh
+
+set -eo pipefail
+
+_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=harness.sh
+source "${_DIR}/harness.sh"
+# shellcheck source=common.sh
+source "${_DIR}/common.sh"
+
+FIXTURE_DIR="${_DIR}/.fixtures"
+BEAT_FIXTURE="${FIXTURE_DIR}/beat_click.wav"
+
+harness_start "librosa-analyze"
+
+# Generate a click-track fixture if it doesn't exist yet.
+build_beat_fixture() {
+    if [ -f "$BEAT_FIXTURE" ] && [ -s "$BEAT_FIXTURE" ]; then
+        return 0
+    fi
+    docker run --rm \
+        -u "$(id -u):$(id -g)" \
+        -v "${FIXTURE_DIR}:${FIXTURE_DIR}" \
+        --entrypoint ffmpeg "${HARNESS_IMAGE}" \
+        -hide_banner -loglevel error \
+        -f lavfi \
+        -i "aevalsrc=sin(2*PI*880*t)*if(lt(mod(t\,0.5)\,0.05)\,1\,0):s=44100:d=8" \
+        -ar 44100 -y "$BEAT_FIXTURE" \
+        || { echo "FATAL: beat fixture generation failed" >&2; exit 1; }
+    [ -s "$BEAT_FIXTURE" ] || { echo "FATAL: beat fixture is empty" >&2; exit 1; }
+}
+
+# ── beat-slice returns a ZIP with WAV slices ──────────────────────────────────
+
+test_beat_slice_returns_zip_of_wavs() {
+    build_beat_fixture || return 1
+    local tmpz code
+    tmpz=$(mktemp --suffix=.zip)
+    code=$(curl -s -o "$tmpz" -w "%{http_code}" --max-time 60 -X POST \
+        -F "file=@${BEAT_FIXTURE}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/beat-slice")
+    assert_eq "$code" "200" "beat-slice -> 200" || { rm -f "$tmpz"; return 1; }
+    local count
+    count=$(python3 -c "import zipfile,sys; z=zipfile.ZipFile('$tmpz'); print(len(z.namelist()))" 2>/dev/null || echo 0)
+    if [ "$count" -lt 2 ]; then
+        echo "  FAIL: ZIP has only $count entries (expected ≥2); size=$(stat -c%s "$tmpz")"
+        rm -f "$tmpz"; return 1
+    fi
+    # Every entry should be a WAV (RIFF header).
+    local bad
+    bad=$(python3 -c "
+import zipfile
+z = zipfile.ZipFile('$tmpz')
+bad = [n for n in z.namelist() if not z.read(n).startswith(b'RIFF')]
+print(len(bad))
+" 2>/dev/null || echo 0)
+    if [ "$bad" -gt 0 ]; then
+        echo "  FAIL: $bad entries in ZIP are not WAV"; rm -f "$tmpz"; return 1
+    fi
+    rm -f "$tmpz"
+    echo "OK: beat_slice_returns_zip_of_wavs ($count slices)"
+}
+
+# ── output_path: result ZIP staged under /v1/files ───────────────────────────
+
+test_beat_slice_output_path() {
+    build_beat_fixture || return 1
+    local body code fetched
+    body=$(curl -s --max-time 60 -X POST \
+        -F "file=@${BEAT_FIXTURE}" \
+        -F "output_path=beat_slice_test/slices.zip" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/beat-slice")
+    if ! echo "$body" | jq -e '.path == "beat_slice_test/slices.zip"' >/dev/null 2>&1; then
+        echo "  FAIL: response missing path; body: $body"; return 1
+    fi
+    if ! echo "$body" | jq -e '.beat_count | type == "number"' >/dev/null 2>&1; then
+        echo "  FAIL: beat_count missing; body: $body"; return 1
+    fi
+    fetched=$(mktemp --suffix=.zip)
+    code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/beat_slice_test/slices.zip")
+    assert_eq "$code" "200" "GET staged ZIP -> 200" || { rm -f "$fetched"; return 1; }
+    local count
+    count=$(python3 -c "import zipfile; z=zipfile.ZipFile('$fetched'); print(len(z.namelist()))" 2>/dev/null || echo 0)
+    rm -f "$fetched"
+    if [ "$count" -lt 2 ]; then
+        echo "  FAIL: staged ZIP has only $count entries"; return 1
+    fi
+    echo "OK: beat_slice_output_path ($(echo "$body" | jq -r '.beat_count') beats)"
+}
+
+# ── output_format=mp3: slices are MP3 ────────────────────────────────────────
+
+test_beat_slice_output_format_mp3() {
+    build_beat_fixture || return 1
+    local tmpz code
+    tmpz=$(mktemp --suffix=.zip)
+    code=$(curl -s -o "$tmpz" -w "%{http_code}" --max-time 90 -X POST \
+        -F "file=@${BEAT_FIXTURE}" \
+        -F "output_format=mp3" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/beat-slice")
+    assert_eq "$code" "200" "beat-slice mp3 -> 200" || { rm -f "$tmpz"; return 1; }
+    # MP3 files start with ID3 or sync word (0xFF 0xFB).
+    local bad
+    bad=$(python3 -c "
+import zipfile
+z = zipfile.ZipFile('$tmpz')
+bad = [n for n in z.namelist() if not (z.read(n)[:3] == b'ID3' or z.read(n)[:2] == b'\xff\xfb')]
+print(len(bad))
+" 2>/dev/null || echo 0)
+    rm -f "$tmpz"
+    if [ "$bad" -gt 0 ]; then
+        echo "  FAIL: $bad ZIP entries are not MP3"; return 1
+    fi
+    echo "OK: beat_slice_output_format_mp3"
+}
+
+harness_run_tests \
+    test_beat_slice_returns_zip_of_wavs \
+    test_beat_slice_output_path \
+    test_beat_slice_output_format_mp3

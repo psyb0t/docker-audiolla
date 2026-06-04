@@ -42,7 +42,9 @@ from mcp.server.fastmcp import FastMCP
 
 from . import config, fetch
 from . import files as files_mod
-from .audio import AudioConversionError, content_type_for
+import asyncio
+
+from .audio import AudioConversionError, content_type_for, clip_detect, mid_side_encode, mid_side_decode, beat_slice, conv_reverb, transient_shape
 
 _log = logging.getLogger("audiolla.mcp")
 
@@ -1993,5 +1995,226 @@ def build_mcp_server(
         files_mod.prune_empty_parents(target, config.FILES_DIR)
         return {"deleted": str(rel)}
 
-    _log.info("mcp server initialised: 58 tools")
+    # ── metadata — read / write audio tags ─────────────────────────────────
+
+    @mcp.tool()
+    async def audio_metadata(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        tags: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Read or write audio file tags (ID3 for MP3, Vorbis for FLAC/OGG).
+        Without tags: returns title, artist, album, year, bpm, key, etc.
+        With tags: writes provided fields and returns updated tag set."""
+        from .engines import is_metadata_engine  # noqa: PLC0415
+        eng = next((e for e in engines.values() if is_metadata_engine(e)), None)
+        if eng is None:
+            raise ValueError("metadata engine not configured")
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            if tags is not None:
+                updated_bytes = await eng.write_tags(raw, filename, tags)
+                return await eng.read_tags(updated_bytes, filename)
+            return await eng.read_tags(raw, filename)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    # ── clip_detect — detect digital clipping ──────────────────────────────
+
+    @mcp.tool()
+    async def detect_clipping(
+        file_path: str | None = None,
+        file_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Detect digital clipping in an audio file.
+        Returns: clipped, clip_count, clip_ratio, peak_db, duration_sec,
+        sample_rate, channels."""
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            return await asyncio.to_thread(clip_detect, raw, filename)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    # ── mid_side — M/S encode or decode ────────────────────────────────────
+
+    @mcp.tool()
+    async def mid_side(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        mode: str = "encode",
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Encode stereo audio to Mid/Side or decode M/S back to L/R.
+        mode: 'encode' (L+R→Mid, L-R→Side) or 'decode' (Mid+Side→L/R).
+        Returns audio base64 or uploads to output_url."""
+        if mode not in ("encode", "decode"):
+            raise ValueError("mode must be 'encode' or 'decode'")
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            fn = mid_side_encode if mode == "encode" else mid_side_decode
+            result = await asyncio.to_thread(fn, raw, filename, output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(result, output_format, output_url)
+
+    # ── beat_slice — slice audio at beat positions ──────────────────────────
+
+    @mcp.tool()
+    async def slice_at_beats(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        output_format: str = "wav",
+    ) -> dict[str, Any]:
+        """Slice audio at beat positions detected by librosa-analyze.
+        Returns a base64-encoded ZIP of numbered beat slice WAV/MP3 files."""
+        from .engines import is_beats_engine  # noqa: PLC0415
+        librosa_eng = engines.get("librosa-analyze")
+        if librosa_eng is None or not is_beats_engine(librosa_eng):
+            raise ValueError("librosa-analyze engine not configured")
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            beats_result = await librosa_eng.beats(raw, filename)
+            beat_times = beats_result.get("beats", [])
+            if not beat_times:
+                raise ValueError("no beats detected in audio")
+            zip_bytes = await asyncio.to_thread(beat_slice, raw, filename, beat_times, output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return {
+            "zip_base64": base64.b64encode(zip_bytes).decode("ascii"),
+            "beat_count": len(beat_times),
+            "output_format": output_format,
+        }
+
+    # ── conv_reverb — convolution reverb ──────────────────────────────────
+
+    @mcp.tool()
+    async def convolution_reverb(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        ir_file_path: str | None = None,
+        ir_file_url: str | None = None,
+        wet_mix: float = 0.3,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply convolution reverb to audio using an impulse response (IR) file.
+        wet_mix: 0.0 = dry only, 1.0 = wet only. Range [0.0, 1.0].
+        Provide the IR via ir_file_path (staged) or ir_file_url (remote)."""
+        if not (0.0 <= wet_mix <= 1.0):
+            raise ValueError(f"wet_mix must be in [0.0, 1.0], got {wet_mix}")
+        raw, filename = await _load_input(file_path, file_url)
+        ir_raw, ir_filename = await _load_input(ir_file_path, ir_file_url, field_prefix="ir_file")
+        try:
+            result = await asyncio.to_thread(
+                conv_reverb, raw, filename, ir_raw, ir_filename,
+                wet_mix=wet_mix, output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(result, output_format, output_url)
+
+    # ── transient — transient shaper ──────────────────────────────────────
+
+    @mcp.tool()
+    async def transient_shaper(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        attack_gain_db: float = 0.0,
+        sustain_gain_db: float = 0.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Shape transients via dual-compressor attack/sustain blending.
+        attack_gain_db > 0 makes drums punchier; sustain_gain_db < 0 cuts room tail.
+        Returns processed audio base64 or uploads to output_url."""
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            result = await asyncio.to_thread(
+                transient_shape, raw, filename,
+                attack_gain_db=attack_gain_db,
+                sustain_gain_db=sustain_gain_db,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(result, output_format, output_url)
+
+    # ── dj_prep — BPM + key + LUFS + Camelot ─────────────────────────────
+
+    @mcp.tool()
+    async def dj_prep(
+        file_path: str | None = None,
+        file_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Analyse a track for DJ use: BPM, musical key, Camelot wheel position,
+        and integrated LUFS loudness. Requires librosa-analyze + chord-detect."""
+        from .engines import is_beats_engine, is_chord_detect_engine, is_loudness_engine  # noqa: PLC0415
+        _camelot: dict[str, str] = {
+            "C major": "8B", "A minor": "8A", "G major": "9B", "E minor": "9A",
+            "D major": "10B", "B minor": "10A", "A major": "11B", "F# minor": "11A",
+            "E major": "12B", "C# minor": "12A", "B major": "1B", "G# minor": "1A",
+            "F# major": "2B", "D# minor": "2A", "C# major": "3B", "A# minor": "3A",
+            "G# major": "4B", "F minor": "4A", "D# major": "5B", "C minor": "5A",
+            "A# major": "6B", "G minor": "6A", "F major": "7B", "D minor": "7A",
+        }
+        librosa_eng = engines.get("librosa-analyze")
+        if librosa_eng is None or not is_beats_engine(librosa_eng):
+            raise ValueError("librosa-analyze engine not configured")
+        chord_eng = engines.get("chord-detect")
+        if chord_eng is None or not is_chord_detect_engine(chord_eng):
+            raise ValueError("chord-detect engine not configured")
+        loudness_eng = next((e for e in engines.values() if is_loudness_engine(e)), None)
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            beats_result = await librosa_eng.beats(raw, filename)
+            chord_result = await chord_eng.detect_chords(raw, filename)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        bpm = beats_result.get("tempo_bpm")
+        key = chord_result.get("key", "")
+        lufs: float | None = None
+        if loudness_eng is not None:
+            try:
+                lufs = await loudness_eng.measure_lufs(raw, filename)
+            except AudioConversionError:
+                pass
+        return {
+            "bpm": round(bpm, 2) if bpm else None,
+            "key": key,
+            "camelot": _camelot.get(key, ""),
+            "integrated_lufs": round(lufs, 2) if lufs is not None else None,
+        }
+
+    # ── jobs — list / poll / cancel async jobs ────────────────────────────
+
+    @mcp.tool()
+    async def list_jobs(status: str | None = None) -> dict[str, Any]:
+        """List async jobs submitted to the job queue.
+        status: filter by 'pending', 'running', 'completed', 'failed', 'cancelled'."""
+        from .jobs import JOB_QUEUE  # noqa: PLC0415
+        jobs = await JOB_QUEUE.list_jobs(status=status)
+        return {"jobs": jobs}
+
+    @mcp.tool()
+    async def get_job(job_id: str) -> dict[str, Any]:
+        """Get the status and result of an async job by ID."""
+        from .jobs import JOB_QUEUE  # noqa: PLC0415
+        job = await JOB_QUEUE.get(job_id)
+        if job is None:
+            raise ValueError(f"job {job_id!r} not found")
+        return job.to_dict()
+
+    @mcp.tool()
+    async def cancel_job(job_id: str) -> dict[str, Any]:
+        """Cancel a running async job or remove a completed job from the queue."""
+        from .jobs import JOB_QUEUE  # noqa: PLC0415
+        job = await JOB_QUEUE.get(job_id)
+        if job is None:
+            raise ValueError(f"job {job_id!r} not found")
+        cancelled = await JOB_QUEUE.cancel(job_id)
+        return {"job_id": job_id, "cancelled": cancelled}
+
+    _log.info("mcp server initialised: 71 tools")
     return mcp

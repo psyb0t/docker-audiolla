@@ -776,6 +776,352 @@ def _run_ffmpeg(args: list[str]) -> None:
         raise AudioConversionError(f"ffmpeg failed: {stderr or 'unknown error'}")
 
 
+def clip_detect(raw: bytes, filename: str) -> dict:
+    """Detect digital clipping in audio.
+
+    Returns clip stats: clipped flag, clip_count, clip_ratio, peak_db,
+    duration_sec, sample_rate, channels.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    in_path = write_temp_input(raw, filename)
+    try:
+        wav_path = None
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-clip-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", in_path,
+            "-c:a", "pcm_f32le", wav_path,
+        ])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+    finally:
+        if os.path.exists(in_path):
+            os.unlink(in_path)
+        if wav_path and os.path.exists(wav_path):
+            os.unlink(wav_path)
+
+    total_samples = data.size
+    clipped_mask = np.abs(data) >= 0.999
+    clip_count = int(np.sum(clipped_mask))
+    peak = float(np.max(np.abs(data))) if total_samples > 0 else 0.0
+    peak_db = 20.0 * np.log10(peak) if peak > 0 else -96.0
+    duration_sec = data.shape[0] / sr if sr > 0 else 0.0
+    channels = data.shape[1] if data.ndim > 1 else 1
+
+    return {
+        "clipped": clip_count > 0,
+        "clip_count": clip_count,
+        "clip_ratio": round(clip_count / max(total_samples, 1), 6),
+        "peak_db": round(float(peak_db), 2),
+        "duration_sec": round(duration_sec, 6),
+        "sample_rate": int(sr),
+        "channels": channels,
+    }
+
+
+def mid_side_encode(raw: bytes, filename: str, output_format: str = "wav") -> bytes:
+    """Encode stereo audio to Mid/Side representation. Left=M, Right=S."""
+    import numpy as np
+    import soundfile as sf
+
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    out_wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-ms-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", in_path,
+            "-ac", "2", "-c:a", "pcm_f32le", wav_path,
+        ])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+        if data.shape[1] < 2:
+            raise AudioConversionError(
+                "mid_side_encode requires stereo audio; got mono"
+            )
+        L = data[:, 0]
+        R = data[:, 1]
+        M = (L + R) / 2.0
+        S = (L - R) / 2.0
+        ms_data = np.stack([M, S], axis=1)
+        out_wav_fd, out_wav_path = tempfile.mkstemp(
+            prefix="audiolla-ms-out-", suffix=".wav"
+        )
+        os.close(out_wav_fd)
+        sf.write(out_wav_path, ms_data, sr, subtype="FLOAT")
+        out_bytes, _ = encode_audio(out_wav_path, output_format)
+        return out_bytes
+    finally:
+        for p in (in_path, wav_path, out_wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+def mid_side_decode(raw: bytes, filename: str, output_format: str = "wav") -> bytes:
+    """Decode Mid/Side audio back to stereo L/R."""
+    import numpy as np
+    import soundfile as sf
+
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    out_wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-msd-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", in_path,
+            "-ac", "2", "-c:a", "pcm_f32le", wav_path,
+        ])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+        if data.shape[1] < 2:
+            raise AudioConversionError(
+                "mid_side_decode requires stereo audio; got mono"
+            )
+        M = data[:, 0]
+        S = data[:, 1]
+        L = M + S
+        R = M - S
+        lr_data = np.stack([L, R], axis=1)
+        out_wav_fd, out_wav_path = tempfile.mkstemp(
+            prefix="audiolla-msd-out-", suffix=".wav"
+        )
+        os.close(out_wav_fd)
+        sf.write(out_wav_path, lr_data, sr, subtype="FLOAT")
+        out_bytes, _ = encode_audio(out_wav_path, output_format)
+        return out_bytes
+    finally:
+        for p in (in_path, wav_path, out_wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+def beat_slice(
+    raw: bytes, filename: str, beats: list[float], output_format: str = "wav"
+) -> bytes:
+    """Slice audio at beat timestamps and return a ZIP of segments.
+
+    Segment files are named beat_001.<fmt>, beat_002.<fmt>, etc.
+    """
+    import soundfile as sf
+
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    if len(beats) < 1:
+        raise AudioConversionError("beats must contain at least one timestamp")
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-bslice-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path,
+        ])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+    finally:
+        for p in (in_path, wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+    total_frames = data.shape[0]
+    sorted_beats = sorted(beats)
+    boundaries = sorted_beats + [total_frames / sr]
+
+    segments: dict[str, bytes] = {}
+    for i in range(len(sorted_beats)):
+        start_frame = int(sorted_beats[i] * sr)
+        end_frame = int(boundaries[i + 1] * sr)
+        start_frame = max(0, min(start_frame, total_frames))
+        end_frame = max(start_frame, min(end_frame, total_frames))
+
+        seg_data = data[start_frame:end_frame]
+        if seg_data.shape[0] == 0:
+            continue
+
+        seg_fd, seg_path = tempfile.mkstemp(
+            prefix=f"audiolla-bseg{i}-", suffix=".wav"
+        )
+        os.close(seg_fd)
+        try:
+            sf.write(seg_path, seg_data, sr, subtype="FLOAT")
+            seg_bytes, _ = encode_audio(seg_path, output_format)
+        finally:
+            if os.path.exists(seg_path):
+                os.unlink(seg_path)
+
+        segments[f"beat_{i + 1:03d}"] = seg_bytes
+
+    return multi_stream_zip(segments, output_format)
+
+
+def conv_reverb(
+    raw: bytes,
+    filename: str,
+    ir_raw: bytes,
+    ir_filename: str,
+    *,
+    wet_mix: float = 0.3,
+    output_format: str = "wav",
+) -> bytes:
+    """Apply convolution reverb using an impulse response file.
+
+    wet_mix: 0.0 = dry only, 1.0 = wet only.
+    """
+    import soundfile as sf
+
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    if not (0.0 <= wet_mix <= 1.0):
+        raise AudioConversionError(
+            f"wet_mix must be in [0.0, 1.0], got {wet_mix}"
+        )
+
+    try:
+        import pedalboard
+    except ImportError as exc:
+        raise AudioConversionError(
+            "pedalboard is not installed; cannot run conv_reverb"
+        ) from exc
+
+    in_path = write_temp_input(raw, filename)
+    ir_path = write_temp_input(ir_raw, ir_filename)
+    wav_path = None
+    ir_wav_path = None
+    out_wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-cverb-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path,
+        ])
+        ir_wav_fd, ir_wav_path = tempfile.mkstemp(
+            prefix="audiolla-cverb-ir-", suffix=".wav"
+        )
+        os.close(ir_wav_fd)
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", ir_path, "-c:a", "pcm_f32le", ir_wav_path,
+        ])
+
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+        board = pedalboard.Pedalboard([
+            pedalboard.Convolution(ir_wav_path, mix=wet_mix),
+        ])
+        processed = board(data.T, sr).T
+
+        out_wav_fd, out_wav_path = tempfile.mkstemp(
+            prefix="audiolla-cverb-out-", suffix=".wav"
+        )
+        os.close(out_wav_fd)
+        sf.write(out_wav_path, processed, sr, subtype="FLOAT")
+        out_bytes, _ = encode_audio(out_wav_path, output_format)
+        return out_bytes
+    finally:
+        for p in (in_path, ir_path, wav_path, ir_wav_path, out_wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+def transient_shape(
+    raw: bytes,
+    filename: str,
+    *,
+    attack_gain_db: float = 0.0,
+    sustain_gain_db: float = 0.0,
+    output_format: str = "wav",
+) -> bytes:
+    """Shape transients via fast-attack/slow-attack compressor blending.
+
+    attack_gain_db > 0: boost transients (more punch).
+    attack_gain_db < 0: suppress transients (more compressed).
+    sustain_gain_db applies a gain to the sustain envelope.
+    """
+    import soundfile as sf
+
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+
+    try:
+        import pedalboard
+    except ImportError as exc:
+        raise AudioConversionError(
+            "pedalboard is not installed; cannot run transient_shape"
+        ) from exc
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    out_wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-trans-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg([
+            "ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path,
+        ])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+
+        attack_linear = 10 ** (attack_gain_db / 20.0)
+        sustain_linear = 10 ** (sustain_gain_db / 20.0)
+
+        if attack_gain_db < 0:
+            board = pedalboard.Pedalboard([
+                pedalboard.Compressor(
+                    threshold_db=-20.0,
+                    ratio=abs(attack_gain_db) + 1.0,
+                    attack_ms=1.0,
+                    release_ms=100.0,
+                ),
+            ])
+            processed = board(data.T, sr).T
+        else:
+            fast_board = pedalboard.Pedalboard([
+                pedalboard.Compressor(
+                    threshold_db=-30.0,
+                    ratio=2.0,
+                    attack_ms=100.0,
+                    release_ms=300.0,
+                ),
+            ])
+            sustain_component = fast_board(data.T, sr).T
+            transient_component = data - sustain_component
+            processed = (
+                transient_component * attack_linear
+                + sustain_component * sustain_linear
+            )
+
+        out_wav_fd, out_wav_path = tempfile.mkstemp(
+            prefix="audiolla-trans-out-", suffix=".wav"
+        )
+        os.close(out_wav_fd)
+        sf.write(out_wav_path, processed, sr, subtype="FLOAT")
+        out_bytes, _ = encode_audio(out_wav_path, output_format)
+        return out_bytes
+    finally:
+        for p in (in_path, wav_path, out_wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
 def multi_stream_zip(
     streams: dict[str, bytes], output_format: str
 ) -> bytes:

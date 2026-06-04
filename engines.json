@@ -149,6 +149,10 @@
     "noise-reduce": {
       "executor": "noise_reduce",
       "description": "Spectral noise reduction via noisereduce — stationary (constant hum/hiss) and non-stationary (adaptive) modes, no GPU required"
+    },
+    "metadata": {
+      "executor": "metadata",
+      "description": "Read and write audio file tags (ID3, Vorbis, FLAC) via mutagen"
     }
   }
 }

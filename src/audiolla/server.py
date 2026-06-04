@@ -49,12 +49,17 @@ from .audio import (
     SUPPORTED_OUTPUT_FORMATS,
     AudioConversionError,
     audio_info,
+    beat_slice,
+    clip_detect,
     concat_audio,
     content_type_for,
+    conv_reverb,
     convert_audio,
     eq_audio,
     fade_audio,
     loop_audio,
+    mid_side_decode,
+    mid_side_encode,
     mix_audio,
     multi_stream_zip,
     pan_audio,
@@ -63,8 +68,10 @@ from .audio import (
     speed_audio,
     split_audio_equal,
     stereo_width_audio,
+    transient_shape,
     trim_audio,
 )
+from .jobs import JOB_QUEUE
 from .auth import BearerAuthMiddleware
 from .engines import (
     build_engines,
@@ -79,6 +86,7 @@ from .engines import (
     is_fx_engine,
     is_loudness_engine,
     is_mastering_engine,
+    is_metadata_engine,
     is_melody_engine,
     is_midi_compose_engine,
     is_midi_inspect_engine,
@@ -160,10 +168,24 @@ async def _idle_sweeper() -> None:
 
 
 _sweeper_task: asyncio.Task[None] | None = None
+_job_sweeper_task: asyncio.Task[None] | None = None
 
 # Forward-declared so _lifespan can drive `MCP_SERVER.session_manager.run()`.
 # Assigned to the real FastMCP instance below, before the app starts.
 MCP_SERVER: Any = None
+
+
+async def _job_sweeper() -> None:
+    while True:
+        try:
+            await asyncio.sleep(300.0)
+            cleaned = await JOB_QUEUE.cleanup(config.JOB_TTL_SECONDS)
+            if cleaned:
+                log.info("job sweeper: cleaned %d expired jobs", cleaned)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("job sweeper iteration failed")
 
 
 @asynccontextmanager
@@ -188,20 +210,22 @@ async def _lifespan(_app: FastAPI):
         except Exception:  # noqa: BLE001
             log.exception("preload %s failed", slug)
 
-    global _sweeper_task
+    global _sweeper_task, _job_sweeper_task
     _sweeper_task = asyncio.create_task(_idle_sweeper(), name="audiolla-sweeper")
+    _job_sweeper_task = asyncio.create_task(_job_sweeper(), name="audiolla-job-sweeper")
     try:
         # MCP's streamable HTTP transport needs its session manager running
         # for the lifetime of the app.
         async with MCP_SERVER.session_manager.run():
             yield
     finally:
-        if _sweeper_task is not None:
-            _sweeper_task.cancel()
-            try:
-                await _sweeper_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for task in (_sweeper_task, _job_sweeper_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 app = FastAPI(
@@ -346,6 +370,32 @@ def _validate_engine_supports_device(slug: str) -> None:
         )
 
 
+def _require_engine(pred, description: str) -> Any:
+    for engine in ENGINES.values():
+        if pred(engine):
+            return engine
+    raise HTTPException(status_code=503, detail=f"{description} engine not configured")
+
+
+async def _submit_job(
+    coro,
+    *,
+    endpoint: str,
+    webhook_url: str | None,
+    job_id: str,
+) -> JSONResponse:
+    async def _wrap():
+        resp = await coro
+        if isinstance(resp, JSONResponse):
+            return json.loads(resp.body)
+        return {"size": len(resp.body) if hasattr(resp, "body") else 0}
+
+    await JOB_QUEUE.submit(
+        _wrap, job_id=job_id, endpoint=endpoint, webhook_url=webhook_url
+    )
+    return JSONResponse({"job_id": job_id, "status": "pending"}, status_code=202)
+
+
 async def _evict_siblings(current_slug: str) -> None:
     siblings = [
         (slug, e) for slug, e in ENGINES.items() if slug != current_slug and e.loaded()
@@ -371,6 +421,8 @@ async def separate(
     engine: str = Form(...),
     stems: list[str] = Form(default=[]),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Stem separation. Supports Demucs engines (htdemucs, htdemucs_ft,
     htdemucs_6s, mdx_extra) and UVR separation engines (uvr-vocal-bsr,
@@ -407,6 +459,32 @@ async def separate(
             status_code=400,
             detail=f"unknown stems {invalid} for engine {engine!r}; available: {available_stems}",
         )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _raw, _fn, _req, _fmt, _op = raw, filename, requested, output_format, output_path
+        _eff_op = _op or f"jobs/{job_id}.zip"
+
+        async def _coro():
+            await _evict_siblings(engine)
+            try:
+                stem_results = await eng.separate(_raw, _fn, stems=_req, output_format=_fmt)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if len(_req) == 1:
+                sn = _req[0]
+                return await write_output(
+                    stem_results[sn], media_type=content_type_for(_fmt),
+                    filename=f"{sn}.{_fmt}", output_path=_eff_op, output_url=None,
+                    extra_json={"engine": engine, "stem": sn, "output_format": _fmt},
+                )
+            return await write_output(
+                multi_stream_zip(stem_results, _fmt), media_type="application/zip",
+                filename=f"{engine}-stems.zip", output_path=_eff_op, output_url=None,
+                extra_json={"engine": engine, "stems": list(stem_results.keys()), "output_format": _fmt},
+            )
+
+        return await _submit_job(_coro(), endpoint="/v1/audio/separate", webhook_url=webhook_url, job_id=job_id)
 
     await _evict_siblings(engine)
 
@@ -461,6 +539,8 @@ async def master(
     preset: str | None = Form(default=None),
     target_lufs: float | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     _validate_output_format(output_format)
 
@@ -478,6 +558,16 @@ async def master(
         file_url=file_url,
     )
 
+    ref_raw: bytes | None = None
+    ref_filename: str | None = None
+    if mode == "reference":
+        ref_raw, ref_filename = await resolve_input(
+            file=reference,
+            file_path=reference_path,
+            file_url=reference_url,
+            field_prefix="reference",
+        )
+
     if mode == "reference":
         engine_slug = "matchering"
         eng = ENGINES.get(engine_slug)
@@ -489,24 +579,6 @@ async def master(
             raise HTTPException(
                 status_code=400, detail="matchering engine does not support mastering"
             )
-        ref_raw, ref_filename = await resolve_input(
-            file=reference,
-            file_path=reference_path,
-            file_url=reference_url,
-            field_prefix="reference",
-        )
-        await _evict_siblings(engine_slug)
-        try:
-            audio_bytes = await eng.master_reference(
-                raw,
-                filename,
-                ref_raw,
-                ref_filename,
-                target_lufs=target_lufs,
-                output_format=output_format,
-            )
-        except AudioConversionError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
         engine_slug = "pedalboard-chain"
         eng = ENGINES.get(engine_slug)
@@ -525,17 +597,50 @@ async def master(
                 status_code=400,
                 detail=f"unknown preset {preset!r}; available: {available_presets}",
             )
-        await _evict_siblings(engine_slug)
-        try:
-            audio_bytes = await eng.master_chain(
-                raw,
-                filename,
-                preset=preset,
-                target_lufs=target_lufs,
-                output_format=output_format,
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _rr, _rfn = raw, filename, ref_raw, ref_filename
+        _esl, _eng = engine_slug, eng
+
+        async def _master_coro():
+            await _evict_siblings(_esl)
+            try:
+                if mode == "reference":
+                    _b = await _eng.master_reference(
+                        _raw, _fn, _rr, _rfn,
+                        target_lufs=target_lufs, output_format=output_format,
+                    )
+                else:
+                    _b = await _eng.master_chain(
+                        _raw, _fn, preset=preset,
+                        target_lufs=target_lufs, output_format=output_format,
+                    )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"mastered.{output_format}", output_path=_eff_op, output_url=None,
+                extra_json={"engine": _esl, "mode": mode, "output_format": output_format},
             )
-        except AudioConversionError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return await _submit_job(_master_coro(), endpoint="/v1/audio/master", webhook_url=webhook_url, job_id=job_id)
+
+    await _evict_siblings(engine_slug)
+    try:
+        if mode == "reference":
+            audio_bytes = await eng.master_reference(
+                raw, filename, ref_raw, ref_filename,
+                target_lufs=target_lufs, output_format=output_format,
+            )
+        else:
+            audio_bytes = await eng.master_chain(
+                raw, filename, preset=preset,
+                target_lufs=target_lufs, output_format=output_format,
+            )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return await write_output(
         audio_bytes,
@@ -604,6 +709,8 @@ async def transform(
     output_url: str | None = Form(default=None),
     operations: str = Form(...),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     _validate_output_format(output_format)
 
@@ -660,6 +767,24 @@ async def transform(
         file_url=file_url,
     )
 
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _transform_coro():
+            try:
+                _b = await _eng.transform(_raw, _fn, operations=ops, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"transformed.{output_format}", output_path=_eff_op, output_url=None,
+                extra_json={"engine": engine_slug, "operations": ops, "output_format": output_format},
+            )
+
+        return await _submit_job(_transform_coro(), endpoint="/v1/audio/transform", webhook_url=webhook_url, job_id=job_id)
+
     try:
         audio_bytes = await eng.transform(
             raw, filename, operations=ops, output_format=output_format
@@ -709,6 +834,8 @@ async def normalize(
     output_url: str | None = Form(default=None),
     target_lufs: float = Form(...),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Any:
     """Normalize audio to a target LUFS level via pyloudnorm (gain scaling).
     Common targets: -14 (Spotify/YouTube), -16 (Apple Music), -23 (broadcast EBU R128)."""
@@ -718,6 +845,25 @@ async def normalize(
     if eng is None or not is_loudness_engine(eng):
         raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _norm_coro():
+            try:
+                _b, _lufs = await _eng.normalize_lufs(_raw, _fn, target_lufs=target_lufs, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"normalized.{output_format}", output_path=_eff_op, output_url=None,
+                extra_json={"measured_lufs": _lufs, "target_lufs": target_lufs, "output_format": output_format},
+            )
+
+        return await _submit_job(_norm_coro(), endpoint="/v1/audio/normalize", webhook_url=webhook_url, job_id=job_id)
+
     try:
         audio_bytes, lufs = await eng.normalize_lufs(
             raw, filename, target_lufs=target_lufs, output_format=output_format
@@ -754,6 +900,8 @@ async def fx(
     output_url: str | None = Form(default=None),
     effects: str = Form(...),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     _validate_output_format(output_format)
 
@@ -785,6 +933,24 @@ async def fx(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng, _esl = raw, filename, eng, engine_slug
+
+        async def _fx_coro():
+            try:
+                _b = await _eng.fx(_raw, _fn, effects=chain, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"fx.{output_format}", output_path=_eff_op, output_url=None,
+                extra_json={"engine": _esl, "effects": chain, "output_format": output_format},
+            )
+
+        return await _submit_job(_fx_coro(), endpoint="/v1/audio/fx", webhook_url=webhook_url, job_id=job_id)
 
     try:
         audio_bytes = await eng.fx(
@@ -857,8 +1023,8 @@ async def midi_compose(
                 status_code=400,
                 detail=f"invalid `spec` JSON: {exc}",
             ) from exc
-        output_path = form.get("output_path") or output_path or None  # type: ignore[assignment]
-        output_url = form.get("output_url") or output_url or None  # type: ignore[assignment]
+        output_path = form.get("output_path") or output_path or None
+        output_url = form.get("output_url") or output_url or None
         if output_path is not None:
             output_path = str(output_path) or None
         if output_url is not None:
@@ -1078,6 +1244,8 @@ async def beats(
     click_track: bool = Form(default=False),
     output_format: str = Form(default="wav"),
     start_bpm: float | None = Form(default=None),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Any:
     """Returns JSON with tempo + beat positions. With ``click_track=true``
     also synthesises a metronome-mixed audio render and includes a
@@ -1095,6 +1263,28 @@ async def beats(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _beats_coro():
+            import base64 as _b64
+            try:
+                _result = await _eng.beats(_raw, _fn, click_track=click_track, output_format=output_format, start_bpm=start_bpm)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if click_track and _eff_op:
+                _ab = _b64.b64decode(_result.pop("click_track_base64"))
+                return await write_output(
+                    _ab, media_type=content_type_for(output_format),
+                    filename=f"clicks.{output_format}", output_path=_eff_op, output_url=None, extra_json=_result,
+                )
+            return _result
+
+        return await _submit_job(_beats_coro(), endpoint="/v1/audio/beats", webhook_url=webhook_url, job_id=job_id)
+
     try:
         result = await eng.beats(
             raw,
@@ -1107,9 +1297,6 @@ async def beats(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if click_track and (output_path or output_url):
-        # Caller wants the audio routed out-of-band; pull it from the
-        # engine response and use write_output. JSON still carries
-        # beats / tempo so the caller gets both.
         import base64 as _b64
 
         audio_bytes = _b64.b64decode(result.pop("click_track_base64"))
@@ -1163,6 +1350,8 @@ async def melody(
     fmin: float = Form(default=65.0),
     fmax: float = Form(default=2093.0),
     as_midi: bool = Form(default=False),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Any:
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_melody_engine(eng):
@@ -1175,6 +1364,26 @@ async def melody(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.mid"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _melody_coro():
+            import base64 as _b64
+            try:
+                _result = await _eng.melody(_raw, _fn, fmin=fmin, fmax=fmax, as_midi=as_midi)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if as_midi and _eff_op:
+                _mb = _b64.b64decode(_result.pop("midi_base64"))
+                _result.pop("midi_size", None)
+                return await write_output(_mb, media_type="audio/midi", filename="melody.mid", output_path=_eff_op, output_url=None, extra_json=_result)
+            return _result
+
+        return await _submit_job(_melody_coro(), endpoint="/v1/audio/melody", webhook_url=webhook_url, job_id=job_id)
+
     try:
         result = await eng.melody(
             raw,
@@ -1243,6 +1452,8 @@ async def silence(
     min_duration_sec: float = Form(default=0.5),
     trim_mode: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Any:
     _validate_output_format(output_format)
     eng = ENGINES.get("silence-detect")
@@ -1256,6 +1467,24 @@ async def silence(
         file_path=file_path,
         file_url=file_url,
     )
+    if async_job and trim_mode:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _silence_coro():
+            import base64 as _b64
+            try:
+                _result = await _eng.detect(_raw, _fn, threshold_db=threshold_db, min_duration_sec=min_duration_sec, trim_mode=trim_mode, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if trim_mode and _eff_op:
+                _ab = _b64.b64decode(_result.pop("trimmed_audio_base64"))
+                return await write_output(_ab, media_type=content_type_for(output_format), filename=f"trimmed.{output_format}", output_path=_eff_op, output_url=None, extra_json=_result)
+            return _result
+
+        return await _submit_job(_silence_coro(), endpoint="/v1/audio/silence", webhook_url=webhook_url, job_id=job_id)
+
     try:
         result = await eng.detect(
             raw,
@@ -1297,6 +1526,8 @@ async def spectrogram(
     height: int = Form(default=1080),
     color: str = Form(default="intensity"),
     scale: str = Form(default="log"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
@@ -1309,6 +1540,21 @@ async def spectrogram(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.png"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _spec_coro():
+            try:
+                _p = await _eng.spectrogram(_raw, _fn, width=width, height=height, color=color, scale=scale)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "kind": "spectrogram"})
+
+        return await _submit_job(_spec_coro(), endpoint="/v1/audio/spectrogram", webhook_url=webhook_url, job_id=job_id)
+
     try:
         png = await eng.spectrogram(
             raw,
@@ -1344,6 +1590,8 @@ async def waveform(
     width: int = Form(default=1920),
     height: int = Form(default=320),
     color: str = Form(default="lime"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
@@ -1356,6 +1604,21 @@ async def waveform(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.png"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _waveform_coro():
+            try:
+                _p = await _eng.waveform(_raw, _fn, width=width, height=height, color=color)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "kind": "waveform"})
+
+        return await _submit_job(_waveform_coro(), endpoint="/v1/audio/waveform", webhook_url=webhook_url, job_id=job_id)
+
     try:
         png = await eng.waveform(
             raw,
@@ -1392,6 +1655,8 @@ async def visualize(
     height: int = Form(default=720),
     fps: int = Form(default=30),
     container: str = Form(default="mp4"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
@@ -1409,6 +1674,22 @@ async def visualize(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{container}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _viz_coro():
+            try:
+                _v = await _eng.visualize(_raw, _fn, mode=mode, width=width, height=height, fps=fps, container=container)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            _mt = "video/mp4" if container == "mp4" else "video/webm"
+            return await write_output(_v, media_type=_mt, filename=f"visualize.{container}", output_path=_eff_op, output_url=None, extra_json={"engine": "ffmpeg-render", "mode": mode, "container": container})
+
+        return await _submit_job(_viz_coro(), endpoint="/v1/audio/visualize", webhook_url=webhook_url, job_id=job_id)
+
     try:
         video = await eng.visualize(
             raw,
@@ -1485,6 +1766,8 @@ async def dereverb(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     _validate_output_format(output_format)
     eng = ENGINES.get(engine)
@@ -1503,6 +1786,21 @@ async def dereverb(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _dereverb_coro():
+            try:
+                _b = await _eng.restore(_raw, _fn, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_b, media_type=content_type_for(output_format), filename=f"dereverb.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
+
+        return await _submit_job(_dereverb_coro(), endpoint=f"/v1/audio/dereverb/{engine}", webhook_url=webhook_url, job_id=job_id)
+
     try:
         audio_bytes = await eng.restore(raw, filename, output_format=output_format)
     except AudioConversionError as exc:
@@ -1529,6 +1827,8 @@ async def deecho(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     _validate_output_format(output_format)
     eng = ENGINES.get(engine)
@@ -1547,6 +1847,21 @@ async def deecho(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _deecho_coro():
+            try:
+                _b = await _eng.restore(_raw, _fn, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_b, media_type=content_type_for(output_format), filename=f"deecho.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
+
+        return await _submit_job(_deecho_coro(), endpoint=f"/v1/audio/deecho/{engine}", webhook_url=webhook_url, job_id=job_id)
+
     try:
         audio_bytes = await eng.restore(raw, filename, output_format=output_format)
     except AudioConversionError as exc:
@@ -1573,6 +1888,8 @@ async def denoise(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     _validate_output_format(output_format)
     eng = ENGINES.get(engine)
@@ -1591,6 +1908,21 @@ async def denoise(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _denoise_coro():
+            try:
+                _b = await _eng.restore(_raw, _fn, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_b, media_type=content_type_for(output_format), filename=f"denoise.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
+
+        return await _submit_job(_denoise_coro(), endpoint=f"/v1/audio/denoise/{engine}", webhook_url=webhook_url, job_id=job_id)
+
     try:
         audio_bytes = await eng.restore(raw, filename, output_format=output_format)
     except AudioConversionError as exc:
@@ -1719,6 +2051,8 @@ async def to_midi(
     maximum_frequency: float | None = Form(default=None),
     multiple_pitch_bends: bool = Form(default=False),
     melodia_trick: bool = Form(default=True),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Convert audio to a polyphonic MIDI file via Spotify basic-pitch."""
     eng = ENGINES.get(engine)
@@ -1738,6 +2072,26 @@ async def to_midi(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.mid"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _tomidi_coro():
+            await _evict_siblings(engine)
+            try:
+                _mb = await _eng.to_midi(
+                    _raw, _fn, onset_threshold=onset_threshold, frame_threshold=frame_threshold,
+                    minimum_note_length_ms=minimum_note_length_ms, minimum_frequency=minimum_frequency,
+                    maximum_frequency=maximum_frequency, multiple_pitch_bends=multiple_pitch_bends,
+                    melodia_trick=melodia_trick,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_mb, media_type="audio/midi", filename="output.mid", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": "mid", "size": len(_mb)})
+
+        return await _submit_job(_tomidi_coro(), endpoint=f"/v1/audio/to_midi/{engine}", webhook_url=webhook_url, job_id=job_id)
 
     await _evict_siblings(engine)
 
@@ -1782,6 +2136,8 @@ async def audio_enhance(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Neural speech and vocal enhancement via DeepFilterNet DF3."""
     _validate_output_format(output_format)
@@ -1802,6 +2158,21 @@ async def audio_enhance(
         file_path=file_path,
         file_url=file_url,
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _enhance_coro():
+            await _evict_siblings(engine)
+            try:
+                _b = await _eng.enhance(_raw, _fn, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(_b, media_type=content_type_for(output_format), filename=f"enhanced.{output_format}", output_path=_eff_op, output_url=None, extra_json={"engine": engine, "output_format": output_format})
+
+        return await _submit_job(_enhance_coro(), endpoint=f"/v1/audio/enhance/{engine}", webhook_url=webhook_url, job_id=job_id)
 
     await _evict_siblings(engine)
 
@@ -1955,6 +2326,8 @@ async def stretch(
     tempo_factor: float = Form(default=1.0),
     pitch_semitones: float = Form(default=0.0),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Independently control playback speed (tempo_factor) and key (pitch_semitones).
     tempo_factor=0.5 = half speed; pitch_semitones=12 = one octave up."""
@@ -1963,6 +2336,33 @@ async def stretch(
     if eng is None or not is_stretch_engine(eng):
         raise HTTPException(status_code=404, detail="stretch engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+        _tf, _ps = tempo_factor, pitch_semitones
+
+        async def _stretch_coro():
+            try:
+                _b = await _eng.stretch(
+                    _raw, _fn, tempo_factor=_tf, pitch_semitones=_ps,
+                    output_format=output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"stretched.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"tempo_factor": _tf, "pitch_semitones": _ps},
+            )
+
+        return await _submit_job(
+            _stretch_coro(), endpoint="/v1/audio/stretch",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await eng.stretch(
             raw,
@@ -2043,6 +2443,8 @@ async def hpss(
     margin: float = Form(default=1.0),
     kernel_size: int = Form(default=31),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Harmonic/percussive source separation via librosa HPSS median filter.
     Returns a ZIP containing harmonic.<fmt> (tonal content) and
@@ -2052,6 +2454,31 @@ async def hpss(
     if eng is None or not is_hpss_engine(eng):
         raise HTTPException(status_code=404, detail="hpss engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.zip"
+        _raw, _fn, _eng = raw, filename, eng
+        _mg, _ks = margin, kernel_size
+
+        async def _hpss_coro():
+            try:
+                _stems = await _eng.hpss(
+                    _raw, _fn, margin=_mg, kernel_size=_ks, output_format=output_format
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                multi_stream_zip(_stems, output_format), media_type="application/zip",
+                filename="hpss-stems.zip", output_path=_eff_op, output_url=None,
+                extra_json={"stems": list(_stems.keys()), "output_format": output_format},
+            )
+
+        return await _submit_job(
+            _hpss_coro(), endpoint="/v1/audio/hpss",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         stems = await eng.hpss(
             raw, filename, margin=margin, kernel_size=kernel_size, output_format=output_format
@@ -2081,6 +2508,8 @@ async def noise_reduce(
     stationary: bool = Form(default=False),
     prop_decrease: float = Form(default=1.0),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Spectral noise reduction via noisereduce. stationary=True assumes a
     constant noise profile (hum, tape hiss); default non-stationary adapts
@@ -2096,6 +2525,36 @@ async def noise_reduce(
     if eng is None or not is_noise_reduce_engine(eng):
         raise HTTPException(status_code=404, detail="noise-reduce engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+        _st, _pd = stationary, prop_decrease
+
+        async def _nr_coro():
+            try:
+                _b = await _eng.reduce(
+                    _raw, _fn, stationary=_st, prop_decrease=_pd,
+                    output_format=output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"denoised.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={
+                    "stationary": _st, "prop_decrease": _pd,
+                    "output_format": output_format,
+                },
+            )
+
+        return await _submit_job(
+            _nr_coro(), endpoint="/v1/audio/noise-reduce",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await eng.reduce(
             raw, filename,
@@ -2150,6 +2609,8 @@ async def trim(
     start_sec: float = Form(default=0.0),
     end_sec: float = Form(...),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Cut audio to [start_sec, end_sec). end_sec required."""
     _validate_output_format(output_format)
@@ -2158,6 +2619,30 @@ async def trim(
     if end_sec <= start_sec:
         raise HTTPException(status_code=400, detail="end_sec must be > start_sec")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _ss, _es = start_sec, end_sec
+
+        async def _trim_coro():
+            try:
+                _b = await asyncio.to_thread(trim_audio, _raw, _fn, _ss, _es, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"trimmed.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"start_sec": _ss, "end_sec": _es, "output_format": output_format},
+            )
+
+        return await _submit_job(
+            _trim_coro(), endpoint="/v1/audio/trim",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             trim_audio, raw, filename, start_sec, end_sec, output_format
@@ -2183,6 +2668,8 @@ async def mix(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Mix multiple staged/URL tracks with per-track gain.
     tracks is a JSON array: [{"file_path":"...", "gain_db": 0.0}, ...]
@@ -2214,6 +2701,28 @@ async def mix(
             ) from exc
         mix_inputs.append((raw, filename, gain_db))
 
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _inputs = mix_inputs
+
+        async def _mix_coro():
+            try:
+                _b = await asyncio.to_thread(mix_audio, _inputs, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"mixed.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"track_count": len(_inputs), "output_format": output_format},
+            )
+
+        return await _submit_job(
+            _mix_coro(), endpoint="/v1/audio/mix",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(mix_audio, mix_inputs, output_format)
     except AudioConversionError as exc:
@@ -2237,6 +2746,8 @@ async def concat(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Concatenate N audio files in order.
     files is a JSON array: [{"file_path": "..."}, {"file_url": "..."}, ...]
@@ -2262,6 +2773,28 @@ async def concat(
                 status_code=exc.status_code, detail=f"file {i}: {exc.detail}"
             ) from exc
         concat_inputs.append((raw, filename))
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _inputs = concat_inputs
+
+        async def _concat_coro():
+            try:
+                _b = await asyncio.to_thread(concat_audio, _inputs, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"concat.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"file_count": len(_inputs), "output_format": output_format},
+            )
+
+        return await _submit_job(
+            _concat_coro(), endpoint="/v1/audio/concat",
+            webhook_url=webhook_url, job_id=job_id,
+        )
 
     try:
         audio_bytes = await asyncio.to_thread(concat_audio, concat_inputs, output_format)
@@ -2289,6 +2822,8 @@ async def speed(
     output_url: str | None = Form(default=None),
     speed: float = Form(...),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Change playback speed without pitch shift via ffmpeg atempo.
     speed=0.5 halves speed; speed=2.0 doubles. Range: 0.1–10.0."""
@@ -2299,6 +2834,29 @@ async def speed(
             detail=f"speed must be in [0.1, 10.0], got {speed}",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _sp = raw, filename, speed
+
+        async def _speed_coro():
+            try:
+                _b = await asyncio.to_thread(speed_audio, _raw, _fn, _sp, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"speed.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"speed": _sp, "output_format": output_format},
+            )
+
+        return await _submit_job(
+            _speed_coro(), endpoint="/v1/audio/speed",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(speed_audio, raw, filename, speed, output_format)
     except AudioConversionError as exc:
@@ -2326,6 +2884,8 @@ async def convert(
     output_format: str = Form(default="wav"),
     sample_rate: int | None = Form(default=None),
     channels: int | None = Form(default=None),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Re-encode audio to a different format, sample rate, or channel count."""
     _validate_output_format(output_format)
@@ -2340,6 +2900,30 @@ async def convert(
             detail=f"channels must be 1 or 2, got {channels}",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _sr, _ch = sample_rate, channels
+
+        async def _convert_coro():
+            try:
+                _b = await asyncio.to_thread(convert_audio, _raw, _fn, output_format, _sr, _ch)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"converted.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"output_format": output_format, "sample_rate": _sr, "channels": _ch},
+            )
+
+        return await _submit_job(
+            _convert_coro(), endpoint="/v1/audio/convert",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             convert_audio, raw, filename, output_format, sample_rate, channels
@@ -2483,6 +3067,8 @@ async def fade(
     fade_out: float = Form(default=0.0),
     curve: str = Form(default="tri"),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Apply fade-in and/or fade-out. curve options: tri, qsin, esin, hsin, log, ipar,
     qua, cub, squ, cbr, par, exp, lin. At least one of fade_in/fade_out must be > 0."""
@@ -2493,6 +3079,33 @@ async def fade(
             detail="at least one of fade_in or fade_out must be > 0",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _fi, _fo, _cv = fade_in, fade_out, curve
+
+        async def _fade_coro():
+            try:
+                _b = await asyncio.to_thread(
+                    fade_audio, _raw, _fn, output_format,
+                    fade_in=_fi, fade_out=_fo, curve=_cv,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"faded.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"fade_in": _fi, "fade_out": _fo, "curve": _cv},
+            )
+
+        return await _submit_job(
+            _fade_coro(), endpoint="/v1/audio/fade",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             fade_audio, raw, filename, output_format,
@@ -2521,10 +3134,34 @@ async def reverse(
     output_path: str | None = Form(default=None),
     output_url: str | None = Form(default=None),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Reverse audio playback direction via ffmpeg areverse."""
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+
+        async def _reverse_coro():
+            try:
+                _b = await asyncio.to_thread(reverse_audio, _raw, _fn, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"reversed.{output_format}",
+                output_path=_eff_op, output_url=None,
+            )
+
+        return await _submit_job(
+            _reverse_coro(), endpoint="/v1/audio/reverse",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             reverse_audio, raw, filename, output_format
@@ -2552,6 +3189,8 @@ async def loop(
     output_url: str | None = Form(default=None),
     count: int = Form(default=2),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Repeat audio count times (minimum 2). Uses ffmpeg aloop filter."""
     _validate_output_format(output_format)
@@ -2561,6 +3200,28 @@ async def loop(
             detail=f"count must be >= 2, got {count}",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _ct = raw, filename, count
+
+        async def _loop_coro():
+            try:
+                _b = await asyncio.to_thread(loop_audio, _raw, _fn, output_format, _ct)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"looped.{output_format}",
+                output_path=_eff_op, output_url=None, extra_json={"count": _ct},
+            )
+
+        return await _submit_job(
+            _loop_coro(), endpoint="/v1/audio/loop",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             loop_audio, raw, filename, output_format, count
@@ -2590,6 +3251,8 @@ async def bpm_match(
     target_bpm: float = Form(...),
     pitch_semitones: float = Form(default=0.0),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Detect source BPM via librosa then time-stretch to target_bpm.
     Requires both librosa-analyze and stretch engines."""
@@ -2612,6 +3275,45 @@ async def bpm_match(
             detail="stretch engine not configured",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _le, _se = librosa_eng, stretch_eng
+        _tb, _ps = target_bpm, pitch_semitones
+
+        async def _bpm_match_coro():
+            try:
+                _beats = await _le.beats(_raw, _fn)
+                _src_bpm = _beats["tempo_bpm"]
+                if not _src_bpm:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="could not detect source BPM from audio",
+                    )
+                _tf = _tb / _src_bpm
+                _b = await _se.stretch(
+                    _raw, _fn, tempo_factor=_tf, pitch_semitones=_ps,
+                    output_format=output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"bpm_matched.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={
+                    "source_bpm": round(_src_bpm, 2), "target_bpm": _tb,
+                    "tempo_factor": round(_tf, 4), "pitch_semitones": _ps,
+                },
+            )
+
+        return await _submit_job(
+            _bpm_match_coro(), endpoint="/v1/audio/bpm-match",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         beats_result = await librosa_eng.beats(raw, filename)
         source_bpm = beats_result["tempo_bpm"]
@@ -2657,6 +3359,8 @@ async def stereo_width(
     output_url: str | None = Form(default=None),
     width: float = Form(default=1.0),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Adjust stereo width via M/S processing. width=0.0 → mono, 1.0 → original,
     >1.0 → wider. Range: [0.0, 3.0]."""
@@ -2667,6 +3371,28 @@ async def stereo_width(
             detail=f"width must be in [0.0, 3.0], got {width}",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _w = raw, filename, width
+
+        async def _sw_coro():
+            try:
+                _b = await asyncio.to_thread(stereo_width_audio, _raw, _fn, output_format, _w)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"stereo_width.{output_format}",
+                output_path=_eff_op, output_url=None, extra_json={"width": _w},
+            )
+
+        return await _submit_job(
+            _sw_coro(), endpoint="/v1/audio/stereo-width",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             stereo_width_audio, raw, filename, output_format, width
@@ -2729,6 +3455,8 @@ async def split(
     threshold_db: float = Form(default=-30.0),
     min_duration_sec: float = Form(default=0.5),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Split audio into segments. mode=equal (requires count>=2) or mode=silence
     (uses threshold_db/min_duration_sec via silence-detect engine).
@@ -2781,6 +3509,25 @@ async def split(
 
     zip_dict = {f"segment_{i:03d}": seg for i, seg in enumerate(segments)}
     zip_bytes = multi_stream_zip(zip_dict, output_format)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.zip"
+        _zb, _mode = zip_bytes, mode
+        _seg_count = len(segments)
+
+        async def _split_coro():
+            return await write_output(
+                _zb, media_type="application/zip", filename="split.zip",
+                output_path=_eff_op, output_url=None,
+                extra_json={"segments": _seg_count, "mode": _mode},
+            )
+
+        return await _submit_job(
+            _split_coro(), endpoint="/v1/audio/split",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     return await write_output(
         zip_bytes,
         media_type="application/zip",
@@ -2803,6 +3550,8 @@ async def pan(
     output_url: str | None = Form(default=None),
     position: float = Form(default=0.0),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Pan audio in the stereo field. position: -1.0=hard left, 0.0=center, 1.0=hard right."""
     _validate_output_format(output_format)
@@ -2812,6 +3561,28 @@ async def pan(
             detail=f"position must be in [-1.0, 1.0], got {position}",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _pos = raw, filename, position
+
+        async def _pan_coro():
+            try:
+                _b = await asyncio.to_thread(pan_audio, _raw, _fn, output_format, _pos)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"panned.{output_format}",
+                output_path=_eff_op, output_url=None, extra_json={"position": _pos},
+            )
+
+        return await _submit_job(
+            _pan_coro(), endpoint="/v1/audio/pan",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             pan_audio, raw, filename, output_format, position
@@ -2840,6 +3611,8 @@ async def eq(
     output_url: str | None = Form(default=None),
     bands: str = Form(...),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Parametric EQ via ffmpeg equalizer filter.
     bands is a JSON array: [{"freq": 1000, "gain_db": 3.0, "width_hz": 100}, ...]"""
@@ -2854,6 +3627,29 @@ async def eq(
             detail=f"invalid bands JSON: {exc}",
         ) from exc
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _bl = raw, filename, band_list
+
+        async def _eq_coro():
+            try:
+                _b = await asyncio.to_thread(eq_audio, _raw, _fn, output_format, _bl)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"eq.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"band_count": len(_bl)},
+            )
+
+        return await _submit_job(
+            _eq_coro(), endpoint="/v1/audio/eq",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             eq_audio, raw, filename, output_format, band_list
@@ -2882,6 +3678,8 @@ async def key_match(
     output_url: str | None = Form(default=None),
     target_key: str = Form(...),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Detect source key via chord-detect then pitch-shift to target_key.
     target_key: note name, e.g. C, F#, Bb, D#. Case-insensitive.
@@ -2901,6 +3699,39 @@ async def key_match(
             detail="stretch engine not configured",
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _cde, _se = chord_detect_eng, stretch_eng
+        _ts, _tk = target_semitone, target_key
+
+        async def _km_coro():
+            try:
+                _src = await _cde.detect_chords(_raw, _fn)
+                _skey = _src["key"]
+                _ss = _parse_key_root(_skey)
+                _diff = (_ts - _ss) % 12
+                if _diff > 6:
+                    _diff -= 12
+                _b = await _se.stretch(_raw, _fn, tempo_factor=1.0, pitch_semitones=float(_diff), output_format=output_format)
+            except HTTPException:
+                raise
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"key_matched.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"source_key": _skey, "target_key": _tk.strip(), "semitones": _diff},
+            )
+
+        return await _submit_job(
+            _km_coro(), endpoint="/v1/audio/key-match",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         source_result = await chord_detect_eng.detect_chords(raw, filename)
         source_key = source_result["key"]
@@ -2951,6 +3782,8 @@ async def sidechain_duck_endpoint(
     attack_ms: float = Form(default=10.0),
     release_ms: float = Form(default=200.0),
     output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
 ) -> Response:
     """Duck primary audio when trigger audio is loud (voiceover-over-music effect).
     threshold_db: trigger level. ratio: compression ratio. attack_ms/release_ms: timing."""
@@ -2962,6 +3795,34 @@ async def sidechain_duck_endpoint(
         file_url=trigger_file_url,
         field_prefix="trigger_file",
     )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _traw, _tfn = trigger_raw, trigger_filename
+        _tdb, _r, _a, _rel = threshold_db, ratio, attack_ms, release_ms
+
+        async def _duck_coro():
+            try:
+                _b = await asyncio.to_thread(
+                    sidechain_duck, _raw, _fn, _traw, _tfn,
+                    output_format, _tdb, _r, _a, _rel,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"ducked.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"threshold_db": _tdb, "ratio": _r},
+            )
+
+        return await _submit_job(
+            _duck_coro(), endpoint="/v1/audio/sidechain-duck",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
     try:
         audio_bytes = await asyncio.to_thread(
             sidechain_duck,
@@ -2980,6 +3841,643 @@ async def sidechain_duck_endpoint(
         output_url=output_url,
         extra_json={"threshold_db": threshold_db, "ratio": ratio},
     )
+
+
+# ── /v1/audio/metadata — read/write audio file tags ─────────────────────────
+
+
+@app.post("/v1/audio/metadata")
+async def audio_metadata(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    tags: str | None = Form(default=None),
+) -> JSONResponse:
+    """Read or write audio file tags (ID3, Vorbis, FLAC) via mutagen.
+    If tags is provided (JSON object), writes those tags and returns the updated
+    tag set. Without tags, reads and returns all tags."""
+    eng = ENGINES.get("metadata")
+    if eng is None or not is_metadata_engine(eng):
+        raise HTTPException(status_code=404, detail="metadata engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    write_tags: dict | None = None
+    if tags is not None:
+        try:
+            write_tags = json.loads(tags)
+            if not isinstance(write_tags, dict):
+                raise ValueError("tags must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid tags JSON: {exc}") from exc
+
+    try:
+        if write_tags is not None:
+            updated_bytes = await eng.write_tags(raw, filename, write_tags)
+            updated_tags = await eng.read_tags(updated_bytes, filename)
+            return JSONResponse(updated_tags)
+        result = await eng.read_tags(raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/clip-detect — detect digital clipping ─────────────────────────
+
+
+@app.post("/v1/audio/clip-detect")
+async def clip_detect_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+) -> JSONResponse:
+    """Detect digital clipping via numpy. Returns clipped, clip_count, clip_ratio,
+    peak_db, duration_sec, sample_rate, channels."""
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await asyncio.to_thread(clip_detect, raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/mid-side — M/S encode or decode ───────────────────────────────
+
+
+@app.post("/v1/audio/mid-side")
+async def mid_side(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    mode: str = Form(...),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Encode stereo to Mid/Side or decode M/S back to stereo.
+    mode: 'encode' (L/R → M/S) or 'decode' (M/S → L/R)."""
+    if mode not in ("encode", "decode"):
+        raise HTTPException(status_code=400, detail="mode must be 'encode' or 'decode'")
+    _validate_output_format(output_format)
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _mode = raw, filename, mode
+
+        async def _ms_coro():
+            try:
+                if _mode == "encode":
+                    _b = await asyncio.to_thread(mid_side_encode, _raw, _fn, output_format)
+                else:
+                    _b = await asyncio.to_thread(mid_side_decode, _raw, _fn, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"mid_side_{_mode}.{output_format}",
+                output_path=_eff_op, output_url=None, extra_json={"mode": _mode},
+            )
+
+        return await _submit_job(
+            _ms_coro(), endpoint="/v1/audio/mid-side",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        if mode == "encode":
+            audio_bytes = await asyncio.to_thread(mid_side_encode, raw, filename, output_format)
+        else:
+            audio_bytes = await asyncio.to_thread(mid_side_decode, raw, filename, output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"mid_side_{mode}.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"mode": mode},
+    )
+
+
+# ── /v1/audio/beat-slice — slice audio at beat timestamps ───────────────────
+
+
+@app.post("/v1/audio/beat-slice")
+async def beat_slice_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Slice audio at beat positions detected by librosa-analyze.
+    Returns a ZIP of numbered beat slices. Requires librosa-analyze engine."""
+    _validate_output_format(output_format)
+    librosa_eng = ENGINES.get("librosa-analyze")
+    if librosa_eng is None or not is_beats_engine(librosa_eng):
+        raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.zip"
+        _raw, _fn, _le = raw, filename, librosa_eng
+
+        async def _bs_coro():
+            try:
+                beats_result = await _le.beats(_raw, _fn)
+                beat_times = beats_result.get("beats", [])
+                if not beat_times:
+                    raise HTTPException(status_code=400, detail="no beats detected in audio")
+                _b = await asyncio.to_thread(beat_slice, _raw, _fn, beat_times, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type="application/zip", filename="beat_slices.zip",
+                output_path=_eff_op, output_url=None,
+                extra_json={"beat_count": len(beat_times), "output_format": output_format},
+            )
+
+        return await _submit_job(
+            _bs_coro(), endpoint="/v1/audio/beat-slice",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        beats_result = await librosa_eng.beats(raw, filename)
+        beat_times = beats_result.get("beats", [])
+        if not beat_times:
+            raise HTTPException(status_code=400, detail="no beats detected in audio")
+        zip_bytes = await asyncio.to_thread(beat_slice, raw, filename, beat_times, output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        zip_bytes,
+        media_type="application/zip",
+        filename="beat_slices.zip",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"beat_count": len(beat_times), "output_format": output_format},
+    )
+
+
+# ── /v1/audio/conv-reverb — convolution reverb ──────────────────────────────
+
+
+@app.post("/v1/audio/conv-reverb")
+async def conv_reverb_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    ir_file: UploadFile | None = File(default=None),
+    ir_file_path: str | None = Form(default=None),
+    ir_file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    wet_mix: float = Form(default=0.3),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Convolution reverb using an impulse response (IR) file.
+    wet_mix: 0.0=dry only, 1.0=wet only. Range [0.0, 1.0]."""
+    _validate_output_format(output_format)
+    if not (0.0 <= wet_mix <= 1.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"wet_mix must be in [0.0, 1.0], got {wet_mix}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    ir_raw, ir_filename = await resolve_input(
+        file=ir_file,
+        file_path=ir_file_path,
+        file_url=ir_file_url,
+        field_prefix="ir_file",
+    )
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _ir_raw, _ir_fn = ir_raw, ir_filename
+        _wm = wet_mix
+
+        async def _cr_coro():
+            try:
+                _b = await asyncio.to_thread(
+                    conv_reverb, _raw, _fn, _ir_raw, _ir_fn,
+                    wet_mix=_wm, output_format=output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"conv_reverb.{output_format}",
+                output_path=_eff_op, output_url=None, extra_json={"wet_mix": _wm},
+            )
+
+        return await _submit_job(
+            _cr_coro(), endpoint="/v1/audio/conv-reverb",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        audio_bytes = await asyncio.to_thread(
+            conv_reverb, raw, filename, ir_raw, ir_filename,
+            wet_mix=wet_mix, output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"conv_reverb.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"wet_mix": wet_mix},
+    )
+
+
+# ── /v1/audio/transient — transient shaper ──────────────────────────────────
+
+
+@app.post("/v1/audio/transient")
+async def transient_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    attack_gain_db: float = Form(default=0.0),
+    sustain_gain_db: float = Form(default=0.0),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Transient shaper via dual-compressor attack/sustain blending.
+    attack_gain_db: boost/cut transient attack (positive=punchier, negative=softer).
+    sustain_gain_db: boost/cut sustain (positive=sustain boost, negative=sustain cut)."""
+    _validate_output_format(output_format)
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+        _ag, _sg = attack_gain_db, sustain_gain_db
+
+        async def _ts_coro():
+            try:
+                _b = await asyncio.to_thread(
+                    transient_shape, _raw, _fn,
+                    attack_gain_db=_ag, sustain_gain_db=_sg,
+                    output_format=output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"transient.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"attack_gain_db": _ag, "sustain_gain_db": _sg},
+            )
+
+        return await _submit_job(
+            _ts_coro(), endpoint="/v1/audio/transient",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        audio_bytes = await asyncio.to_thread(
+            transient_shape, raw, filename,
+            attack_gain_db=attack_gain_db,
+            sustain_gain_db=sustain_gain_db,
+            output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"transient.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"attack_gain_db": attack_gain_db, "sustain_gain_db": sustain_gain_db},
+    )
+
+
+# ── /v1/audio/remix — stem separation + per-stem mix ────────────────────────
+
+
+@app.post("/v1/audio/remix")
+async def remix(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    engine: str = Form(default="htdemucs"),
+    stem_mix: str = Form(default="{}"),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Separate audio into stems then bounce back with per-stem gain/mute control.
+    stem_mix is a JSON object: {"vocals": {"gain_db": -6}, "drums": {"mute": true}, ...}
+    Missing stems use gain_db=0.0, mute=false. Requires a separation engine."""
+    _validate_output_format(output_format)
+    try:
+        _parsed = json.loads(stem_mix)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid stem_mix JSON: {exc}") from exc
+    if not isinstance(_parsed, dict):
+        raise HTTPException(status_code=400, detail="stem_mix must be a JSON object")
+    stem_mix_spec: dict = _parsed
+
+    eng = ENGINES.get(engine)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_separation_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine!r} does not support stem separation",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+        _sms = stem_mix_spec
+
+        async def _remix_coro():
+            await _evict_siblings(engine)
+            try:
+                stems = await _eng.separate(_raw, _fn, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            mix_inputs: list[tuple[bytes, str, float]] = []
+            for stem_name, stem_bytes in stems.items():
+                spec = _sms.get(stem_name, {})
+                if spec.get("mute", False):
+                    continue
+                gain_db = float(spec.get("gain_db", 0.0))
+                mix_inputs.append((stem_bytes, f"{stem_name}.{output_format}", gain_db))
+            if not mix_inputs:
+                raise HTTPException(status_code=400, detail="all stems are muted")
+            try:
+                bounced = await asyncio.to_thread(mix_audio, mix_inputs, output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                bounced, media_type=content_type_for(output_format),
+                filename=f"remix.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"engine": engine, "stems": list(stems.keys())},
+            )
+
+        return await _submit_job(
+            _remix_coro(), endpoint="/v1/audio/remix",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    await _evict_siblings(engine)
+    try:
+        stems = await eng.separate(raw, filename, output_format=output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    mix_inputs_sync: list[tuple[bytes, str, float]] = []
+    for stem_name, stem_bytes in stems.items():
+        spec = stem_mix_spec.get(stem_name, {})
+        if spec.get("mute", False):
+            continue
+        gain_db = float(spec.get("gain_db", 0.0))
+        mix_inputs_sync.append((stem_bytes, f"{stem_name}.{output_format}", gain_db))
+    if not mix_inputs_sync:
+        raise HTTPException(status_code=400, detail="all stems are muted")
+
+    try:
+        bounced = await asyncio.to_thread(mix_audio, mix_inputs_sync, output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        bounced,
+        media_type=content_type_for(output_format),
+        filename=f"remix.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"engine": engine, "stems": list(stems.keys())},
+    )
+
+
+# ── Camelot wheel for DJ prep ─────────────────────────────────────────────────
+
+_CAMELOT: dict[str, str] = {
+    "C major": "8B", "A minor": "8A",
+    "G major": "9B", "E minor": "9A",
+    "D major": "10B", "B minor": "10A",
+    "A major": "11B", "F# minor": "11A",
+    "E major": "12B", "C# minor": "12A",
+    "B major": "1B", "G# minor": "1A",
+    "F# major": "2B", "D# minor": "2A",
+    "C# major": "3B", "A# minor": "3A",
+    "G# major": "4B", "F minor": "4A",
+    "D# major": "5B", "C minor": "5A",
+    "A# major": "6B", "G minor": "6A",
+    "F major": "7B", "D minor": "7A",
+}
+
+
+# ── /v1/audio/dj-prep — BPM + key + LUFS + Camelot ─────────────────────────
+
+
+@app.post("/v1/audio/dj-prep")
+async def dj_prep(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+) -> JSONResponse:
+    """DJ track analysis: BPM, key (+ Camelot wheel position), integrated LUFS.
+    Requires librosa-analyze + chord-detect + pedalboard-chain or matchering engines."""
+    librosa_eng = ENGINES.get("librosa-analyze")
+    if librosa_eng is None or not is_beats_engine(librosa_eng):
+        raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
+    chord_eng = ENGINES.get("chord-detect")
+    if chord_eng is None or not is_chord_detect_engine(chord_eng):
+        raise HTTPException(status_code=404, detail="chord-detect engine not configured")
+    loudness_eng = next(
+        (e for e in ENGINES.values() if is_loudness_engine(e)), None
+    )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        beats_result = await librosa_eng.beats(raw, filename)
+        chord_result = await chord_eng.detect_chords(raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    bpm = beats_result.get("tempo_bpm")
+    key = chord_result.get("key", "")
+    camelot = _CAMELOT.get(key, "")
+
+    lufs: float | None = None
+    if loudness_eng is not None:
+        try:
+            lufs = await loudness_eng.measure_lufs(raw, filename)
+        except AudioConversionError:
+            pass
+
+    return JSONResponse({
+        "bpm": round(bpm, 2) if bpm else None,
+        "key": key,
+        "camelot": camelot,
+        "integrated_lufs": round(lufs, 2) if lufs is not None else None,
+    })
+
+
+# ── /v1/batch — batch operations on staged files ────────────────────────────
+
+
+@app.post("/v1/batch")
+async def batch(request: Request) -> JSONResponse:
+    """Execute a list of operations on staged files.
+    Body is a JSON array of operation objects:
+    [{"op": "convert", "file_path": "...", "output_path": "...", "output_format": "mp3"}, ...]
+    Each op runs sequentially and returns its result or error.
+    Supported ops: convert, normalize, trim, fade, reverse, speed, eq."""
+    body = await request.body()
+    try:
+        ops = json.loads(body)
+        if not isinstance(ops, list):
+            raise ValueError("body must be a JSON array of operations")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+
+    results = []
+    for i, op_spec in enumerate(ops):
+        if not isinstance(op_spec, dict):
+            results.append({"index": i, "error": "operation must be an object"})
+            continue
+        op = op_spec.get("op", "")
+        try:
+            fp = op_spec.get("file_path") or None
+            fu = op_spec.get("file_url") or None
+            raw, fname = await resolve_input(file=None, file_path=fp, file_url=fu)
+            out_path = op_spec.get("output_path") or None
+            fmt = op_spec.get("output_format", "wav")
+            _validate_output_format(fmt)
+
+            if op == "convert":
+                sr = op_spec.get("sample_rate")
+                ch = op_spec.get("channels")
+                b = await asyncio.to_thread(convert_audio, raw, fname, fmt, sr, ch)
+            elif op == "normalize":
+                target = float(op_spec.get("target_lufs", -14.0))
+                loudness_eng = next((e for e in ENGINES.values() if is_loudness_engine(e)), None)
+                if loudness_eng is None:
+                    raise HTTPException(status_code=404, detail="loudness engine not configured")
+                b, _ = await loudness_eng.normalize_lufs(raw, fname, target_lufs=target, output_format=fmt)
+            elif op == "trim":
+                ss = float(op_spec.get("start_sec", 0.0))
+                es_raw = op_spec.get("end_sec")
+                if es_raw is None:
+                    raise ValueError("trim op requires 'end_sec'")
+                es = float(es_raw)
+                b = await asyncio.to_thread(trim_audio, raw, fname, ss, es, fmt)
+            elif op == "fade":
+                fi = float(op_spec.get("fade_in", 0.0))
+                fo = float(op_spec.get("fade_out", 0.0))
+                cv = op_spec.get("curve", "tri")
+                b = await asyncio.to_thread(
+                    fade_audio, raw, fname, fmt, fade_in=fi, fade_out=fo, curve=cv
+                )
+            elif op == "reverse":
+                b = await asyncio.to_thread(reverse_audio, raw, fname, fmt)
+            elif op == "speed":
+                sp_raw = op_spec.get("speed")
+                if sp_raw is None:
+                    raise ValueError("speed op requires 'speed'")
+                sp = float(sp_raw)
+                b = await asyncio.to_thread(speed_audio, raw, fname, sp, fmt)
+            elif op == "eq":
+                bl = json.loads(op_spec.get("bands", "[]"))
+                b = await asyncio.to_thread(eq_audio, raw, fname, fmt, bl)
+            else:
+                results.append({"index": i, "op": op, "error": f"unsupported op: {op!r}"})
+                continue
+
+            resp = await write_output(
+                b, media_type=content_type_for(fmt),
+                filename=f"batch_{i}.{fmt}",
+                output_path=out_path, output_url=None,
+            )
+            if isinstance(resp, JSONResponse):
+                resp_data = json.loads(resp.body)
+            else:
+                resp_data = {"size": len(resp.body)}
+            results.append({"index": i, "op": op, "status": "ok", **resp_data})
+        except HTTPException as exc:
+            results.append({"index": i, "op": op, "error": exc.detail})
+        except AudioConversionError as exc:
+            results.append({"index": i, "op": op, "error": str(exc)})
+        except Exception as exc:
+            results.append({"index": i, "op": op, "error": f"unexpected error: {exc}"})
+
+    return JSONResponse({"results": results})
+
+
+# ── GET /v1/jobs — list all jobs ─────────────────────────────────────────────
+
+
+@app.get("/v1/jobs")
+async def jobs_list(status: str | None = None) -> JSONResponse:
+    """List all async jobs, optionally filtered by status.
+    status: pending, running, completed, failed, cancelled."""
+    jobs = await JOB_QUEUE.list_jobs(status=status)
+    return JSONResponse({"jobs": jobs})
+
+
+# ── GET /v1/jobs/{job_id} — poll job status ───────────────────────────────────
+
+
+@app.get("/v1/jobs/{job_id}")
+async def jobs_get(job_id: str) -> JSONResponse:
+    """Get status and result of an async job by ID."""
+    job = await JOB_QUEUE.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"job {job_id!r} not found")
+    return JSONResponse(job.to_dict())
+
+
+# ── DELETE /v1/jobs/{job_id} — cancel or delete a job ────────────────────────
+
+
+@app.delete("/v1/jobs/{job_id}")
+async def jobs_delete(job_id: str) -> JSONResponse:
+    """Cancel a running job or remove a completed/failed job from the queue."""
+    job = await JOB_QUEUE.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"job {job_id!r} not found")
+    cancelled = await JOB_QUEUE.cancel(job_id)
+    if cancelled:
+        return JSONResponse({"job_id": job_id, "cancelled": True})
+    # Already terminal — remove it
+    job_dict = job.to_dict()
+    job_dict["deleted"] = True
+    # Force removal by marking it completed_at far in the past so cleanup catches it
+    job.completed_at = 0.0
+    await JOB_QUEUE.cleanup(0)
+    return JSONResponse({"job_id": job_id, "deleted": True})
 
 
 def _resolve_files_path(raw: str) -> tuple[Any, str]:

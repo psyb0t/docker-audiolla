@@ -24,6 +24,7 @@ from .pedalboard_chain import PedalboardChainEngine
 from .silence_detect import SilenceDetectEngine
 from .sox_transform import SoxTransformEngine
 from .stretch_engine import StretchEngine
+from .metadata_engine import MetadataEngine
 from .tag_engine import TagEngine
 from .uvr_separator import UVRSeparatorEngine
 from .vad_engine import VADEngine
@@ -103,6 +104,9 @@ def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
             continue
         if executor == "noise_reduce":
             out[slug] = NoiseReduceEngine(slug=slug, entry=entry)
+            continue
+        if executor == "metadata":
+            out[slug] = MetadataEngine(slug=slug, entry=entry)
             continue
         raise ValueError(f"unknown executor {executor!r} for engine {slug!r}")
     return out
@@ -226,3 +230,7 @@ def is_noise_reduce_engine(engine: Any) -> bool:
 
 def is_classify_engine(engine: Any) -> bool:
     return hasattr(engine, "classify")
+
+
+def is_metadata_engine(engine: Any) -> bool:
+    return hasattr(engine, "read_tags") and hasattr(engine, "write_tags")

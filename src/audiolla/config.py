@@ -164,6 +164,9 @@ SOUNDFONT_PATH: str = os.environ.get("AUDIOLLA_SOUNDFONT", "").strip()
 
 HUGGINGFACE_TOKEN: str = os.environ.get("HUGGINGFACE_TOKEN", "")
 
+JOB_TTL_SECONDS: float = _duration_env("AUDIOLLA_JOB_TTL", 3600.0)
+JOB_MAX_CONCURRENT: int = _int_env("AUDIOLLA_JOB_MAX_CONCURRENT", 8)
+
 _VALID_EXECUTORS = frozenset(
     {
         "demucs",
@@ -188,6 +191,7 @@ _VALID_EXECUTORS = frozenset(
         "clap_embed",
         "hpss",
         "noise_reduce",
+        "metadata",
     }
 )
 
