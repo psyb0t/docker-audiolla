@@ -5,7 +5,7 @@
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
-**Thirty audio engines. One port. Zero cloud. Fifteen more primitives.**
+**Thirty audio engines. One port. Zero cloud. Fire-and-forget async jobs. Webhooks.**
 
 You needed Demucs for stems. Then librosa for BPM and key. Then basic-pitch for MIDI transcription. Then pyannote for speaker diarization. Then DeepFilterNet for speech enhancement. Then you spent three days debugging Python version conflicts and now you hate everything.
 
@@ -59,6 +59,15 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | 🎚️ **EQ** | Parametric EQ — JSON array of freq/gain_db/width_hz bands |
 | 🎵 **Key match** | Detect source key then pitch-shift to a target key |
 | 🎙️ **Sidechain duck** | Duck music when a trigger track (voice) is loud |
+| 🏷️ **Metadata** | Read and write ID3/Vorbis/FLAC/WAV audio tags via mutagen |
+| 🔴 **Clip detect** | Detect digital clipping — count, ratio, peak dBFS |
+| ↔️ **Mid/Side** | Encode L/R → Mid+Side or decode Mid+Side → L/R |
+| ✂️ **Beat slice** | Slice audio at detected beat positions — returns ZIP of segments |
+| 🏟️ **Conv reverb** | Convolution reverb via impulse response — wet_mix control |
+| 🥁 **Transient shaper** | Attack/sustain dual-compressor — punch up drums, cut room tail |
+| 🎛️ **DJ prep** | One call: BPM + key + Camelot wheel position + integrated LUFS |
+| 📦 **Batch** | Run trim/convert/fade/reverse/speed/eq on staged files in sequence |
+| ⚡ **Async jobs** | Every endpoint supports `async_job=true` — fire-and-forget + webhook callbacks |
 
 ---
 
@@ -113,6 +122,15 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Transform MIDI](#transform-midi)
   - [Render MIDI to audio](#render-midi-to-audio)
   - [Generate music from a spec](#generate-music-from-a-spec)
+  - [Audio metadata tags](#audio-metadata-tags)
+  - [Clip detection](#clip-detection)
+  - [Mid/Side encode and decode](#midside-encode-and-decode)
+  - [Beat slice](#beat-slice)
+  - [Convolution reverb](#convolution-reverb)
+  - [Transient shaper](#transient-shaper)
+  - [DJ prep](#dj-prep)
+  - [Batch operations](#batch-operations)
+  - [Async jobs and webhooks](#async-jobs-and-webhooks)
   - [Stage files](#stage-files)
   - [Remote URLs](#remote-urls)
 - [Engines](#engines)
@@ -1226,6 +1244,175 @@ curl -X POST 'http://localhost:8000/v1/midi/generate?output_format=wav' \
   -o song.wav
 ```
 
+### Audio metadata tags
+
+Read and write ID3 (MP3), Vorbis (OGG/FLAC), and WAV/M4A tags via mutagen. Requires the `metadata` engine.
+
+```bash
+# Read tags
+curl -X POST http://localhost:8000/v1/audio/metadata \
+  -F "file=@track.mp3" | jq '{title, artist, bpm, key, duration_sec}'
+
+# Write tags — returns updated tag set
+curl -X POST http://localhost:8000/v1/audio/metadata \
+  -F "file=@track.mp3" \
+  -F 'tags={"title":"My Track","artist":"DJ Audiolla","bpm":"128","year":"2026"}'
+```
+
+### Clip detection
+
+Detect digital clipping. No engine required — pure numpy arithmetic.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/clip-detect \
+  -F "file=@loud_master.wav" | jq '{clipped, clip_count, clip_ratio, peak_db}'
+# → {"clipped":true,"clip_count":4219,"clip_ratio":0.0048,"peak_db":0.0}
+```
+
+### Mid/Side encode and decode
+
+Encode L/R stereo to Mid+Side or decode back. Useful for stereo width surgery without touching the pedalboard chain.
+
+```bash
+# Encode L/R → M/S
+curl -X POST http://localhost:8000/v1/audio/mid-side \
+  -F "file=@stereo.wav" \
+  -F "mode=encode" \
+  -o ms_encoded.wav
+
+# Decode back to L/R
+curl -X POST http://localhost:8000/v1/audio/mid-side \
+  -F "file=@ms_encoded.wav" \
+  -F "mode=decode" \
+  -o restored.wav
+```
+
+### Beat slice
+
+Detect beat positions with librosa and return a ZIP of numbered WAV/MP3 slices — one file per beat interval.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/beat-slice \
+  -F "file=@loop.wav" \
+  -F "output_format=wav" \
+  -o slices.zip
+# → slices.zip: beat_001.wav, beat_002.wav, beat_003.wav …
+
+# With output_path: stages the ZIP and returns JSON
+curl -X POST http://localhost:8000/v1/audio/beat-slice \
+  -F "file=@loop.wav" \
+  -F "output_path=beats/loop_slices.zip"
+# → {"path":"beats/loop_slices.zip","beat_count":32,...}
+```
+
+### Convolution reverb
+
+Apply an impulse response (IR) to audio via pedalboard's `Convolution`. Any WAV file can be used as the IR.
+
+```bash
+# Upload your IR first
+curl -X PUT http://localhost:8000/v1/files/ir/plate.wav --data-binary @plate_reverb.wav
+
+# Apply — wet_mix: 0.0=dry only, 1.0=wet only
+curl -X POST http://localhost:8000/v1/audio/conv-reverb \
+  -F "file=@dry_vocal.wav" \
+  -F "ir_file_path=ir/plate.wav" \
+  -F "wet_mix=0.25" \
+  -F "output_format=wav" \
+  -o reverbed.wav
+```
+
+### Transient shaper
+
+Attack/sustain dual-compressor blending. Positive `attack_gain_db` makes drums punchier; negative `sustain_gain_db` cuts room tail.
+
+```bash
+# Punchy drums: boost attack, cut sustain
+curl -X POST http://localhost:8000/v1/audio/transient \
+  -F "file=@drums.wav" \
+  -F "attack_gain_db=6" \
+  -F "sustain_gain_db=-4" \
+  -o punchy_drums.wav
+
+# Soft attack (pad-like)
+curl -X POST http://localhost:8000/v1/audio/transient \
+  -F "file=@synth.wav" \
+  -F "attack_gain_db=-6" \
+  -F "sustain_gain_db=0" \
+  -o softened.wav
+```
+
+### DJ prep
+
+One call returns everything a DJ needs about a track. Requires `librosa-analyze` + `chord-detect`. LUFS is reported when a loudness engine is available.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/dj-prep \
+  -F "file=@track.wav" | jq .
+# → {"bpm":128.0,"key":"A minor","camelot":"8A","integrated_lufs":-9.4}
+```
+
+Camelot wheel positions let you quickly find harmonically compatible tracks for mixing.
+
+### Batch operations
+
+Run multiple operations on staged files in one HTTP call. Operations run sequentially; each gets an independent result entry even if earlier ops fail.
+
+Supported ops: `convert`, `normalize`, `trim`, `fade`, `reverse`, `speed`, `eq`.
+
+```bash
+# Stage input
+curl -X PUT http://localhost:8000/v1/files/work/track.wav --data-binary @track.wav
+
+# Batch: trim, convert to MP3, reverse in one call
+curl -X POST http://localhost:8000/v1/batch \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"op":"trim","file_path":"work/track.wav","output_path":"work/chorus.wav","start_sec":30,"end_sec":60},
+    {"op":"convert","file_path":"work/track.wav","output_path":"work/track.mp3","output_format":"mp3"},
+    {"op":"reverse","file_path":"work/track.wav","output_path":"work/reversed.wav"}
+  ]' | jq '.results[].status'
+# → "ok" "ok" "ok"
+```
+
+### Async jobs and webhooks
+
+Every audio endpoint accepts `async_job=true` — the request returns immediately with a job ID and the work happens in the background. Poll for status or register a webhook.
+
+```bash
+# Submit async — returns 202-style JSON immediately
+curl -X POST http://localhost:8000/v1/audio/separate \
+  -F "file=@track.wav" \
+  -F "engine=htdemucs" \
+  -F "async_job=true" \
+  -F "webhook_url=https://my-server.com/hooks/audio" \
+  -F "output_path=stems/track-vocals.wav"
+# → {"job_id":"abc123","status":"pending"}
+
+# Poll
+curl http://localhost:8000/v1/jobs/abc123 | jq '{status, duration_sec, result}'
+
+# List all jobs (optional ?status=pending|running|completed|failed|cancelled)
+curl http://localhost:8000/v1/jobs
+
+# Cancel a running job
+curl -X DELETE http://localhost:8000/v1/jobs/abc123
+```
+
+Webhook payload (POST to your URL when the job completes):
+
+```json
+{
+  "id": "abc123",
+  "endpoint": "/v1/audio/separate",
+  "status": "completed",
+  "duration_sec": 12.4,
+  "result": {"path": "stems/track-vocals.wav", "size": 3145728, ...}
+}
+```
+
+Delivery has 4 attempts with exponential backoff (0 s, 1 s, 2 s, 4 s). Completed jobs stay in memory for `AUDIOLLA_JOB_TTL` seconds (default 1 hour) then are swept.
+
 ### Stage files
 
 A simple server-side file store under `/v1/files`. Upload, list, download, delete.
@@ -1337,6 +1524,7 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `clap-embed` | 512-dim L2-normalized audio embeddings via LAION CLAP (laion/larger_clap_music_and_speech) — semantic audio search. Requires HF model cache. Backs `/v1/audio/embed`. |
 | `hpss` | Harmonic/percussive source separation via librosa HPSS median filter — returns harmonic + percussive stems as a ZIP. Backs `/v1/audio/hpss`. |
 | `noise-reduce` | Spectral noise reduction via noisereduce — stationary (constant hum/hiss) and non-stationary (adaptive) modes, no GPU required. Backs `/v1/audio/noise-reduce`. |
+| `metadata` | Read/write audio tags (ID3 for MP3, Vorbis for OGG/FLAC, INFO for WAV, MP4 for M4A) via mutagen. No ML weights. Backs `/v1/audio/metadata`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
@@ -1404,6 +1592,29 @@ bytes.
 | `POST` | `/v1/audio/key-match` | audio bytes — `target_key` required; requires `chord-detect` + `stretch` |
 | `POST` | `/v1/audio/sidechain-duck` | audio bytes — primary + `trigger_file_*`; ffmpeg sidechaincompress |
 | `POST` | `/v1/audio/fx` | audio bytes |
+| `POST` | `/v1/audio/metadata` | JSON — tag fields (title, artist, bpm, key, duration, sample_rate…); writes tags when `tags` JSON is provided |
+| `POST` | `/v1/audio/clip-detect` | JSON — clipped, clip_count, clip_ratio, peak_db, duration_sec |
+| `POST` | `/v1/audio/mid-side` | audio bytes — `mode=encode` (L/R→M/S) or `mode=decode` (M/S→L/R) |
+| `POST` | `/v1/audio/beat-slice` | ZIP of numbered beat slices — requires `librosa-analyze` |
+| `POST` | `/v1/audio/conv-reverb` | audio bytes — `ir_file` / `ir_file_path` / `ir_file_url` required; `wet_mix` [0.0–1.0] |
+| `POST` | `/v1/audio/transient` | audio bytes — `attack_gain_db` + `sustain_gain_db` |
+| `POST` | `/v1/audio/dj-prep` | JSON — bpm, key, camelot, integrated_lufs; requires `librosa-analyze` + `chord-detect` |
+
+### Batch
+
+| Method | Path | |
+|--------|------|-|
+| `POST` | `/v1/batch` | JSON body: array of op objects `{op, file_path, output_path, …}`. Returns `{results:[…]}` — errors per-op, not a 4xx. Supported ops: `convert`, `normalize`, `trim`, `fade`, `reverse`, `speed`, `eq`. |
+
+### Async jobs
+
+Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` optional delivery.
+
+| Method | Path | |
+|--------|------|-|
+| `GET` | `/v1/jobs` | list jobs; optional `?status=pending\|running\|completed\|failed\|cancelled` |
+| `GET` | `/v1/jobs/{job_id}` | poll one job — returns status, result, duration_sec |
+| `DELETE` | `/v1/jobs/{job_id}` | cancel running job or remove completed job |
 
 ### MIDI
 
@@ -1439,9 +1650,9 @@ bytes.
 
 ## MCP
 
-audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp`. Point any MCP-capable LLM agent at it and it gets the full audio processing surface as callable tools — separate stems, detect chords, transcribe to MIDI, diarize speakers, compose music from a JSON spec — all over JSON-RPC without writing a line of integration code.
+audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp`. Point any MCP-capable LLM agent at it and it gets the full audio processing surface as callable tools — separate stems, detect chords, transcribe to MIDI, diarize speakers, compose music from a JSON spec, read/write tags, submit async jobs — all over JSON-RPC without writing a line of integration code.
 
-Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow: `put_file` to stage a file, call whatever tools you need, `get_file` to pull results back.
+Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow: `put_file` to stage a file, call whatever tools you need, `get_file` to pull results back. Use `list_jobs` / `get_job` / `cancel_job` to manage long-running async work.
 
 **Endpoint:** `http://localhost:8000/v1/mcp`
 
@@ -1503,6 +1714,16 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `midi_transform` | Transpose, quantize, tempo override, channel filter on an existing MIDI file |
 | `midi_render` | MIDI → audio via fluidsynth + SoundFont |
 | `midi_generate` | One-shot compose + render — spec in, audio out |
+| `audio_metadata` | Read or write audio tags — pass `tags` dict to write, omit to read |
+| `detect_clipping` | Report digital clipping — clipped, clip_count, clip_ratio, peak_db |
+| `mid_side` | M/S encode (`mode=encode`) or decode (`mode=decode`) stereo audio |
+| `slice_at_beats` | Slice audio at beat positions — returns `{zip_base64, beat_count}` |
+| `convolution_reverb` | Apply IR reverb — `ir_file_path`/`ir_file_url` + `wet_mix` [0.0–1.0] |
+| `transient_shaper` | Attack/sustain shaping — `attack_gain_db`, `sustain_gain_db` |
+| `dj_prep` | BPM + key + Camelot wheel + LUFS in one call |
+| `list_jobs` | List async jobs; optional `status` filter |
+| `get_job` | Poll one async job by `job_id` |
+| `cancel_job` | Cancel a running job or remove a completed one |
 | `list_files` | List staged files |
 | `put_file` | Upload a file (base64) to the staging area |
 | `get_file` | Read a staged file back (base64) |
@@ -1533,6 +1754,8 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_FETCH_ALLOW_PRIVATE` | `false` | allow URLs that resolve to private / loopback / link-local IPs |
 | `AUDIOLLA_FETCH_TIMEOUT` | `30` | hard timeout per fetch/upload, in seconds (also accepts `30s`, `1m`) |
 | `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each Location re-validated through the policy |
+| `AUDIOLLA_JOB_TTL` | `3600` | Seconds a completed/failed/cancelled job stays in memory before being swept. Also accepts `1h`, `30m`. |
+| `AUDIOLLA_JOB_MAX_CONCURRENT` | `8` | Maximum number of async jobs that can run simultaneously. |
 | `AUDIOLLA_SOUNDFONT` | `/usr/share/sounds/sf2/FluidR3_GM.sf2` (prod images) | Default SoundFont path for `/v1/midi/render`. Override per request via `soundfont_path`. |
 
 ---
