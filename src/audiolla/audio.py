@@ -1122,6 +1122,204 @@ def transient_shape(
                 os.unlink(p)
 
 
+def loudness_curve(raw: bytes, filename: str, *, hop_length: int = 512) -> dict:
+    """Compute RMS envelope as a loudness curve over time.
+    Returns {curve: [{time_sec, rms_db}, ...], duration, sample_rate, hop_length}."""
+    import librosa
+    import numpy as np
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-lc-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg(["ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path])
+        y, sr = librosa.load(wav_path, sr=None, mono=True)
+        rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+        times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+        curve = []
+        for t, r in zip(times.tolist(), rms.tolist()):
+            db = 20.0 * np.log10(max(float(r), 1e-10))
+            curve.append({"time_sec": round(float(t), 4), "rms_db": round(db, 2)})
+        return {
+            "curve": curve,
+            "duration": round(float(len(y) / sr), 6),
+            "sample_rate": int(sr),
+            "hop_length": hop_length,
+            "points": len(curve),
+        }
+    finally:
+        for p in (in_path, wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+def repair_audio(
+    raw: bytes,
+    filename: str,
+    *,
+    declip: bool = True,
+    dehum: bool = False,
+    hum_freq: float = 50.0,
+    output_format: str = "wav",
+) -> bytes:
+    """Repair audio artifacts: declip (interpolate clipped samples) and/or dehum (notch filter).
+
+    declip: interpolate samples that hit digital full-scale (±0.999).
+    dehum: notch-filter at hum_freq and first 3 harmonics.
+    hum_freq: fundamental hum frequency in Hz (50 for EU, 60 for US mains).
+    """
+    import numpy as np
+    import soundfile as sf
+
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    if not (40.0 <= hum_freq <= 80.0):
+        raise AudioConversionError(
+            f"hum_freq must be in [40, 80] Hz, got {hum_freq}"
+        )
+    if not declip and not dehum:
+        raise AudioConversionError("at least one of declip or dehum must be True")
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    out_wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-repair-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg(["ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+
+        if dehum:
+            from scipy.signal import iirnotch, sosfilt, tf2sos  # noqa: PLC0415
+            for harmonic in range(1, 5):
+                freq = hum_freq * harmonic
+                if freq >= sr / 2:
+                    break
+                Q = 30.0
+                b, a = iirnotch(freq / (sr / 2), Q)
+                sos = tf2sos(b, a)
+                for ch in range(data.shape[1]):
+                    data[:, ch] = sosfilt(sos, data[:, ch]).astype(np.float32)
+
+        if declip:
+            THRESHOLD = 0.999
+            for ch in range(data.shape[1]):
+                col = data[:, ch].copy()
+                clipped = np.abs(col) >= THRESHOLD
+                if not np.any(clipped):
+                    continue
+                indices = np.arange(len(col))
+                good = ~clipped
+                if np.sum(good) < 2:
+                    continue
+                col[clipped] = np.interp(
+                    indices[clipped], indices[good], col[good]
+                )
+                data[:, ch] = col
+
+        out_wav_fd, out_wav_path = tempfile.mkstemp(
+            prefix="audiolla-repair-out-", suffix=".wav"
+        )
+        os.close(out_wav_fd)
+        sf.write(out_wav_path, data, sr, subtype="FLOAT")
+        out_bytes, _ = encode_audio(out_wav_path, output_format)
+        return out_bytes
+    finally:
+        for p in (in_path, wav_path, out_wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+def chords_to_midi_bytes(
+    chords: list[dict],
+    *,
+    tempo_bpm: float = 120.0,
+    velocity: int = 80,
+    octave: int = 4,
+) -> bytes:
+    """Convert chord segments to a Type-1 MIDI file.
+
+    chords: [{"chord": "C major", "start_sec": 0.0, "end_sec": 2.0}, ...]
+    Each chord maps to root + third + fifth. Returns MIDI bytes.
+    """
+    import io
+
+    import mido
+
+    _NOTE_MAP = {
+        "C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
+        "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11,
+    }
+
+    def _chord_notes(chord_name: str, oct: int) -> list[int]:
+        parts = chord_name.strip().split()
+        if len(parts) < 2:
+            return []
+        root_pc = _NOTE_MAP.get(parts[0])
+        if root_pc is None:
+            return []
+        base = 12 * (oct + 1) + root_pc
+        quality = parts[1].lower()
+        if quality == "major":
+            return [base, base + 4, base + 7]
+        return [base, base + 3, base + 7]
+
+    if not (1.0 <= tempo_bpm <= 999.0):
+        raise AudioConversionError(f"tempo_bpm must be in [1, 999], got {tempo_bpm}")
+    if not (1 <= velocity <= 127):
+        raise AudioConversionError(f"velocity must be in [1, 127], got {velocity}")
+    if not (1 <= octave <= 7):
+        raise AudioConversionError(f"octave must be in [1, 7], got {octave}")
+
+    tpb = 480
+    seconds_per_tick = 60.0 / tempo_bpm / tpb
+
+    mid = mido.MidiFile(type=1, ticks_per_beat=tpb)
+    tempo_track = mido.MidiTrack()
+    tempo_track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo_bpm), time=0))
+    mid.tracks.append(tempo_track)
+
+    chord_track = mido.MidiTrack()
+    chord_track.append(mido.Message("program_change", channel=0, program=0, time=0))
+    events: list[tuple[int, object]] = []
+
+    for seg in chords:
+        chord_name = seg.get("chord", "")
+        start_sec = float(seg.get("start_sec", 0.0))
+        end_sec = float(seg.get("end_sec", start_sec + 1.0))
+        notes = _chord_notes(chord_name, octave)
+        if not notes:
+            continue
+        on_tick = int(round(start_sec / seconds_per_tick))
+        off_tick = int(round(end_sec / seconds_per_tick))
+        if off_tick <= on_tick:
+            off_tick = on_tick + tpb
+        for note in notes:
+            if 0 <= note <= 127:
+                events.append((on_tick, mido.Message(
+                    "note_on", channel=0, note=note, velocity=velocity, time=0,
+                )))
+                events.append((off_tick, mido.Message(
+                    "note_off", channel=0, note=note, velocity=0, time=0,
+                )))
+
+    events.sort(key=lambda x: (x[0], 0 if x[1].type == "note_off" else 1))
+    prev = 0
+    for tick, msg in events:
+        msg.time = tick - prev
+        chord_track.append(msg)
+        prev = tick
+    mid.tracks.append(chord_track)
+
+    buf = io.BytesIO()
+    mid.save(file=buf)
+    return buf.getvalue()
+
+
 def multi_stream_zip(
     streams: dict[str, bytes], output_format: str
 ) -> bytes:

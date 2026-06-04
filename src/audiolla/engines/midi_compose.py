@@ -45,12 +45,31 @@ from typing import Any
 from ..audio import AudioConversionError
 from .base import EngineBase
 
-
 _KEY_SIG_RE = re.compile(r"^[A-G][#b]?m?$")
 
 
 class MidiComposeError(AudioConversionError):
     """Spec rejected during validation or MIDI writing failed."""
+
+
+_DRUM_NOTE_MAP: dict[str, int] = {
+    "kick": 36,
+    "snare": 38,
+    "hihat": 42,
+    "hihat_closed": 42,
+    "hihat_open": 46,
+    "ride": 51,
+    "crash": 49,
+    "tom_high": 50,
+    "tom_mid": 47,
+    "tom_low": 45,
+    "clap": 39,
+    "rim": 37,
+    "cowbell": 56,
+    "tambourine": 54,
+    "shaker": 69,
+    "wood_block": 76,
+}
 
 
 def _bounded_int(name: str, value: Any, lo: int, hi: int) -> int:
@@ -502,4 +521,108 @@ class MidiComposeEngine(EngineBase):
         out.tracks.extend(new_tracks)
         buf = io.BytesIO()
         out.save(file=buf)
+        return buf.getvalue()
+
+    # ── drum_pattern — step-sequencer spec → GM drum MIDI ─────────────────
+
+    async def drum_pattern(self, spec: dict) -> bytes:
+        """Synthesize a MIDI drum pattern from a step-sequencer spec.
+
+        spec = {
+            "tempo_bpm": 120,         (optional, default 120)
+            "steps": 16,              (optional, default 16 — steps per bar)
+            "bars": 1,                (optional, default 1 — bars to generate)
+            "swing": 0.0,             (optional, 0.0–0.5 swing amount)
+            "pattern": {              (required)
+                "kick":  [1,0,0,0,...],
+                "snare": [0,0,0,0,...],
+                "hihat": [1,1,1,1,...],
+                ...
+            }
+        }
+        """
+        async with self._lock:
+            result = await asyncio.to_thread(self._drum_pattern_sync, spec)
+            self._touch()
+            return result
+
+    def _drum_pattern_sync(self, spec: dict) -> bytes:
+        import mido
+
+        if not isinstance(spec, dict):
+            raise MidiComposeError("spec must be a JSON object")
+
+        tempo_bpm = _bounded_float("tempo_bpm", spec.get("tempo_bpm", 120), 1.0, 999.0)
+        steps = _bounded_int("steps", spec.get("steps", 16), 1, 64)
+        bars = _bounded_int("bars", spec.get("bars", 1), 1, 64)
+        swing = _bounded_float("swing", spec.get("swing", 0.0), 0.0, 0.5)
+
+        pattern = spec.get("pattern")
+        if not isinstance(pattern, dict) or not pattern:
+            raise MidiComposeError("spec.pattern must be a non-empty object")
+
+        tpb = 480
+        beats_per_bar = 4
+        bar_ticks = tpb * beats_per_bar
+        ticks_per_step = max(1, bar_ticks // steps)
+
+        mid = mido.MidiFile(type=1, ticks_per_beat=tpb)
+
+        tempo_track = mido.MidiTrack()
+        tempo_track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo_bpm), time=0))
+        mid.tracks.append(tempo_track)
+
+        drum_track = mido.MidiTrack()
+        drum_track.append(mido.MetaMessage("track_name", name="Drums", time=0))
+        drum_track.append(mido.Message("program_change", channel=9, program=0, time=0))
+
+        channel = 9
+        events: list[tuple[int, "mido.Message"]] = []
+
+        for instrument, steps_list in pattern.items():
+            if not isinstance(steps_list, list):
+                raise MidiComposeError(f"pattern.{instrument} must be a list")
+
+            note_key = instrument.lower()
+            if note_key in _DRUM_NOTE_MAP:
+                note = _DRUM_NOTE_MAP[note_key]
+            else:
+                try:
+                    note = int(instrument)
+                    if not (0 <= note <= 127):
+                        raise MidiComposeError(
+                            f"pattern key {instrument!r}: note must be 0–127"
+                        )
+                except (ValueError, TypeError) as exc:
+                    raise MidiComposeError(
+                        f"unknown drum instrument {instrument!r}; "
+                        f"supported: {sorted(_DRUM_NOTE_MAP.keys())}"
+                    ) from exc
+
+            for bar_idx in range(bars):
+                for step_idx, hit in enumerate(steps_list):
+                    if not hit:
+                        continue
+                    velocity = int(min(127, max(1, hit if isinstance(hit, int) and hit > 1 else 100)))
+                    tick = bar_ticks * bar_idx + step_idx * ticks_per_step
+                    if swing > 0 and step_idx % 2 == 1:
+                        tick += int(swing * ticks_per_step * 2)
+                    off_tick = tick + max(1, ticks_per_step // 2)
+                    events.append((tick, mido.Message(
+                        "note_on", channel=channel, note=note, velocity=velocity, time=0,
+                    )))
+                    events.append((off_tick, mido.Message(
+                        "note_off", channel=channel, note=note, velocity=0, time=0,
+                    )))
+
+        events.sort(key=lambda x: (x[0], 0 if x[1].type == "note_off" else 1))
+        prev = 0
+        for tick, msg in events:
+            msg.time = tick - prev
+            drum_track.append(msg)
+            prev = tick
+
+        mid.tracks.append(drum_track)
+        buf = io.BytesIO()
+        mid.save(file=buf)
         return buf.getvalue()

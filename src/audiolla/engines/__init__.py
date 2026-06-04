@@ -13,18 +13,18 @@ from .demucs import DemucsEngine
 from .diarize_pyannote_engine import DiarizeEngine
 from .embed_engine import EmbedEngine
 from .ffmpeg_render import FfmpegRenderEngine
-from .hpss_engine import HpssEngine
-from .noise_reduce_engine import NoiseReduceEngine
 from .fx_chain import FxChainEngine
+from .hpss_engine import HpssEngine
 from .librosa_analyze import LibrosaAnalyzeEngine
 from .matchering_engine import MatcheringEngine
+from .metadata_engine import MetadataEngine
 from .midi_compose import MidiComposeEngine
 from .midi_render import MidiRenderEngine
+from .noise_reduce_engine import NoiseReduceEngine
 from .pedalboard_chain import PedalboardChainEngine
 from .silence_detect import SilenceDetectEngine
 from .sox_transform import SoxTransformEngine
 from .stretch_engine import StretchEngine
-from .metadata_engine import MetadataEngine
 from .tag_engine import TagEngine
 from .uvr_separator import UVRSeparatorEngine
 from .vad_engine import VADEngine
@@ -234,3 +234,15 @@ def is_classify_engine(engine: Any) -> bool:
 
 def is_metadata_engine(engine: Any) -> bool:
     return hasattr(engine, "read_tags") and hasattr(engine, "write_tags")
+
+
+def is_pitch_correct_engine(engine: Any) -> bool:
+    return hasattr(engine, "pitch_correct")
+
+
+def is_loop_point_engine(engine: Any) -> bool:
+    return hasattr(engine, "loop_point")
+
+
+def is_drum_pattern_engine(engine: Any) -> bool:
+    return hasattr(engine, "drum_pattern")

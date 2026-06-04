@@ -2216,5 +2216,180 @@ def build_mcp_server(
         cancelled = await JOB_QUEUE.cancel(job_id)
         return {"job_id": job_id, "cancelled": cancelled}
 
-    _log.info("mcp server initialised: 71 tools")
+    # ── loudness_curve — RMS envelope over time ────────────────────────────
+
+    @mcp.tool()
+    async def loudness_curve(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        hop_length: int = 512,
+    ) -> dict[str, Any]:
+        """Compute the RMS loudness envelope of an audio file as a time series.
+        Returns curve (list of {time_sec, rms_db}), duration, sample_rate, points."""
+        from .audio import loudness_curve as _lc  # noqa: PLC0415
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            return await asyncio.to_thread(_lc, raw, filename, hop_length=hop_length)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    # ── pitch_correct — auto-tune to nearest semitone ──────────────────────
+
+    @mcp.tool()
+    async def pitch_correct(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        strength: float = 1.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Pitch-correct audio toward the nearest chromatic semitone.
+        Uses pyin F0 detection. strength=1.0 is full correction, 0.0 is bypass.
+        Returns corrected audio as base64 or uploads to output_url."""
+        from .engines import is_pitch_correct_engine  # noqa: PLC0415
+        eng = next((e for e in engines.values() if is_pitch_correct_engine(e)), None)
+        if eng is None:
+            raise ValueError("pitch-correct engine not configured")
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            result = await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(result, output_format, output_url)
+
+    # ── repair_audio — declip + dehum ─────────────────────────────────────
+
+    @mcp.tool()
+    async def repair_audio(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        declip: bool = True,
+        dehum: bool = False,
+        hum_freq: float = 50.0,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Repair audio artifacts: interpolate clipped samples and/or remove mains hum.
+        declip: fix digital clipping (interpolates ±0.999 saturation).
+        dehum: notch-filter 50 or 60 Hz hum + harmonics.
+        hum_freq: 50 (EU) or 60 (US) Hz."""
+        from .audio import repair_audio as _repair  # noqa: PLC0415
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            result = await asyncio.to_thread(
+                _repair, raw, filename,
+                declip=declip, dehum=dehum, hum_freq=hum_freq,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(result, output_format, output_url)
+
+    # ── find_loop_point — best seamless loop boundary ─────────────────────
+
+    @mcp.tool()
+    async def find_loop_point(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        min_loop_bars: int = 4,
+        num_candidates: int = 5,
+    ) -> dict[str, Any]:
+        """Find the best seamless loop point in audio using beat-grid MFCC similarity.
+        Returns loop_start_sec, loop_end_sec, bars, score, tempo_bpm, and top candidates."""
+        from .engines import is_loop_point_engine  # noqa: PLC0415
+        eng = next((e for e in engines.values() if is_loop_point_engine(e)), None)
+        if eng is None:
+            raise ValueError("loop-point engine not configured")
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            return await eng.loop_point(raw, filename, min_loop_bars=min_loop_bars, num_candidates=num_candidates)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    # ── drum_pattern — step-sequencer spec → GM drum MIDI ─────────────────
+
+    @mcp.tool()
+    async def drum_pattern(
+        pattern: dict[str, list[int]],
+        tempo_bpm: float = 120.0,
+        steps: int = 16,
+        bars: int = 1,
+        swing: float = 0.0,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a MIDI drum pattern from a step-sequencer spec.
+        pattern: dict of instrument → step array (1=hit, 0=rest; or 1-127 for velocity).
+        Instruments: kick, snare, hihat, hihat_open, ride, crash, clap, rim, cowbell, etc.
+        Returns MIDI base64 or uploads to output_url."""
+        from .engines import is_drum_pattern_engine  # noqa: PLC0415
+        eng = next((e for e in engines.values() if is_drum_pattern_engine(e)), None)
+        if eng is None:
+            raise ValueError("drum-pattern engine not configured")
+        spec = {
+            "tempo_bpm": tempo_bpm,
+            "steps": steps,
+            "bars": bars,
+            "swing": swing,
+            "pattern": pattern,
+        }
+        try:
+            midi_bytes = await eng.drum_pattern(spec)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            import httpx  # noqa: PLC0415
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.put(output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"})
+            return {"output_url": output_url, "size": len(midi_bytes)}
+        return {
+            "midi_base64": base64.b64encode(midi_bytes).decode("ascii"),
+            "size": len(midi_bytes),
+        }
+
+    # ── chords_to_midi — chord progression → MIDI ─────────────────────────
+
+    @mcp.tool()
+    async def chords_to_midi(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        tempo_bpm: float = 120.0,
+        velocity: int = 80,
+        octave: int = 4,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Detect chord progression in audio and export as a MIDI chord progression.
+        Each chord segment becomes a held chord (root + 3rd + 5th).
+        Returns MIDI base64 or uploads to output_url."""
+        from .audio import chords_to_midi_bytes as _ctm  # noqa: PLC0415
+        from .engines import is_chord_detect_engine  # noqa: PLC0415
+        chord_eng = next((e for e in engines.values() if is_chord_detect_engine(e)), None)
+        if chord_eng is None:
+            raise ValueError("chord-detect engine not configured")
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            chord_result = await chord_eng.detect_chords(raw, filename)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        chords = chord_result.get("chords", [])
+        if not chords:
+            raise ValueError("no chords detected in audio")
+        try:
+            midi_bytes = await asyncio.to_thread(
+                _ctm, chords, tempo_bpm=tempo_bpm, velocity=velocity, octave=octave,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        if output_url:
+            import httpx  # noqa: PLC0415
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.put(output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"})
+            return {"output_url": output_url, "size": len(midi_bytes), "key": chord_result.get("key", "")}
+        return {
+            "midi_base64": base64.b64encode(midi_bytes).decode("ascii"),
+            "size": len(midi_bytes),
+            "chord_count": len(chords),
+            "key": chord_result.get("key", ""),
+        }
+
+    _log.info("mcp server initialised: 77 tools")
     return mcp

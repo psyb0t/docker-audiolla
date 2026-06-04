@@ -53,6 +53,12 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | ⏪ **Reverse** | Flip audio backwards |
 | 🔁 **Loop** | Repeat audio N times |
 | 🎯 **BPM match** | Auto-detect BPM then stretch to a target — no manual math |
+| 📈 **Loudness curve** | RMS envelope over time — time-stamped dB values for gain automation |
+| 🎤 **Pitch correct** | Auto-tune toward nearest chromatic semitone — configurable strength |
+| 🔧 **Repair** | Declip + dehum — fix clipped peaks and remove power-line hum |
+| 🔁 **Loop point** | Find best seamless loop boundary — score, bar count, candidates list |
+| 🥁 **Drum machine** | Step-sequencer spec → GM drum MIDI — 16-step pattern, swing, tempo |
+| 🎼 **Chords to MIDI** | Chord progression → MIDI file — root+3rd+5th voicings per segment |
 | ↔️ **Stereo width** | Widen or collapse the stereo image via M/S processing |
 | ✂️ **Split** | Split into N equal parts or on silence — returns ZIP of segments |
 | 🔊 **Pan** | Position audio in the stereo field (-1 left → 0 center → 1 right) |
@@ -91,10 +97,13 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Speaker diarization](#speaker-diarization)
   - [Transform](#transform)
   - [Loudness measurement](#loudness-measurement)
+  - [Loudness curve](#loudness-curve)
   - [Loudness normalization](#loudness-normalization)
   - [HPSS (harmonic/percussive split)](#hpss-harmonicpercussive-split)
   - [Spectral noise reduction](#spectral-noise-reduction)
   - [Time-stretch and pitch-shift](#time-stretch-and-pitch-shift)
+  - [Pitch correct](#pitch-correct)
+  - [Repair](#repair)
   - [Audio tagging](#audio-tagging)
   - [Audio embeddings](#audio-embeddings)
   - [Zero-shot classification](#zero-shot-classification)
@@ -117,11 +126,14 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Key match](#key-match)
   - [Sidechain duck](#sidechain-duck)
   - [Effects chain](#effects-chain)
+  - [Loop point](#loop-point)
   - [Compose MIDI](#compose-midi)
   - [Inspect MIDI](#inspect-midi)
   - [Transform MIDI](#transform-midi)
   - [Render MIDI to audio](#render-midi-to-audio)
   - [Generate music from a spec](#generate-music-from-a-spec)
+  - [Drum pattern](#drum-pattern)
+  - [Chords to MIDI](#chords-to-midi)
   - [Audio metadata tags](#audio-metadata-tags)
   - [Clip detection](#clip-detection)
   - [Mid/Side encode and decode](#midside-encode-and-decode)
@@ -558,6 +570,28 @@ curl -X POST http://localhost:8000/v1/audio/loudness \
 # → {"loudness_lufs": -18.4}
 ```
 
+### Loudness curve
+
+RMS envelope over time — returns a list of `{time_sec, rms_db}` points. Useful for generating gain automation curves, finding loud and quiet sections, or visualising dynamic range before mastering.
+
+```bash
+# Default hop (512 samples) — fine-grained envelope
+curl -X POST http://localhost:8000/v1/audio/loudness-curve \
+  -F "file=@track.wav" | jq '.curve[:5]'
+# → [
+#     {"time_sec": 0.0,   "rms_db": -18.4},
+#     {"time_sec": 0.012, "rms_db": -17.9},
+#     ...
+#   ]
+
+# Coarser envelope (2048-sample hop)
+curl -X POST http://localhost:8000/v1/audio/loudness-curve \
+  -F "file=@track.wav" \
+  -F "hop_length=2048" | jq '{duration, sample_rate, points}'
+```
+
+Response fields: `curve` (array of `{time_sec, rms_db}`), `duration` (seconds), `sample_rate`, `points` (total curve length). Optional param: `hop_length` (default 512).
+
 ### Loudness normalization
 
 ```bash
@@ -655,6 +689,63 @@ curl -X POST http://localhost:8000/v1/audio/stretch \
 ```
 
 Params: `tempo_factor` (default 1.0 — 0.5 = half speed), `pitch_semitones` (default 0.0 — ±semitones), `output_format`, `output_path`.
+
+### Pitch correct
+
+Auto-tune audio toward the nearest chromatic semitone using librosa's phase vocoder. Full `strength=1.0` snaps hard to pitch; lower values blend the corrected and original signal.
+
+```bash
+# Hard auto-tune — snap every note to the nearest semitone
+curl -X POST http://localhost:8000/v1/audio/pitch-correct \
+  -F "file=@vocal.wav" \
+  -o tuned.wav
+
+# Subtle correction — 50% blend
+curl -X POST http://localhost:8000/v1/audio/pitch-correct \
+  -F "file=@vocal.wav" \
+  -F "strength=0.5" \
+  -F "output_format=mp3" \
+  -o tuned.mp3
+
+# Async for long files, staged output
+curl -X POST http://localhost:8000/v1/audio/pitch-correct \
+  -F "file_path=sessions/take1.wav" \
+  -F "strength=1.0" \
+  -F "async_job=true" \
+  -F "output_path=sessions/take1_tuned.wav"
+```
+
+Params: `strength` (0.0–1.0, default 1.0), `output_format`, `output_path`, `async_job`, `webhook_url`. Requires `librosa-analyze` engine.
+
+### Repair
+
+Declip clipped peaks and/or remove power-line hum. Declipping uses cubic interpolation to reconstruct flattened waveform tops and bottoms. Dehumming applies a notch filter at `hum_freq` (and harmonics).
+
+```bash
+# Declip only (default)
+curl -X POST http://localhost:8000/v1/audio/repair \
+  -F "file=@overdriven.wav" \
+  -o repaired.wav
+
+# Remove 60 Hz hum (North American power grid)
+curl -X POST http://localhost:8000/v1/audio/repair \
+  -F "file=@recording.wav" \
+  -F "declip=false" \
+  -F "dehum=true" \
+  -F "hum_freq=60.0" \
+  -o clean.wav
+
+# Both — declip a 50 Hz humming mic recording
+curl -X POST http://localhost:8000/v1/audio/repair \
+  -F "file=@problem_track.wav" \
+  -F "declip=true" \
+  -F "dehum=true" \
+  -F "hum_freq=50.0" \
+  -F "output_format=flac" \
+  -o repaired.flac
+```
+
+Params: `declip` (bool, default `true`), `dehum` (bool, default `false`), `hum_freq` (Hz, default 50.0), `output_format`, `output_path`, `async_job`, `webhook_url`.
 
 ### Audio tagging
 
@@ -1134,6 +1225,26 @@ Allowed effects: `Compressor`, `Limiter`, `NoiseGate`, `Gain`, `Clipping`, `Dist
 
 VST3 / AudioUnit / external plugins are NOT in the allowlist — they load arbitrary native code.
 
+### Loop point
+
+Find the best seamless loop boundary in an audio file — audiolla analyses the beat grid and returns the start and end positions where a loop will repeat without a click or gap.
+
+```bash
+# Find best loop boundary (default: minimum 4 bars)
+curl -X POST http://localhost:8000/v1/audio/loop-point \
+  -F "file=@beat.wav" | jq '{loop_start_sec, loop_end_sec, bars, score, tempo_bpm}'
+# → {"loop_start_sec": 0.0, "loop_end_sec": 7.44, "bars": 4,
+#    "score": 0.94, "tempo_bpm": 128.0, "candidates": [...]}
+
+# Require at least 8 bars, return top 3 candidates
+curl -X POST http://localhost:8000/v1/audio/loop-point \
+  -F "file=@long_track.wav" \
+  -F "min_loop_bars=8" \
+  -F "num_candidates=3"
+```
+
+Response fields: `loop_start_sec`, `loop_end_sec`, `bars`, `score` (0–1, higher = tighter loop), `tempo_bpm`, `candidates` (array of ranked alternatives). Optional params: `min_loop_bars` (default 4), `num_candidates` (default 5). Requires `librosa-analyze` engine.
+
 ### Compose MIDI
 
 POST a JSON song spec, get Standard MIDI File bytes back. Write the spec by hand, generate it from a tracker / DAW / sequencer, script it out of a Python notebook, or have an LLM produce it — audiolla doesn't care. No AI runs server-side; the spec is the music.
@@ -1243,6 +1354,72 @@ curl -X POST 'http://localhost:8000/v1/midi/generate?output_format=wav' \
   -d @spec.json \
   -o song.wav
 ```
+
+### Drum pattern
+
+Step-sequencer spec → GM drum MIDI. Define a rhythmic pattern as arrays of 0/1 step values for each drum voice; the server maps them to GM channel 9 pitches and bakes a MIDI file. Optional swing shifts even-numbered 16th steps for a shuffled feel.
+
+```bash
+# 4-on-the-floor kick, snare on 2&4, busy hi-hat — 2 bars at 120 BPM
+curl -X POST http://localhost:8000/v1/midi/drum \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tempo_bpm": 120,
+    "steps": 16,
+    "bars": 2,
+    "swing": 0.0,
+    "pattern": {
+      "kick":  [1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0],
+      "snare": [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
+      "hihat": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+    }
+  }' \
+  -o beat.mid
+
+# Swing groove — 0.1 = subtle, 0.5 = strong shuffle
+curl -X POST http://localhost:8000/v1/midi/drum \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tempo_bpm": 95,
+    "steps": 16,
+    "bars": 1,
+    "swing": 0.2,
+    "pattern": {
+      "kick":  [1,0,0,1,0,0,1,0,1,0,0,1,0,0,1,0],
+      "snare": [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
+      "hihat": [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0]
+    }
+  }' \
+  -o groove.mid
+```
+
+Body fields: `tempo_bpm` (default 120), `steps` (steps per bar, default 16), `bars` (default 1), `swing` (0.0–0.5, default 0.0), `pattern` (object — keys are drum voice names, values are arrays of 0/1). Supported voices: `kick`, `snare`, `hihat`, `open_hihat`, `ride`, `crash`, `clap`, `tom_hi`, `tom_mid`, `tom_low`, `rim`, `cowbell`. Requires `midi-compose` engine.
+
+### Chords to MIDI
+
+Detect the chord progression from an audio file and convert each segment to a MIDI chord (root + 3rd + 5th). Useful for exporting a detected chord chart as playable MIDI, re-harmonising an arrangement, or seeding a DAW session.
+
+```bash
+# Audio → chord MIDI at the detected tempo
+curl -X POST http://localhost:8000/v1/audio/chords-to-midi \
+  -F "file=@track.wav" \
+  -o chords.mid
+
+# Override tempo, set velocity and octave
+curl -X POST http://localhost:8000/v1/audio/chords-to-midi \
+  -F "file=@song.wav" \
+  -F "tempo_bpm=120" \
+  -F "velocity=90" \
+  -F "octave=3" \
+  -o chords.mid
+
+# Stage the output
+curl -X POST http://localhost:8000/v1/audio/chords-to-midi \
+  -F "file_path=sessions/song.wav" \
+  -F "output_path=midi/song_chords.mid"
+```
+
+Optional params: `tempo_bpm` (default: detected from audio), `velocity` (1–127, default 80), `octave` (0–8, default 4), `output_path`. Requires `chord-detect` engine. Each chord segment becomes a MIDI chord event (root + major 3rd/minor 3rd + perfect 5th, duration = segment length).
 
 ### Audio metadata tags
 
@@ -1567,10 +1744,13 @@ bytes.
 | `POST` | `/v1/audio/diarize/{engine}` | JSON — per-speaker timestamped segments |
 | `POST` | `/v1/audio/transform` | audio bytes |
 | `POST` | `/v1/audio/loudness` | JSON — `{loudness_lufs}` (measure only, no audio) |
+| `POST` | `/v1/audio/loudness-curve` | JSON — `{curve:[{time_sec,rms_db}],duration,sample_rate,points}`; `hop_length` param |
 | `POST` | `/v1/audio/normalize` | audio bytes — requires `target_lufs`; header `X-Loudness-LUFS` carries pre-normalization level |
 | `POST` | `/v1/audio/hpss` | ZIP containing `harmonic.<fmt>` + `percussive.<fmt>` |
 | `POST` | `/v1/audio/noise-reduce` | audio bytes |
 | `POST` | `/v1/audio/stretch` | audio bytes |
+| `POST` | `/v1/audio/pitch-correct` | audio bytes — `strength` [0.0–1.0]; requires `librosa-analyze` |
+| `POST` | `/v1/audio/repair` | audio bytes — `declip` bool, `dehum` bool, `hum_freq` Hz |
 | `POST` | `/v1/audio/tag` | JSON — top-K AudioSet labels with confidence scores |
 | `POST` | `/v1/audio/embed` | JSON — 512-dim embedding; with `query_text` also returns cosine similarity |
 | `POST` | `/v1/audio/classify` | JSON — `{results: [{label, score}]}` sorted descending; requires `clap-embed` |
@@ -1599,6 +1779,8 @@ bytes.
 | `POST` | `/v1/audio/conv-reverb` | audio bytes — `ir_file` / `ir_file_path` / `ir_file_url` required; `wet_mix` [0.0–1.0] |
 | `POST` | `/v1/audio/transient` | audio bytes — `attack_gain_db` + `sustain_gain_db` |
 | `POST` | `/v1/audio/dj-prep` | JSON — bpm, key, camelot, integrated_lufs; requires `librosa-analyze` + `chord-detect` |
+| `POST` | `/v1/audio/loop-point` | JSON — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}`; requires `librosa-analyze` |
+| `POST` | `/v1/audio/chords-to-midi` | MIDI bytes — chord progression from audio; requires `chord-detect` |
 
 ### Batch
 
@@ -1626,6 +1808,7 @@ Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` o
 | `POST` | `/v1/midi/quantize` | MIDI bytes — `grid_beats` snaps all note timings to a rhythmic grid |
 | `POST` | `/v1/midi/render` | audio bytes — input MIDI via `file` / `file_path` / `file_url` |
 | `POST` | `/v1/midi/generate` | audio bytes — body is `application/json` song spec (compose + render in one) |
+| `POST` | `/v1/midi/drum` | MIDI bytes — body is `application/json` step-sequencer spec; requires `midi-compose` |
 
 ### File staging
 
@@ -1683,10 +1866,13 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `diarize` | Speaker diarization via pyannote — per-speaker timestamped segments |
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
 | `loudness` | Measure integrated LUFS — returns JSON only |
+| `loudness_curve` | RMS envelope over time — `{curve:[{time_sec,rms_db}],duration,sample_rate,points}` |
 | `normalize` | Normalize audio to a target LUFS level — returns base64 audio |
 | `hpss` | Harmonic/percussive separation — returns per-stem base64 audio |
 | `noise_reduce` | Spectral noise reduction — stationary or adaptive mode |
 | `stretch` | Time-stretch + pitch-shift via librosa phase vocoder |
+| `pitch_correct` | Auto-tune toward nearest chromatic semitone — `strength` [0.0–1.0]; requires `librosa-analyze` |
+| `repair_audio` | Declip + dehum — `declip` bool, `dehum` bool, `hum_freq` Hz |
 | `tag` | Audio tagging via AST — top-K AudioSet labels with confidence scores |
 | `embed` | 512-dim CLAP audio embedding; with `query_text` returns cosine similarity |
 | `classify` | Zero-shot CLAP classification — cosine similarity against any list of text labels |
@@ -1714,6 +1900,8 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `midi_transform` | Transpose, quantize, tempo override, channel filter on an existing MIDI file |
 | `midi_render` | MIDI → audio via fluidsynth + SoundFont |
 | `midi_generate` | One-shot compose + render — spec in, audio out |
+| `drum_pattern` | Step-sequencer JSON spec → GM drum MIDI; `pattern` object of voice arrays, `swing`, `steps`, `bars` |
+| `chords_to_midi` | Chord progression detected from audio → MIDI file; `tempo_bpm`, `velocity`, `octave` params |
 | `audio_metadata` | Read or write audio tags — pass `tags` dict to write, omit to read |
 | `detect_clipping` | Report digital clipping — clipped, clip_count, clip_ratio, peak_db |
 | `mid_side` | M/S encode (`mode=encode`) or decode (`mode=decode`) stereo audio |
@@ -1721,6 +1909,7 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `convolution_reverb` | Apply IR reverb — `ir_file_path`/`ir_file_url` + `wet_mix` [0.0–1.0] |
 | `transient_shaper` | Attack/sustain shaping — `attack_gain_db`, `sustain_gain_db` |
 | `dj_prep` | BPM + key + Camelot wheel + LUFS in one call |
+| `find_loop_point` | Find best seamless loop boundary — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}` |
 | `list_jobs` | List async jobs; optional `status` filter |
 | `get_job` | Poll one async job by `job_id` |
 | `cancel_job` | Cancel a running job or remove a completed one |

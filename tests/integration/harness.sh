@@ -58,11 +58,14 @@ harness_preflight() {
 
 # Always-regenerate the synthetic audio fixtures so tests are deterministic
 # and never depend on a committed binary. Uses the prod image's ffmpeg (no
-# host ffmpeg dependency). Two files:
+# host ffmpeg dependency). Three files:
 #
 #   audio.wav      — 8 s stereo 440 Hz sine, 44.1 kHz pcm_s16le
 #   audio_ref.wav  — same source attenuated -6 dB, used as the matchering
 #                    reference in e2e_mastering.sh (must differ from target)
+#   beat_120.wav   — 8 s mono 120 BPM click track (880 Hz pulse every 0.5 s,
+#                    50 ms on / 450 ms off); used by beat-dependent tests
+#                    (beat-slice, bpm-match, loop-point, dj-prep, MIR beats)
 _harness_generate_fixtures() {
     local fx="${_HARNESS_REPO_ROOT}/tests/integration/.fixtures"
     mkdir -p "$fx"
@@ -87,6 +90,15 @@ _harness_generate_fixtures() {
         -hide_banner -loglevel error \
         -y -i /fx/audio.wav -af "volume=-6dB" /fx/audio_ref.wav \
         || { echo "FATAL: fixture audio_ref.wav generation failed" >&2; return 1; }
+    docker run --rm \
+        -u "$(id -u):$(id -g)" \
+        -v "${fx}:/fx" \
+        --entrypoint ffmpeg "$HARNESS_IMAGE" \
+        -hide_banner -loglevel error \
+        -f lavfi \
+        -i "aevalsrc=sin(2*PI*880*t)*if(lt(mod(t\,0.5)\,0.05)\,1\,0):s=44100:d=8" \
+        -ar 44100 -y /fx/beat_120.wav \
+        || { echo "FATAL: fixture beat_120.wav generation failed" >&2; return 1; }
     return 0
 }
 

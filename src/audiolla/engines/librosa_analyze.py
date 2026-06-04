@@ -27,7 +27,6 @@ from typing import Any
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
 from .base import EngineBase
 
-
 # Krumhansl-Schmuckler reference profiles (major + minor). Indexed by pitch
 # class 0..11 (C..B). The chroma vector of the input is correlated against
 # all 24 rotations of these profiles; argmax → key.
@@ -582,6 +581,264 @@ class LibrosaAnalyzeEngine(EngineBase):
                     os.unlink(p)
                 except OSError:
                     pass
+
+    # ── loudness_curve ─────────────────────────────────────────────────────
+
+    async def loudness_curve_method(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        hop_length: int = 512,
+    ) -> dict:
+        """RMS envelope as loudness curve over time."""
+        async with self._lock:
+            from ..audio import loudness_curve  # noqa: PLC0415
+            result = await asyncio.to_thread(loudness_curve, raw, filename, hop_length=hop_length)
+            self._touch()
+            return result
+
+    # ── pitch_correct ──────────────────────────────────────────────────────
+
+    async def pitch_correct(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        strength: float = 1.0,
+        output_format: str = "wav",
+    ) -> bytes:
+        """Pitch-correct audio toward nearest chromatic semitone.
+
+        Uses pyin F0 detection to find the dominant pitch offset, then
+        applies librosa pitch_shift to move toward the nearest semitone.
+        strength=1.0 is full correction, 0.0 is dry pass-through.
+        """
+        async with self._lock:
+            result = await asyncio.to_thread(
+                self._pitch_correct_sync, raw, filename, strength, output_format,
+            )
+            self._touch()
+            return result
+
+    def _pitch_correct_sync(
+        self,
+        raw: bytes,
+        filename: str,
+        strength: float,
+        output_format: str,
+    ) -> bytes:
+        import librosa
+        import numpy as np
+        import soundfile as sf
+
+        from ..audio import SUPPORTED_OUTPUT_FORMATS  # noqa: PLC0415
+
+        if not (0.0 <= strength <= 1.0):
+            raise AudioConversionError(
+                f"strength must be in [0.0, 1.0], got {strength}"
+            )
+        if output_format not in SUPPORTED_OUTPUT_FORMATS:
+            raise AudioConversionError(
+                f"unsupported output format {output_format!r}; "
+                f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+            )
+
+        wav_path = to_wav_float32(raw, filename)
+        out_wav_path = None
+        try:
+            y, sr = librosa.load(wav_path, sr=None, mono=False)
+            y_mono = librosa.to_mono(y) if y.ndim > 1 else y
+
+            f0, voiced_flag, _ = librosa.pyin(
+                y_mono,
+                fmin=float(librosa.note_to_hz("C2")),
+                fmax=float(librosa.note_to_hz("C7")),
+                sr=sr,
+            )
+            voiced_f0 = f0[voiced_flag & np.isfinite(f0)]
+
+            if len(voiced_f0) < 4 or strength < 0.001:
+                out_bytes, _ = encode_audio(wav_path, output_format)
+                return out_bytes
+
+            median_hz = float(np.median(voiced_f0))
+            median_midi = float(librosa.hz_to_midi(median_hz))
+            nearest_midi = round(median_midi)
+            full_shift = float(nearest_midi - median_midi)
+
+            if abs(full_shift) < 0.05:
+                out_bytes, _ = encode_audio(wav_path, output_format)
+                return out_bytes
+
+            if y.ndim > 1:
+                shifted = np.stack([
+                    librosa.effects.pitch_shift(y[i], sr=sr, n_steps=full_shift)
+                    for i in range(y.shape[0])
+                ], axis=0)
+            else:
+                shifted = librosa.effects.pitch_shift(y, sr=sr, n_steps=full_shift)
+
+            result = shifted * strength + y * (1.0 - strength)
+            np.clip(result, -1.0, 1.0, out=result)
+
+            out_wav_fd, out_wav_path = tempfile.mkstemp(
+                prefix="audiolla-pc-out-", suffix=".wav"
+            )
+            os.close(out_wav_fd)
+            if result.ndim > 1:
+                sf.write(out_wav_path, result.T, sr, subtype="FLOAT")
+            else:
+                sf.write(out_wav_path, result, sr, subtype="FLOAT")
+            out_bytes, _ = encode_audio(out_wav_path, output_format)
+            return out_bytes
+        finally:
+            for p in filter(None, [wav_path, out_wav_path]):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    # ── loop_point ─────────────────────────────────────────────────────────
+
+    async def loop_point(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        min_loop_bars: int = 4,
+        num_candidates: int = 5,
+    ) -> dict:
+        """Find the best seamless loop boundary in audio.
+
+        Quantizes to beat grid, computes MFCC spectral similarity between
+        loop start and end points, returns the highest-scoring candidate.
+        """
+        async with self._lock:
+            result = await asyncio.to_thread(
+                self._loop_point_sync, raw, filename, min_loop_bars, num_candidates,
+            )
+            self._touch()
+            return result
+
+    def _loop_point_sync(
+        self,
+        raw: bytes,
+        filename: str,
+        min_loop_bars: int,
+        num_candidates: int,
+    ) -> dict:
+        import librosa
+        import numpy as np
+
+        if min_loop_bars < 1 or min_loop_bars > 64:
+            raise AudioConversionError(
+                f"min_loop_bars must be in [1, 64], got {min_loop_bars}"
+            )
+
+        wav_path = to_wav_float32(raw, filename)
+        try:
+            y, sr = librosa.load(wav_path, sr=None, mono=True)
+            duration = float(len(y) / sr)
+
+            tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+            tempo_val = float(np.atleast_1d(tempo)[0])
+            beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+
+            min_beats_needed = min_loop_bars * 4 + 2
+            if len(beat_times) < min_beats_needed:
+                return {
+                    "loop_start_sec": round(float(beat_times[0]) if len(beat_times) > 0 else 0.0, 4),
+                    "loop_end_sec": round(duration, 4),
+                    "bars": 0,
+                    "score": 0.0,
+                    "tempo_bpm": round(tempo_val, 2),
+                    "duration": round(duration, 4),
+                    "candidates": [],
+                    "note": (
+                        f"too few beats for {min_loop_bars}-bar loop analysis "
+                        f"(found {len(beat_times)}, need {min_beats_needed})"
+                    ),
+                }
+
+            hop = 512
+            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=hop)
+
+            def feat_at(t: float) -> "np.ndarray":
+                w = max(1, int(librosa.time_to_frames(
+                    2 * 60.0 / max(tempo_val, 1.0), sr=sr, hop_length=hop
+                )))
+                frame = librosa.time_to_frames(t, sr=sr, hop_length=hop)
+                s = max(0, frame - w // 2)
+                e = min(mfcc.shape[1], frame + w // 2)
+                if e <= s:
+                    return np.zeros(13)
+                return np.mean(mfcc[:, s:e], axis=1)
+
+            beats_per_bar = 4
+            seen: set[tuple[float, float]] = set()
+            candidates: list[tuple[float, float, float, int]] = []
+
+            for bar_count in range(min_loop_bars, len(beat_times) // beats_per_bar + 1):
+                loop_beats = bar_count * beats_per_bar
+                if loop_beats >= len(beat_times):
+                    break
+                for start_idx in range(0, len(beat_times) - loop_beats, beats_per_bar):
+                    end_idx = start_idx + loop_beats
+                    if end_idx >= len(beat_times):
+                        break
+                    start_t = float(beat_times[start_idx])
+                    end_t = float(beat_times[end_idx])
+                    key = (round(start_t, 3), round(end_t, 3))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    fs = feat_at(start_t)
+                    fe = feat_at(end_t)
+                    ns, ne = float(np.linalg.norm(fs)), float(np.linalg.norm(fe))
+                    score = float(np.dot(fs, fe) / (ns * ne)) if ns > 0 and ne > 0 else 0.0
+                    candidates.append((score, start_t, end_t, bar_count))
+                    if len(candidates) >= num_candidates * 20:
+                        break
+                if len(candidates) >= num_candidates * 20:
+                    break
+
+            if not candidates:
+                return {
+                    "loop_start_sec": round(float(beat_times[0]), 4),
+                    "loop_end_sec": round(float(beat_times[min(min_loop_bars * 4, len(beat_times) - 1)]), 4),
+                    "bars": min_loop_bars,
+                    "score": 0.0,
+                    "tempo_bpm": round(tempo_val, 2),
+                    "duration": round(duration, 4),
+                    "candidates": [],
+                }
+
+            candidates.sort(key=lambda x: -x[0])
+            best_score, best_start, best_end, best_bars = candidates[0]
+            top = [
+                {
+                    "start_sec": round(s, 4),
+                    "end_sec": round(e, 4),
+                    "bars": b,
+                    "score": round(sc, 4),
+                }
+                for sc, s, e, b in candidates[:num_candidates]
+            ]
+            return {
+                "loop_start_sec": round(best_start, 4),
+                "loop_end_sec": round(best_end, 4),
+                "bars": best_bars,
+                "score": round(best_score, 4),
+                "tempo_bpm": round(tempo_val, 2),
+                "duration": round(duration, 4),
+                "candidates": top,
+            }
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
 
 
 def _lufs_from_wav(wav_path: str) -> float:

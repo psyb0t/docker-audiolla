@@ -13,6 +13,7 @@ source "${_DIR}/harness.sh"
 source "${_DIR}/common.sh"
 
 FIXTURE="${_DIR}/.fixtures/audio.wav"
+BEAT_FIXTURE="${_DIR}/.fixtures/beat_120.wav"
 
 harness_start "librosa-analyze"
 
@@ -180,11 +181,34 @@ test_segments_returns_ranges() {
     echo "OK: segments_returns_ranges ($(echo "$body" | jq -r '.segments | length') segments)"
 }
 
+# ── beats with click track: BPM in [100, 150] range ──────────────────────────
+# The plain 440 Hz sine has no perceivable beat — librosa's tracker can return
+# anything. Use the harness-generated beat_120.wav (120 BPM click track) to
+# verify the tracker actually returns a sensible BPM.
+
+test_beats_click_fixture_bpm_in_range() {
+    local body bpm
+    body=$(curl -s --max-time 60 -X POST \
+        -F "file=@${BEAT_FIXTURE}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/beats")
+    bpm=$(echo "$body" | jq -r '.tempo_bpm // empty')
+    if [ -z "$bpm" ] || [ "$bpm" = "null" ]; then
+        echo "  FAIL: tempo_bpm missing for beat fixture; body: $body"; return 1
+    fi
+    if ! echo "$body" | jq -e '.tempo_bpm > 100 and .tempo_bpm < 150' >/dev/null 2>&1; then
+        echo "  FAIL: BPM $bpm not in [100,150] for 120BPM click fixture; body: $body"; return 1
+    fi
+    local count
+    count=$(echo "$body" | jq -r '.beat_count // 0')
+    echo "OK: beats_click_fixture_bpm_in_range (bpm=${bpm} count=${count})"
+}
+
 harness_run_tests \
     test_beats_returns_tempo_and_beats \
     test_beats_click_track_is_wav \
     test_beats_click_track_output_path \
     test_beats_start_bpm \
+    test_beats_click_fixture_bpm_in_range \
     test_onsets_returns_list \
     test_melody_contour \
     test_melody_as_midi \

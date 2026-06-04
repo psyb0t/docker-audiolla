@@ -50,6 +50,7 @@ from .audio import (
     AudioConversionError,
     audio_info,
     beat_slice,
+    chords_to_midi_bytes,
     clip_detect,
     concat_audio,
     content_type_for,
@@ -58,11 +59,13 @@ from .audio import (
     eq_audio,
     fade_audio,
     loop_audio,
+    loudness_curve,
     mid_side_decode,
     mid_side_encode,
     mix_audio,
     multi_stream_zip,
     pan_audio,
+    repair_audio,
     reverse_audio,
     sidechain_duck,
     speed_audio,
@@ -81,9 +84,11 @@ from .engines import (
     is_chord_detect_engine,
     is_deepfilter_engine,
     is_diarize_engine,
+    is_drum_pattern_engine,
     is_ffmpeg_render_engine,
     is_fingerprint_engine,
     is_fx_engine,
+    is_loop_point_engine,
     is_loudness_engine,
     is_mastering_engine,
     is_metadata_engine,
@@ -93,6 +98,7 @@ from .engines import (
     is_midi_render_engine,
     is_midi_transform_engine,
     is_onsets_engine,
+    is_pitch_correct_engine,
     is_segments_engine,
     is_classify_engine,
     is_embed_engine,
@@ -4343,6 +4349,322 @@ async def dj_prep(
         "camelot": camelot,
         "integrated_lufs": round(lufs, 2) if lufs is not None else None,
     })
+
+
+# ── /v1/audio/loudness-curve — RMS envelope over time ───────────────────────
+
+
+@app.post("/v1/audio/loudness-curve")
+async def loudness_curve_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    hop_length: int = Form(default=512),
+) -> JSONResponse:
+    """Compute the RMS loudness envelope as a time series.
+    Returns {curve: [{time_sec, rms_db}, ...], duration, sample_rate, points}."""
+    if hop_length < 64 or hop_length > 8192:
+        raise HTTPException(
+            status_code=400,
+            detail=f"hop_length must be in [64, 8192], got {hop_length}",
+        )
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await asyncio.to_thread(loudness_curve, raw, filename, hop_length=hop_length)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/audio/pitch-correct — auto-tune toward nearest semitone ──────────────
+
+
+@app.post("/v1/audio/pitch-correct")
+async def pitch_correct_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    strength: float = Form(default=1.0),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Pitch-correct audio toward the nearest chromatic semitone via pyin F0 detection.
+    strength=1.0 is full correction, 0.0 is bypass. Requires librosa-analyze engine."""
+    _validate_output_format(output_format)
+    if not (0.0 <= strength <= 1.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"strength must be in [0.0, 1.0], got {strength}",
+        )
+    eng = next((e for e in ENGINES.values() if is_pitch_correct_engine(e)), None)
+    if eng is None:
+        raise HTTPException(status_code=404, detail="pitch-correct engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn, _eng = raw, filename, eng
+
+        async def _pc_coro():
+            try:
+                _b = await _eng.pitch_correct(_raw, _fn, strength=strength, output_format=output_format)
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"pitch_correct.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"strength": strength},
+            )
+
+        return await _submit_job(
+            _pc_coro(), endpoint="/v1/audio/pitch-correct",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        audio_bytes = await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"pitch_correct.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"strength": strength},
+    )
+
+
+# ── /v1/audio/repair — declip + dehum ────────────────────────────────────────
+
+
+@app.post("/v1/audio/repair")
+async def repair_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    declip: bool = Form(default=True),
+    dehum: bool = Form(default=False),
+    hum_freq: float = Form(default=50.0),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Repair audio: interpolate clipped samples and/or remove mains hum.
+    declip: fix digital clipping. dehum: notch-filter 50/60 Hz hum.
+    hum_freq: fundamental hum frequency (50 for EU, 60 for US)."""
+    _validate_output_format(output_format)
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        _eff_op = output_path or f"jobs/{job_id}.{output_format}"
+        _raw, _fn = raw, filename
+
+        async def _rep_coro():
+            try:
+                _b = await asyncio.to_thread(
+                    repair_audio, _raw, _fn,
+                    declip=declip, dehum=dehum, hum_freq=hum_freq,
+                    output_format=output_format,
+                )
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                _b, media_type=content_type_for(output_format),
+                filename=f"repaired.{output_format}",
+                output_path=_eff_op, output_url=None,
+                extra_json={"declip": declip, "dehum": dehum, "hum_freq": hum_freq},
+            )
+
+        return await _submit_job(
+            _rep_coro(), endpoint="/v1/audio/repair",
+            webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        audio_bytes = await asyncio.to_thread(
+            repair_audio, raw, filename,
+            declip=declip, dehum=dehum, hum_freq=hum_freq,
+            output_format=output_format,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        audio_bytes,
+        media_type=content_type_for(output_format),
+        filename=f"repaired.{output_format}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"declip": declip, "dehum": dehum, "hum_freq": hum_freq},
+    )
+
+
+# ── /v1/audio/loop-point — find best seamless loop boundary ─────────────────
+
+
+@app.post("/v1/audio/loop-point")
+async def loop_point_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    min_loop_bars: int = Form(default=4),
+    num_candidates: int = Form(default=5),
+) -> JSONResponse:
+    """Find the best seamless loop point in audio using beat-grid MFCC similarity.
+    Returns loop_start_sec, loop_end_sec, bars, score, tempo_bpm, candidates."""
+    if min_loop_bars < 1 or min_loop_bars > 64:
+        raise HTTPException(
+            status_code=400,
+            detail=f"min_loop_bars must be in [1, 64], got {min_loop_bars}",
+        )
+    if num_candidates < 1 or num_candidates > 20:
+        raise HTTPException(
+            status_code=400,
+            detail=f"num_candidates must be in [1, 20], got {num_candidates}",
+        )
+    eng = next((e for e in ENGINES.values() if is_loop_point_engine(e)), None)
+    if eng is None:
+        raise HTTPException(status_code=404, detail="loop-point engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        result = await eng.loop_point(
+            raw, filename, min_loop_bars=min_loop_bars, num_candidates=num_candidates,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+# ── /v1/midi/drum — step-sequencer spec → GM drum MIDI ──────────────────────
+
+
+@app.post("/v1/midi/drum")
+async def midi_drum(
+    request: Request,
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+) -> Response:
+    """Generate a MIDI drum pattern from a step-sequencer spec.
+    Body: application/json or multipart with `spec` field.
+    spec.pattern keys: kick, snare, hihat, hihat_open, ride, crash, clap, rim, cowbell..."""
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        try:
+            spec = await request.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid JSON body: {exc}") from exc
+        output_path = request.query_params.get("output_path") or output_path
+        output_url = request.query_params.get("output_url") or output_url
+    else:
+        form = await request.form()
+        spec_raw = form.get("spec")
+        if not spec_raw:
+            raise HTTPException(
+                status_code=400,
+                detail="POST application/json or multipart with a `spec` field.",
+            )
+        try:
+            spec = json.loads(str(spec_raw))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid `spec` JSON: {exc}") from exc
+        output_path = str(form.get("output_path") or "") or output_path or None
+        output_url = str(form.get("output_url") or "") or output_url or None
+
+    eng = next((e for e in ENGINES.values() if is_drum_pattern_engine(e)), None)
+    if eng is None:
+        raise HTTPException(status_code=404, detail="drum-pattern engine not configured")
+
+    try:
+        midi_bytes = await eng.drum_pattern(spec)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        midi_bytes,
+        media_type="audio/midi",
+        filename="drum_pattern.mid",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"size": len(midi_bytes)},
+    )
+
+
+# ── /v1/audio/chords-to-midi — chord detection → MIDI chord progression ─────
+
+
+@app.post("/v1/audio/chords-to-midi")
+async def chords_to_midi(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    tempo_bpm: float | None = Form(default=None),
+    velocity: int = Form(default=80),
+    octave: int = Form(default=4),
+) -> Response:
+    """Detect chord progression in audio and export as a MIDI file.
+    Each chord segment becomes a held chord (root + third + fifth) at the given octave.
+    Requires chord-detect engine."""
+    if velocity < 1 or velocity > 127:
+        raise HTTPException(
+            status_code=400,
+            detail=f"velocity must be in [1, 127], got {velocity}",
+        )
+    if octave < 1 or octave > 7:
+        raise HTTPException(
+            status_code=400,
+            detail=f"octave must be in [1, 7], got {octave}",
+        )
+    chord_eng = next((e for e in ENGINES.values() if is_chord_detect_engine(e)), None)
+    if chord_eng is None:
+        raise HTTPException(status_code=404, detail="chord-detect engine not configured")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    try:
+        chord_result = await chord_eng.detect_chords(raw, filename)
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    chords = chord_result.get("chords", [])
+    if not chords:
+        raise HTTPException(status_code=400, detail="no chords detected in audio")
+
+    bpm = float(tempo_bpm) if tempo_bpm is not None else 120.0
+    if not (1.0 <= bpm <= 999.0):
+        raise HTTPException(
+            status_code=400,
+            detail=f"tempo_bpm must be in [1, 999], got {bpm}",
+        )
+
+    try:
+        midi_bytes = await asyncio.to_thread(
+            chords_to_midi_bytes, chords,
+            tempo_bpm=bpm, velocity=velocity, octave=octave,
+        )
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await write_output(
+        midi_bytes,
+        media_type="audio/midi",
+        filename="chords.mid",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "chord_count": len(chords),
+            "key": chord_result.get("key", ""),
+            "tempo_bpm": bpm,
+            "size": len(midi_bytes),
+        },
+    )
 
 
 # ── /v1/batch — batch operations on staged files ────────────────────────────
