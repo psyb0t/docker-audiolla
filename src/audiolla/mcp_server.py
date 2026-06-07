@@ -64,11 +64,14 @@ def build_mcp_server(
     mcp = FastMCP(
         name="audiolla",
         instructions=(
-            "Self-hosted music-production tools: stem separation, "
-            "mastering, MIR analysis, DSP transform, loudness. Three input "
-            "modes for audio: stage a file via put_file (base64) then pass "
-            "file_path, OR pass file_url to have the server fetch a remote "
-            "URL (subject to AUDIOLLA_FETCH_MODE allowlist/denylist). "
+            "Self-hosted audio-production tools: stem separation, "
+            "restoration (de-reverb / de-echo / de-noise), mastering, MIR "
+            "analysis, DSP transform, loudness, speech enhancement, voice "
+            "activity detection, speaker diarization, MIDI transcription, "
+            "and curated workflows (presets + ad-hoc pipelines). Three "
+            "input modes for audio: stage a file via put_file (base64) then "
+            "pass file_path, OR pass file_url to have the server fetch a "
+            "remote URL (subject to AUDIOLLA_FETCH_MODE allowlist/denylist). "
             "Audio results default to base64; pass output_url to have the "
             "server PUT to a presigned URL instead."
         ),

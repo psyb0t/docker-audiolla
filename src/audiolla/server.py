@@ -1,4 +1,4 @@
-"""FastAPI app — music-production REST API endpoints.
+"""FastAPI app — audio-production REST API endpoints.
 
 Endpoints:
   GET    /healthz                    unauthenticated liveness
@@ -249,8 +249,9 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(
     title="audiolla",
     description=(
-        "Self-hosted music-production REST API — stem separation, mastering, "
-        "MIR analysis, DSP transforms, loudness normalization. "
+        "Self-hosted audio-production REST API — stem separation, restoration, "
+        "mastering, MIR analysis, DSP transforms, loudness, speech enhancement, "
+        "diarization, MIDI transcription, curated workflow presets. "
         "OpenAPI 3.1-spec'd. Not OpenAI-compatible."
     ),
     lifespan=_lifespan,

@@ -1,11 +1,11 @@
 [project]
 name = "audiolla"
 version = "0.3.0"
-description = "Self-hosted music-production REST + MCP API — stem separation, mastering, MIR analysis, DSP transforms, loudness normalization, generic effects chains, MIDI composition and rendering"
+description = "Self-hosted audio-production REST + MCP API — stem separation, restoration, mastering, MIR analysis, DSP transforms, loudness, speech enhancement, diarization, MIDI transcription + composition, curated workflow presets and ad-hoc pipelines"
 license = { text = "WTFPL" }
 requires-python = ">=3.10,<3.13"
 authors = [{ name = "psyb0t" }]
-keywords = ["audio", "music", "music-production", "stem-separation", "mastering", "mir", "demucs", "matchering", "pedalboard", "midi", "fluidsynth", "fastapi", "mcp"]
+keywords = ["audio", "audio-production", "music", "stem-separation", "mastering", "mir", "demucs", "matchering", "pedalboard", "midi", "fluidsynth", "speech", "diarization", "deepfilternet", "pyannote", "podcast", "fastapi", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

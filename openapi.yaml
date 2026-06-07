@@ -4,10 +4,12 @@ info:
   title: audiolla
   version: "0.3.0"
   description: |
-    Self-hosted music-production REST + MCP API. Stem separation,
-    mastering, MIR analysis, DSP transforms, loudness normalization,
-    generic pedalboard effects chains, MIDI composition and rendering.
-    OpenAPI 3.1-spec'd, FastAPI server, generated Pydantic models.
+    Self-hosted audio-production REST + MCP API. Stem separation,
+    restoration, mastering, MIR analysis, DSP transforms, loudness,
+    speech enhancement, voice activity detection, speaker diarization,
+    MIDI transcription + composition, curated workflow presets and
+    ad-hoc op pipelines. OpenAPI 3.1-spec'd, FastAPI server, generated
+    Pydantic models.
 
     The MCP endpoint at /v1/mcp is JSON-RPC over a streamable HTTP
     transport and is NOT described in this document — use an MCP client.
