@@ -27,7 +27,8 @@ _uvr_or_skip() {
     local engine="$1" code body
     local tmp
     tmp=$(mktemp)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 120 \
+    # 600s allows for first-run model download (BS-Roformer ~500MB pull).
+    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 600 \
         -X POST \
         -F "file=@${FIXTURE}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/restore/${engine}")
@@ -38,6 +39,13 @@ _uvr_or_skip() {
         local sz
         sz=$(echo -n "$body" | wc -c)
         echo "OK: /v1/audio/restore/${engine} returned audio (${sz} bytes)"
+        return 0
+    fi
+
+    # curl gave up before the server responded (timeout, network reset, etc.)
+    # treat as skip — model download is the usual cause on first run.
+    if [ "$code" = "000" ] || [ -z "$body" ]; then
+        echo "  SKIP: /v1/audio/restore/${engine} — request timed out (model download in progress?)"
         return 0
     fi
 

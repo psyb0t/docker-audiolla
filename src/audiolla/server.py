@@ -40,6 +40,7 @@ import json
 import logging
 import mimetypes
 from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import unquote
 
@@ -68,6 +69,7 @@ from .audio import (
     mid_side_encode,
     mix_audio,
     multi_stream_zip,
+    multiband_compress,
     pan_audio,
     repair_audio,
     reverse_audio,
@@ -142,6 +144,9 @@ def _resolve_device(req: str) -> str:
 REGISTRY = config.load_registry()
 DEVICE = _resolve_device(config.DEVICE)
 ENGINES = build_engines(REGISTRY, DEVICE)
+from .presets import load_presets as _load_presets  # noqa: E402, PLC0415
+
+PRESETS = _load_presets(config.PRESETS_DIR)
 
 
 async def _idle_sweeper() -> None:
@@ -296,9 +301,305 @@ def list_engines() -> dict[str, Any]:
             "stems": entry.get("stems"),
             "presets": entry.get("presets"),
             "description": entry.get("description", ""),
+            "loaded": engine.loaded(),
+            "idle_seconds": engine.last_used_secs_ago(),
         }
         data.append(info)
     return {"object": "list", "data": data}
+
+
+# ── /v1/catalog — endpoint catalog grouped by category ──────────────────────
+
+
+_CATALOG_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
+    ("separation", "Stem separation + harmonic/percussive split", [
+        ("POST", "/v1/audio/separate", "Demucs/MDX/BS-Roformer stem separation"),
+        ("POST", "/v1/audio/separate/hpss", "Harmonic/percussive split via librosa HPSS"),
+        ("POST", "/v1/audio/remix", "Separate + per-stem gain/mute + bounce"),
+    ]),
+    ("restoration", "Removing artefacts: reverb, echo, noise, clipping, hum", [
+        ("POST", "/v1/audio/restore/{engine}", "UVR de-reverb / de-echo / de-noise"),
+        ("POST", "/v1/audio/noise-reduce/{engine}", "DSP (noisereduce) or ML (uvr-denoise)"),
+        ("POST", "/v1/audio/repair", "Declip + dehum (50/60 Hz notch)"),
+        ("POST", "/v1/audio/clip-detect", "Detect digital clipping (JSON only)"),
+        ("POST", "/v1/audio/enhance/{engine}", "DeepFilterNet neural enhancement"),
+    ]),
+    ("dynamics", "Compression, limiting, ducking, transient shaping", [
+        ("POST", "/v1/audio/fx", "Pedalboard chain — Compressor/Limiter/NoiseGate/+"),
+        ("POST", "/v1/audio/multiband-compress", "N-band compressor with LR4 crossovers"),
+        ("POST", "/v1/audio/transient", "Attack/sustain dual-compressor shaper"),
+        ("POST", "/v1/audio/sidechain-duck", "Ducking via ffmpeg sidechaincompress"),
+        ("POST", "/v1/audio/deess", "Sibilance compression (split-band)"),
+        ("POST", "/v1/audio/normalize", "LUFS target normalisation"),
+    ]),
+    ("eq-spatial", "EQ, panning, M/S, stereo width", [
+        ("POST", "/v1/audio/eq", "Parametric EQ via ffmpeg equalizer"),
+        ("POST", "/v1/audio/pan", "Stereo pan (-1 left, +1 right)"),
+        ("POST", "/v1/audio/stereo-width", "M/S width adjust (0=mono, 1=stock, 3=wide)"),
+        ("POST", "/v1/audio/mid-side", "Encode L/R to M/S or decode back"),
+        ("POST", "/v1/audio/stereo-field", "Stereo correlation / width / balance report"),
+    ]),
+    ("mastering", "Reference-matching + chain-preset mastering", [
+        ("POST", "/v1/audio/master", "Matchering reference or pedalboard-chain preset"),
+    ]),
+    ("time-pitch", "Time-stretch, pitch shift, BPM/key matching", [
+        ("POST", "/v1/audio/stretch", "Independent tempo factor + pitch semitones"),
+        ("POST", "/v1/audio/speed", "Playback speed without pitch shift"),
+        ("POST", "/v1/audio/bpm-match", "Detect BPM + stretch to target BPM"),
+        ("POST", "/v1/audio/key-match", "Detect key + pitch-shift to target key"),
+        ("POST", "/v1/audio/pitch-correct", "Snap to nearest semitone (auto-tune)"),
+    ]),
+    ("editing", "Trim, mix, concat, fade, reverse, loop, split", [
+        ("POST", "/v1/audio/trim", "Cut to [start_sec, end_sec)"),
+        ("POST", "/v1/audio/mix", "Mix multiple tracks with per-track gain"),
+        ("POST", "/v1/audio/concat", "Concatenate N audio files"),
+        ("POST", "/v1/audio/fade", "Fade in/out with selectable curve"),
+        ("POST", "/v1/audio/reverse", "Reverse playback"),
+        ("POST", "/v1/audio/loop", "Repeat N times"),
+        ("POST", "/v1/audio/split", "Split into N equal or silence-detected parts"),
+        ("POST", "/v1/audio/beat-slice", "Slice at detected beat positions"),
+        ("POST", "/v1/audio/thumbnail", "Extract most-energetic N-sec segment"),
+    ]),
+    ("analysis", "Measurement + detection — JSON output", [
+        ("POST", "/v1/audio/info", "ffprobe metadata"),
+        ("POST", "/v1/audio/analyze", "BPM, key, loudness, duration, spectral"),
+        ("POST", "/v1/audio/loudness", "Integrated LUFS measurement"),
+        ("POST", "/v1/audio/loudness/curve", "Time-series RMS loudness envelope"),
+        ("POST", "/v1/audio/beats", "Tempo + beat positions + optional click track"),
+        ("POST", "/v1/audio/onsets", "Note-attack timestamps"),
+        ("POST", "/v1/audio/melody", "F0 contour + optional MIDI quantize"),
+        ("POST", "/v1/audio/segments", "Structural segmentation (verse/chorus)"),
+        ("POST", "/v1/audio/chords", "Chord progression + key"),
+        ("POST", "/v1/audio/silence", "Silent ranges + optional trim"),
+        ("POST", "/v1/audio/fingerprint", "Chromaprint acoustic fingerprint"),
+        ("POST", "/v1/audio/tag", "AudioSet zero-shot top-K labels"),
+        ("POST", "/v1/audio/embed", "CLAP 512-dim semantic embedding"),
+        ("POST", "/v1/audio/similar", "Cosine similarity between two clips"),
+        ("POST", "/v1/audio/classify", "Zero-shot label-list classification"),
+        ("POST", "/v1/audio/dj-prep", "BPM + key + LUFS + Camelot in one call"),
+        ("POST", "/v1/audio/loop-point", "Find best seamless loop boundary"),
+    ]),
+    ("effects-creative", "Reverb (convolution), EFX", [
+        ("POST", "/v1/audio/conv-reverb", "Apply user-supplied impulse response"),
+    ]),
+    ("visualize", "PNG spectrogram/waveform + animated video", [
+        ("POST", "/v1/audio/visualize/image/spectrogram", "Static spectrogram PNG"),
+        ("POST", "/v1/audio/visualize/image/waveform", "Static waveform PNG"),
+        ("POST", "/v1/audio/visualize/video/{mode}", "Animated MP4/WebM (8 modes)"),
+    ]),
+    ("midi", "Compose / inspect / transform / render / drum / chords-to-MIDI", [
+        ("POST", "/v1/midi/compose", "JSON spec → MIDI file"),
+        ("POST", "/v1/midi/inspect", "MIDI → JSON structure"),
+        ("POST", "/v1/midi/transform", "Quantize/transpose/re-tempo/channel filter"),
+        ("POST", "/v1/midi/render", "MIDI → audio via fluidsynth"),
+        ("POST", "/v1/midi/quantize", "Snap to rhythmic grid"),
+        ("POST", "/v1/midi/humanize", "Add timing/velocity jitter"),
+        ("POST", "/v1/midi/drum", "Step-sequencer spec → GM drum MIDI"),
+        ("POST", "/v1/audio/to_midi/{engine}", "Polyphonic audio → MIDI via basic-pitch"),
+        ("POST", "/v1/audio/chords-to-midi", "Chord detection → MIDI progression"),
+    ]),
+    ("metadata", "Read / write ID3, Vorbis, FLAC tags", [
+        ("POST", "/v1/audio/metadata", "Read or write tags via mutagen"),
+    ]),
+    ("workflow", "Curated multi-step pipelines + ad-hoc chaining", [
+        ("GET",  "/v1/presets", "List server-side curated workflows"),
+        ("GET",  "/v1/presets/{name}", "Describe a single preset"),
+        ("POST", "/v1/presets/{name}", "Run a curated preset against a file"),
+        ("POST", "/v1/pipeline", "Run an ad-hoc {op, params} chain server-side"),
+        ("GET",  "/v1/ops", "List available pipeline op slugs + their params"),
+        ("POST", "/v1/audio/batch", "Multiple ops, one HTTP request"),
+    ]),
+    ("speech", "VAD, diarization", [
+        ("POST", "/v1/audio/vad", "Voice activity detection (silero-vad)"),
+        ("POST", "/v1/audio/diarize", "Speaker diarization (pyannote)"),
+    ]),
+    ("files", "Server-side file staging", [
+        ("GET",    "/v1/files", "List staged files"),
+        ("PUT",    "/v1/files/{path}", "Stage a file"),
+        ("GET",    "/v1/files/{path}", "Retrieve a staged file"),
+        ("DELETE", "/v1/files/{path}", "Delete a staged file"),
+    ]),
+    ("jobs", "Async job control", [
+        ("GET",    "/v1/jobs", "List jobs (optional status filter)"),
+        ("GET",    "/v1/jobs/{id}", "Poll one job"),
+        ("DELETE", "/v1/jobs/{id}", "Cancel a job"),
+    ]),
+    ("management", "Engine discovery + lifecycle", [
+        ("GET",    "/v1/engines", "List configured engines + load status"),
+        ("GET",    "/v1/catalog", "This endpoint — full API catalog"),
+        ("GET",    "/v1/ps", "List currently-loaded engines"),
+        ("DELETE", "/v1/ps/{engine}", "Unload one engine (free RAM)"),
+        ("POST",   "/v1/unload", "Unload all engines"),
+        ("GET",    "/healthz", "Health check"),
+    ]),
+]
+
+
+@app.get("/v1/catalog")
+def catalog() -> dict[str, Any]:
+    """Machine-readable catalog of every endpoint grouped by category. Use
+    `/v1/engines` for the engine list, `/v1/presets` for curated workflows,
+    `/v1/ops` for pipeline op slugs."""
+    return {
+        "object": "catalog",
+        "categories": [
+            {
+                "name": name,
+                "description": desc,
+                "endpoints": [
+                    {"method": m, "path": p, "summary": s}
+                    for m, p, s in entries
+                ],
+            }
+            for name, desc, entries in _CATALOG_GROUPS
+        ],
+    }
+
+
+# ── /v1/ops, /v1/presets, /v1/pipeline ─────────────────────────────────────
+
+
+@app.get("/v1/ops")
+def list_ops() -> dict[str, Any]:
+    """Available pipeline op slugs. Each op accepts ``(raw, filename, **params)``
+    and returns audio bytes. Use these in `/v1/pipeline` or in preset YAML.
+    Params are not enumerated here — see the corresponding `/v1/audio/{op}`
+    REST endpoint's docs for the param schema (the op accepts the same
+    keyword arguments)."""
+    from .pipeline import available_ops as _available_ops  # noqa: PLC0415
+    return {"object": "list", "data": _available_ops()}
+
+
+@app.get("/v1/presets")
+def list_presets() -> dict[str, Any]:
+    """List server-side curated presets. Each entry has name + description.
+    To see steps, GET `/v1/presets/{name}`. To run, POST to the same path."""
+    return {
+        "object": "list",
+        "data": [
+            {"name": p.name, "description": p.description}
+            for p in PRESETS.values()
+        ],
+    }
+
+
+@app.get("/v1/presets/{name}")
+def describe_preset(name: str) -> dict[str, Any]:
+    """Describe one preset including its full pipeline steps. Useful for
+    auditing what a curated workflow does before running it."""
+    preset = PRESETS.get(name)
+    if preset is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown preset {name!r}; configured: {sorted(PRESETS)}",
+        )
+    return preset.to_dict()
+
+
+@app.post("/v1/presets/{name}")
+async def run_preset(
+    name: str,
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Run a curated preset pipeline against an input file. The preset's
+    steps are executed in order; intermediate audio stays in memory between
+    steps. Returns the final audio (or routes to output_path / output_url
+    same as any audio-producing endpoint)."""
+    from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
+
+    preset = PRESETS.get(name)
+    if preset is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown preset {name!r}; configured: {sorted(PRESETS)}",
+        )
+    _validate_output_format(output_format)
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    # extra_json must be the SAME dict instance write_output reads later;
+    # mutate steps in place so the response surfaces the actual log instead
+    # of the empty seed list. (nonlocal reassign won't help — the helper has
+    # already captured the dict by reference.)
+    step_log: list[dict] = []
+    extra_json: dict[str, Any] = {"preset": name, "steps": step_log}
+
+    async def _produce() -> bytes:
+        try:
+            payload, log = await run_pipeline(ENGINES, raw, filename, preset.steps)
+        except PipelineError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        step_log.extend(log)
+        return payload
+
+    return await _run_with_optional_job(
+        _produce,
+        media_type=content_type_for(output_format),
+        filename=f"{name}.{output_format}",
+        job_ext=output_format,
+        endpoint=f"/v1/presets/{name}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json=extra_json,
+        async_job=async_job,
+        webhook_url=webhook_url,
+    )
+
+
+@app.post("/v1/pipeline")
+async def run_pipeline_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    output_format: str = Form(default="wav"),
+    steps: str = Form(...),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Run an ad-hoc pipeline of ops against an input file. `steps` is a
+    JSON array: `[{"op": "<slug>", "params": {...}}, ...]`. See `/v1/ops`
+    for available op slugs. Each step's output feeds the next step's input.
+    Server-side chaining — no intermediate HTTP roundtrips."""
+    from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
+
+    _validate_output_format(output_format)
+    try:
+        parsed_steps = json.loads(steps)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid steps JSON: {exc}") from exc
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    step_log: list[dict] = []
+    extra_json: dict[str, Any] = {"steps": step_log}
+
+    async def _produce() -> bytes:
+        try:
+            payload, log = await run_pipeline(ENGINES, raw, filename, parsed_steps)
+        except PipelineError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        step_log.extend(log)
+        return payload
+
+    return await _run_with_optional_job(
+        _produce,
+        media_type=content_type_for(output_format),
+        filename=f"pipeline.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/pipeline",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json=extra_json,
+        async_job=async_job,
+        webhook_url=webhook_url,
+    )
 
 
 @app.get("/v1/ps")
@@ -409,6 +710,138 @@ async def _submit_job(
     return JSONResponse({"job_id": job_id, "status": "pending"}, status_code=202)
 
 
+async def _run_with_optional_job(
+    produce: Callable[[], Awaitable[bytes]],
+    *,
+    media_type: str,
+    filename: str,
+    job_ext: str,
+    endpoint: str,
+    output_path: str | None,
+    output_url: str | None,
+    extra_json: dict | None,
+    async_job: bool,
+    webhook_url: str | None,
+    extra_inline_headers: dict[str, str] | None = None,
+) -> Response:
+    """Standard pattern: invoke `produce()` to get bytes, then route the
+    result through write_output. If `async_job` is True, the work runs in
+    the background and the call returns a 202 with job_id.
+
+    `produce` must be an async callable that returns bytes (the encoded
+    audio/image/zip payload). AudioConversionError → HTTP 400. Other
+    exceptions propagate so the caller / job queue can surface them.
+
+    `job_ext` is the extension used for the auto-generated jobs/{id}.{ext}
+    fallback when output_path is None and output_url is None.
+
+    `extra_json` and `extra_inline_headers` are passed through to
+    write_output. Callers that need to populate them based on values only
+    available AFTER produce() runs can pass a mutable dict and mutate it
+    inside produce() — it's the same instance write_output reads from."""
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        eff_path = output_path or (None if output_url else f"jobs/{job_id}.{job_ext}")
+
+        async def _coro():
+            try:
+                payload = await produce()
+            except AudioConversionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return await write_output(
+                payload,
+                media_type=media_type,
+                filename=filename,
+                output_path=eff_path,
+                output_url=output_url,
+                extra_json=extra_json,
+                extra_inline_headers=extra_inline_headers,
+            )
+
+        return await _submit_job(
+            _coro(), endpoint=endpoint, webhook_url=webhook_url, job_id=job_id,
+        )
+
+    try:
+        payload = await produce()
+    except AudioConversionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await write_output(
+        payload,
+        media_type=media_type,
+        filename=filename,
+        output_path=output_path,
+        output_url=output_url,
+        extra_json=extra_json,
+        extra_inline_headers=extra_inline_headers,
+    )
+
+
+async def _run_json_or_audio(
+    produce_json: Callable[[], Awaitable[dict[str, Any]]],
+    *,
+    extract_audio_b64_key: str,
+    audio_media_type: str,
+    audio_filename: str,
+    job_ext: str,
+    endpoint: str,
+    write_audio: bool,
+    output_path: str | None,
+    output_url: str | None,
+    async_job: bool,
+    webhook_url: str | None,
+) -> Any:
+    """Used by beats/melody/silence: the engine returns a result dict that
+    may include a base64-encoded audio payload. When `write_audio` is True
+    and there's somewhere to write it, the audio is decoded and routed
+    through write_output (the rest of the dict becomes extra_json).
+    Otherwise the dict is returned as-is."""
+    import base64 as _b64  # noqa: PLC0415
+
+    async def _do() -> tuple[bytes | None, dict[str, Any]]:
+        try:
+            result = await produce_json()
+        except AudioConversionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if write_audio and (output_path or output_url):
+            audio = _b64.b64decode(result.pop(extract_audio_b64_key))
+            return audio, result
+        return None, result
+
+    if async_job:
+        job_id = JOB_QUEUE.new_id()
+        eff_path = output_path or (None if output_url else f"jobs/{job_id}.{job_ext}")
+
+        async def _coro():
+            audio, rest = await _do()
+            if audio is None:
+                return rest
+            return await write_output(
+                audio,
+                media_type=audio_media_type,
+                filename=audio_filename,
+                output_path=eff_path,
+                output_url=output_url,
+                extra_json=rest,
+            )
+
+        return await _submit_job(
+            _coro(), endpoint=endpoint, webhook_url=webhook_url, job_id=job_id,
+        )
+
+    audio, rest = await _do()
+    if audio is None:
+        return rest
+    return await write_output(
+        audio,
+        media_type=audio_media_type,
+        filename=audio_filename,
+        output_path=output_path,
+        output_url=output_url,
+        extra_json=rest,
+    )
+
+
 async def _evict_siblings(current_slug: str) -> None:
     siblings = [
         (slug, e) for slug, e in ENGINES.items() if slug != current_slug and e.loaded()
@@ -473,68 +906,46 @@ async def separate(
             detail=f"unknown stems {invalid} for engine {engine!r}; available: {available_stems}",
         )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _raw, _fn, _req, _fmt, _op = raw, filename, requested, output_format, output_path
-        _eff_path = _op or (None if output_url else f"jobs/{job_id}.zip")
+    # Two-pronged output: single requested stem → audio bytes; multiple →
+    # ZIP. Precompute media_type/filename/job_ext from `requested` (known
+    # before separation runs); extra_json gets mutated inside _produce()
+    # for the multi-stem case to surface the actual stems returned.
+    single_stem = len(requested) == 1
+    if single_stem:
+        sn = requested[0]
+        media_type = content_type_for(output_format)
+        out_filename = f"{sn}.{output_format}"
+        job_ext = output_format
+        extra_json: dict[str, Any] = {
+            "engine": engine, "stem": sn, "output_format": output_format,
+        }
+    else:
+        media_type = "application/zip"
+        out_filename = f"{engine}-stems.zip"
+        job_ext = "zip"
+        extra_json = {"engine": engine, "output_format": output_format}
 
-        async def _coro():
-            await _evict_siblings(engine)
-            try:
-                stem_results = await eng.separate(_raw, _fn, stems=_req, output_format=_fmt)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if len(_req) == 1:
-                sn = _req[0]
-                return await write_output(
-                    stem_results[sn], media_type=content_type_for(_fmt),
-                    filename=f"{sn}.{_fmt}", output_path=_eff_path, output_url=output_url,
-                    extra_json={"engine": engine, "stem": sn, "output_format": _fmt},
-                )
-            return await write_output(
-                multi_stream_zip(stem_results, _fmt), media_type="application/zip",
-                filename=f"{engine}-stems.zip", output_path=_eff_path, output_url=output_url,
-                extra_json={"engine": engine, "stems": list(stem_results.keys()), "output_format": _fmt},
-            )
-
-        return await _submit_job(_coro(), endpoint="/v1/audio/separate", webhook_url=webhook_url, job_id=job_id)
-
-    await _evict_siblings(engine)
-
-    try:
+    async def _produce() -> bytes:
+        await _evict_siblings(engine)
         stem_results = await eng.separate(
-            raw, filename, stems=requested, output_format=output_format
+            raw, filename, stems=requested, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if single_stem:
+            return stem_results[requested[0]]
+        extra_json["stems"] = list(stem_results.keys())
+        return multi_stream_zip(stem_results, output_format)
 
-    if len(requested) == 1:
-        stem_name = requested[0]
-        audio_bytes = stem_results[stem_name]
-        return await write_output(
-            audio_bytes,
-            media_type=content_type_for(output_format),
-            filename=f"{stem_name}.{output_format}",
-            output_path=output_path,
-            output_url=output_url,
-            extra_json={
-                "engine": engine,
-                "stem": stem_name,
-                "output_format": output_format,
-            },
-        )
-
-    return await write_output(
-        multi_stream_zip(stem_results, output_format),
-        media_type="application/zip",
-        filename=f"{engine}-stems.zip",
+    return await _run_with_optional_job(
+        _produce,
+        media_type=media_type,
+        filename=out_filename,
+        job_ext=job_ext,
+        endpoint="/v1/audio/separate",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "engine": engine,
-            "stems": list(stem_results.keys()),
-            "output_format": output_format,
-        },
+        extra_json=extra_json,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -611,61 +1022,29 @@ async def master(
                 detail=f"unknown preset {preset!r}; available: {available_presets}",
             )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _rr, _rfn = raw, filename, ref_raw, ref_filename
-        _esl, _eng = engine_slug, eng
-
-        async def _master_coro():
-            await _evict_siblings(_esl)
-            try:
-                if mode == "reference":
-                    _b = await _eng.master_reference(
-                        _raw, _fn, _rr, _rfn,
-                        target_lufs=target_lufs, output_format=output_format,
-                    )
-                else:
-                    _b = await _eng.master_chain(
-                        _raw, _fn, preset=preset,
-                        target_lufs=target_lufs, output_format=output_format,
-                    )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"mastered.{output_format}", output_path=_eff_path, output_url=output_url,
-                extra_json={"engine": _esl, "mode": mode, "output_format": output_format},
-            )
-
-        return await _submit_job(_master_coro(), endpoint="/v1/audio/master", webhook_url=webhook_url, job_id=job_id)
-
-    await _evict_siblings(engine_slug)
-    try:
+    async def _produce() -> bytes:
+        await _evict_siblings(engine_slug)
         if mode == "reference":
-            audio_bytes = await eng.master_reference(
+            return await eng.master_reference(
                 raw, filename, ref_raw, ref_filename,
                 target_lufs=target_lufs, output_format=output_format,
             )
-        else:
-            audio_bytes = await eng.master_chain(
-                raw, filename, preset=preset,
-                target_lufs=target_lufs, output_format=output_format,
-            )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await eng.master_chain(
+            raw, filename, preset=preset,
+            target_lufs=target_lufs, output_format=output_format,
+        )
 
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"mastered.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/master",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "engine": engine_slug,
-            "mode": mode,
-            "output_format": output_format,
-        },
+        extra_json={"engine": engine_slug, "mode": mode, "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -780,42 +1159,22 @@ async def transform(
         file_url=file_url,
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _transform_coro():
-            try:
-                _b = await _eng.transform(_raw, _fn, operations=ops, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"transformed.{output_format}", output_path=_eff_path, output_url=output_url,
-                extra_json={"engine": engine_slug, "operations": ops, "output_format": output_format},
-            )
-
-        return await _submit_job(_transform_coro(), endpoint="/v1/audio/transform", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        audio_bytes = await eng.transform(
-            raw, filename, operations=ops, output_format=output_format
+    async def _produce() -> bytes:
+        return await eng.transform(
+            raw, filename, operations=ops, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"transformed.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/transform",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "engine": engine_slug,
-            "operations": ops,
-            "output_format": output_format,
-        },
+        extra_json={"engine": engine_slug, "operations": ops, "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -859,45 +1218,31 @@ async def normalize(
         raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
+    extra_json: dict[str, Any] = {
+        "target_lufs": target_lufs, "output_format": output_format,
+    }
+    inline_headers: dict[str, str] = {"X-Target-LUFS": str(target_lufs)}
 
-        async def _norm_coro():
-            try:
-                _b, _lufs = await _eng.normalize_lufs(_raw, _fn, target_lufs=target_lufs, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"normalized.{output_format}", output_path=_eff_path, output_url=output_url,
-                extra_json={"measured_lufs": _lufs, "target_lufs": target_lufs, "output_format": output_format},
-            )
-
-        return await _submit_job(_norm_coro(), endpoint="/v1/audio/normalize", webhook_url=webhook_url, job_id=job_id)
-
-    try:
+    async def _produce() -> bytes:
         audio_bytes, lufs = await eng.normalize_lufs(
-            raw, filename, target_lufs=target_lufs, output_format=output_format
+            raw, filename, target_lufs=target_lufs, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+        extra_json["measured_lufs"] = lufs
+        inline_headers["X-Loudness-LUFS"] = str(lufs)
+        return audio_bytes
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"normalized.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/normalize",
         output_path=output_path,
         output_url=output_url,
-        extra_inline_headers={
-            "X-Loudness-LUFS": str(lufs),
-            "X-Target-LUFS": str(target_lufs),
-        },
-        extra_json={
-            "measured_lufs": lufs,
-            "target_lufs": target_lufs,
-            "output_format": output_format,
-        },
+        extra_json=extra_json,
+        extra_inline_headers=inline_headers,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -947,45 +1292,20 @@ async def fx(
         file_url=file_url,
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng, _esl = raw, filename, eng, engine_slug
+    async def _produce() -> bytes:
+        return await eng.fx(raw, filename, effects=chain, output_format=output_format)
 
-        async def _fx_coro():
-            try:
-                _b = await _eng.fx(_raw, _fn, effects=chain, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"fx.{output_format}", output_path=_eff_path, output_url=output_url,
-                extra_json={"engine": _esl, "effects": chain, "output_format": output_format},
-            )
-
-        return await _submit_job(_fx_coro(), endpoint="/v1/audio/fx", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        audio_bytes = await eng.fx(
-            raw,
-            filename,
-            effects=chain,
-            output_format=output_format,
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"fx.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/fx",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "engine": engine_slug,
-            "effects": chain,
-            "output_format": output_format,
-        },
+        extra_json={"engine": engine_slug, "effects": chain, "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -1277,51 +1597,25 @@ async def beats(
         file_url=file_url,
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _beats_coro():
-            import base64 as _b64
-            try:
-                _result = await _eng.beats(_raw, _fn, click_track=click_track, output_format=output_format, start_bpm=start_bpm)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if click_track and (_eff_path or output_url):
-                _ab = _b64.b64decode(_result.pop("click_track_base64"))
-                return await write_output(
-                    _ab, media_type=content_type_for(output_format),
-                    filename=f"clicks.{output_format}", output_path=_eff_path, output_url=output_url, extra_json=_result,
-                )
-            return _result
-
-        return await _submit_job(_beats_coro(), endpoint="/v1/audio/beats", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        result = await eng.beats(
-            raw,
-            filename,
-            click_track=click_track,
-            output_format=output_format,
-            start_bpm=start_bpm,
+    async def _produce_json() -> dict[str, Any]:
+        return await eng.beats(
+            raw, filename,
+            click_track=click_track, output_format=output_format, start_bpm=start_bpm,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if click_track and (output_path or output_url):
-        import base64 as _b64
-
-        audio_bytes = _b64.b64decode(result.pop("click_track_base64"))
-        return await write_output(
-            audio_bytes,
-            media_type=content_type_for(output_format),
-            filename=f"clicks.{output_format}",
-            output_path=output_path,
-            output_url=output_url,
-            extra_json=result,
-        )
-    return result
+    return await _run_json_or_audio(
+        _produce_json,
+        extract_audio_b64_key="click_track_base64",
+        audio_media_type=content_type_for(output_format),
+        audio_filename=f"clicks.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/beats",
+        write_audio=click_track,
+        output_path=output_path,
+        output_url=output_url,
+        async_job=async_job,
+        webhook_url=webhook_url,
+    )
 
 
 # ── /v1/audio/onsets — librosa onset detection ──────────────────────────────
@@ -1378,50 +1672,28 @@ async def melody(
         file_url=file_url,
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.mid")
-        _raw, _fn, _eng = raw, filename, eng
+    async def _produce_json() -> dict[str, Any]:
+        result = await eng.melody(raw, filename, fmin=fmin, fmax=fmax, as_midi=as_midi)
+        # midi_size is redundant with the encoded payload size; drop before
+        # extra_json surfaces in the response. midi_base64 is the field the
+        # helper extracts when as_midi+output_path/url are set.
+        if as_midi and (output_path or output_url):
+            result.pop("midi_size", None)
+        return result
 
-        async def _melody_coro():
-            import base64 as _b64
-            try:
-                _result = await _eng.melody(_raw, _fn, fmin=fmin, fmax=fmax, as_midi=as_midi)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if as_midi and (_eff_path or output_url):
-                _mb = _b64.b64decode(_result.pop("midi_base64"))
-                _result.pop("midi_size", None)
-                return await write_output(_mb, media_type="audio/midi", filename="melody.mid", output_path=_eff_path, output_url=output_url, extra_json=_result)
-            return _result
-
-        return await _submit_job(_melody_coro(), endpoint="/v1/audio/melody", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        result = await eng.melody(
-            raw,
-            filename,
-            fmin=fmin,
-            fmax=fmax,
-            as_midi=as_midi,
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if as_midi and (output_path or output_url):
-        import base64 as _b64
-
-        midi_bytes = _b64.b64decode(result.pop("midi_base64"))
-        result.pop("midi_size", None)
-        return await write_output(
-            midi_bytes,
-            media_type="audio/midi",
-            filename="melody.mid",
-            output_path=output_path,
-            output_url=output_url,
-            extra_json=result,
-        )
-    return result
+    return await _run_json_or_audio(
+        _produce_json,
+        extract_audio_b64_key="midi_base64",
+        audio_media_type="audio/midi",
+        audio_filename="melody.mid",
+        job_ext="mid",
+        endpoint="/v1/audio/melody",
+        write_audio=as_midi,
+        output_path=output_path,
+        output_url=output_url,
+        async_job=async_job,
+        webhook_url=webhook_url,
+    )
 
 
 # ── /v1/audio/segments — music-structure segmentation ──────────────────────
@@ -1480,49 +1752,26 @@ async def silence(
         file_path=file_path,
         file_url=file_url,
     )
-    if async_job and trim_mode:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _silence_coro():
-            import base64 as _b64
-            try:
-                _result = await _eng.detect(_raw, _fn, threshold_db=threshold_db, min_duration_sec=min_duration_sec, trim_mode=trim_mode, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if trim_mode and (_eff_path or output_url):
-                _ab = _b64.b64decode(_result.pop("trimmed_audio_base64"))
-                return await write_output(_ab, media_type=content_type_for(output_format), filename=f"trimmed.{output_format}", output_path=_eff_path, output_url=output_url, extra_json=_result)
-            return _result
-
-        return await _submit_job(_silence_coro(), endpoint="/v1/audio/silence", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        result = await eng.detect(
-            raw,
-            filename,
-            threshold_db=threshold_db,
-            min_duration_sec=min_duration_sec,
-            trim_mode=trim_mode,
-            output_format=output_format,
+    async def _produce_json() -> dict[str, Any]:
+        return await eng.detect(
+            raw, filename,
+            threshold_db=threshold_db, min_duration_sec=min_duration_sec,
+            trim_mode=trim_mode, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if trim_mode and (output_path or output_url):
-        import base64 as _b64
-
-        audio_bytes = _b64.b64decode(result.pop("trimmed_audio_base64"))
-        return await write_output(
-            audio_bytes,
-            media_type=content_type_for(output_format),
-            filename=f"trimmed.{output_format}",
-            output_path=output_path,
-            output_url=output_url,
-            extra_json=result,
-        )
-    return result
+    return await _run_json_or_audio(
+        _produce_json,
+        extract_audio_b64_key="trimmed_audio_base64",
+        audio_media_type=content_type_for(output_format),
+        audio_filename=f"trimmed.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/silence",
+        write_audio=bool(trim_mode),
+        output_path=output_path,
+        output_url=output_url,
+        async_job=async_job,
+        webhook_url=webhook_url,
+    )
 
 
 # ── /v1/audio/visualize/image/spectrogram  static PNG spectrogram ─────────────
@@ -1555,31 +1804,20 @@ async def visualize_spectrogram(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.png")
-        _raw, _fn, _eng = raw, filename, eng
+    async def _produce() -> bytes:
+        return await eng.spectrogram(raw, filename, width=width, height=height, color=color, scale=scale)
 
-        async def _spec_coro():
-            try:
-                _p = await _eng.spectrogram(_raw, _fn, width=width, height=height, color=color, scale=scale)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_p, media_type="image/png", filename="spectrogram.png", output_path=_eff_path, output_url=output_url, extra_json={"mode": "spectrogram"})
-
-        return await _submit_job(_spec_coro(), endpoint="/v1/audio/visualize/image/spectrogram", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        png = await eng.spectrogram(raw, filename, width=width, height=height, color=color, scale=scale)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        png,
+    return await _run_with_optional_job(
+        _produce,
         media_type="image/png",
         filename="spectrogram.png",
+        job_ext="png",
+        endpoint="/v1/audio/visualize/image/spectrogram",
         output_path=output_path,
         output_url=output_url,
         extra_json={"mode": "spectrogram"},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -1604,31 +1842,20 @@ async def visualize_waveform(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.png")
-        _raw, _fn, _eng = raw, filename, eng
+    async def _produce() -> bytes:
+        return await eng.waveform(raw, filename, width=width, height=height, color=color)
 
-        async def _waveform_coro():
-            try:
-                _p = await _eng.waveform(_raw, _fn, width=width, height=height, color=color)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_p, media_type="image/png", filename="waveform.png", output_path=_eff_path, output_url=output_url, extra_json={"mode": "waveform"})
-
-        return await _submit_job(_waveform_coro(), endpoint="/v1/audio/visualize/image/waveform", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        png = await eng.waveform(raw, filename, width=width, height=height, color=color)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        png,
+    return await _run_with_optional_job(
+        _produce,
         media_type="image/png",
         filename="waveform.png",
+        job_ext="png",
+        endpoint="/v1/audio/visualize/image/waveform",
         output_path=output_path,
         output_url=output_url,
         extra_json={"mode": "waveform"},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -1661,31 +1888,18 @@ async def visualize_video(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{container}")
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _viz_coro():
-            try:
-                _v = await _eng.visualize(_raw, _fn, mode=mode, width=width, height=height, fps=fps, container=container)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            _mt = "video/mp4" if container == "mp4" else "video/webm"
-            return await write_output(_v, media_type=_mt, filename=f"visualize.{container}", output_path=_eff_path, output_url=output_url, extra_json={"mode": mode, "container": container})
-
-        return await _submit_job(_viz_coro(), endpoint=f"/v1/audio/visualize/video/{mode}", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        video = await eng.visualize(raw, filename, mode=mode, width=width, height=height, fps=fps, container=container)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    async def _produce() -> bytes:
+        return await eng.visualize(
+            raw, filename, mode=mode, width=width, height=height, fps=fps, container=container,
+        )
 
     media_type = "video/mp4" if container == "mp4" else "video/webm"
-    return await write_output(
-        video,
+    return await _run_with_optional_job(
+        _produce,
         media_type=media_type,
         filename=f"visualize.{container}",
+        job_ext=container,
+        endpoint=f"/v1/audio/visualize/video/{mode}",
         output_path=output_path,
         output_url=output_url,
         extra_json={
@@ -1695,6 +1909,8 @@ async def visualize_video(
             "height": height,
             "fps": fps,
         },
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -1768,31 +1984,20 @@ async def restore(
         file_url=file_url,
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng, _agg = raw, filename, eng, aggressive
+    async def _produce() -> bytes:
+        return await eng.restore(raw, filename, output_format=output_format, aggressive=aggressive)
 
-        async def _restore_coro():
-            try:
-                _b = await _eng.restore(_raw, _fn, output_format=output_format, aggressive=_agg)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_b, media_type=content_type_for(output_format), filename=f"restore.{output_format}", output_path=_eff_path, output_url=output_url, extra_json={"engine": engine, "aggressive": _agg, "output_format": output_format})
-
-        return await _submit_job(_restore_coro(), endpoint=f"/v1/audio/restore/{engine}", webhook_url=webhook_url, job_id=job_id)
-
-    try:
-        audio_bytes = await eng.restore(raw, filename, output_format=output_format, aggressive=aggressive)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"restore.{output_format}",
+        job_ext=output_format,
+        endpoint=f"/v1/audio/restore/{engine}",
         output_path=output_path,
         output_url=output_url,
         extra_json={"engine": engine, "aggressive": aggressive, "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -1932,54 +2137,29 @@ async def to_midi(
         file_url=file_url,
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.mid")
-        _raw, _fn, _eng = raw, filename, eng
-
-        async def _tomidi_coro():
-            await _evict_siblings(engine)
-            try:
-                _mb = await _eng.to_midi(
-                    _raw, _fn, onset_threshold=onset_threshold, frame_threshold=frame_threshold,
-                    minimum_note_length_ms=minimum_note_length_ms, minimum_frequency=minimum_frequency,
-                    maximum_frequency=maximum_frequency, multiple_pitch_bends=multiple_pitch_bends,
-                    melodia_trick=melodia_trick,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_mb, media_type="audio/midi", filename="output.mid", output_path=_eff_path, output_url=output_url, extra_json={"engine": engine, "output_format": "mid", "size": len(_mb)})
-
-        return await _submit_job(_tomidi_coro(), endpoint=f"/v1/audio/to_midi/{engine}", webhook_url=webhook_url, job_id=job_id)
-
-    await _evict_siblings(engine)
-
-    try:
-        midi_bytes = await eng.to_midi(
-            raw,
-            filename,
-            onset_threshold=onset_threshold,
-            frame_threshold=frame_threshold,
+    async def _produce() -> bytes:
+        await _evict_siblings(engine)
+        return await eng.to_midi(
+            raw, filename,
+            onset_threshold=onset_threshold, frame_threshold=frame_threshold,
             minimum_note_length_ms=minimum_note_length_ms,
-            minimum_frequency=minimum_frequency,
-            maximum_frequency=maximum_frequency,
-            multiple_pitch_bends=multiple_pitch_bends,
-            melodia_trick=melodia_trick,
+            minimum_frequency=minimum_frequency, maximum_frequency=maximum_frequency,
+            multiple_pitch_bends=multiple_pitch_bends, melodia_trick=melodia_trick,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return await write_output(
-        midi_bytes,
+    # `size` is added automatically by write_output (len(payload)), so we
+    # don't repeat it in extra_json — that was redundant in the prior code.
+    return await _run_with_optional_job(
+        _produce,
         media_type="audio/midi",
         filename="output.mid",
+        job_ext="mid",
+        endpoint=f"/v1/audio/to_midi/{engine}",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "engine": engine,
-            "output_format": "mid",
-            "size": len(midi_bytes),
-        },
+        extra_json={"engine": engine, "output_format": "mid"},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2018,35 +2198,21 @@ async def audio_enhance(
         file_url=file_url,
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
+    async def _produce() -> bytes:
+        await _evict_siblings(engine)
+        return await eng.enhance(raw, filename, output_format=output_format)
 
-        async def _enhance_coro():
-            await _evict_siblings(engine)
-            try:
-                _b = await _eng.enhance(_raw, _fn, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(_b, media_type=content_type_for(output_format), filename=f"enhanced.{output_format}", output_path=_eff_path, output_url=output_url, extra_json={"engine": engine, "output_format": output_format})
-
-        return await _submit_job(_enhance_coro(), endpoint=f"/v1/audio/enhance/{engine}", webhook_url=webhook_url, job_id=job_id)
-
-    await _evict_siblings(engine)
-
-    try:
-        audio_bytes = await eng.enhance(raw, filename, output_format=output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"enhanced.{output_format}",
+        job_ext=output_format,
+        endpoint=f"/v1/audio/enhance/{engine}",
         output_path=output_path,
         output_url=output_url,
         extra_json={"engine": engine, "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2196,49 +2362,24 @@ async def stretch(
         raise HTTPException(status_code=404, detail="stretch engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
-        _tf, _ps = tempo_factor, pitch_semitones
-
-        async def _stretch_coro():
-            try:
-                _b = await _eng.stretch(
-                    _raw, _fn, tempo_factor=_tf, pitch_semitones=_ps,
-                    output_format=output_format,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"stretched.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"tempo_factor": _tf, "pitch_semitones": _ps},
-            )
-
-        return await _submit_job(
-            _stretch_coro(), endpoint="/v1/audio/stretch",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await eng.stretch(
-            raw,
-            filename,
-            tempo_factor=tempo_factor,
-            pitch_semitones=pitch_semitones,
+    async def _produce() -> bytes:
+        return await eng.stretch(
+            raw, filename,
+            tempo_factor=tempo_factor, pitch_semitones=pitch_semitones,
             output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"stretched.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/stretch",
         output_path=output_path,
         output_url=output_url,
         extra_json={"tempo_factor": tempo_factor, "pitch_semitones": pitch_semitones},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2314,43 +2455,30 @@ async def hpss(
         raise HTTPException(status_code=404, detail="hpss engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.zip")
-        _raw, _fn, _eng = raw, filename, eng
-        _mg, _ks = margin, kernel_size
+    stem_keys: list[str] = []
 
-        async def _hpss_coro():
-            try:
-                _stems = await _eng.hpss(
-                    _raw, _fn, margin=_mg, kernel_size=_ks, output_format=output_format
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                multi_stream_zip(_stems, output_format), media_type="application/zip",
-                filename="hpss-stems.zip", output_path=_eff_path, output_url=output_url,
-                extra_json={"stems": list(_stems.keys()), "output_format": output_format},
-            )
-
-        return await _submit_job(
-            _hpss_coro(), endpoint="/v1/audio/separate/hpss",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
+    async def _produce() -> bytes:
         stems = await eng.hpss(
-            raw, filename, margin=margin, kernel_size=kernel_size, output_format=output_format
+            raw, filename, margin=margin, kernel_size=kernel_size, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        multi_stream_zip(stems, output_format),
+        stem_keys[:] = list(stems.keys())
+        return multi_stream_zip(stems, output_format)
+
+    # stem_keys is populated by _produce(); the helper passes the same list
+    # reference into extra_json, so write_output sees the populated value.
+    extra_json: dict[str, Any] = {"stems": stem_keys, "output_format": output_format}
+
+    return await _run_with_optional_job(
+        _produce,
         media_type="application/zip",
         filename="hpss-stems.zip",
+        job_ext="zip",
+        endpoint="/v1/audio/separate/hpss",
         output_path=output_path,
         output_url=output_url,
-        extra_json={"stems": list(stems.keys()), "output_format": output_format},
+        extra_json=extra_json,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2409,38 +2537,17 @@ async def noise_reduce(
             return {"engine": engine, "stationary": stationary, "prop_decrease": prop_decrease, "output_format": output_format}
         return {"engine": engine, "output_format": output_format}
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-
-        async def _nr_coro():
-            try:
-                _b = await _run()
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"denoised.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json=_extra(),
-            )
-
-        return await _submit_job(
-            _nr_coro(), endpoint=f"/v1/audio/noise-reduce/{engine}",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await _run()
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _run,
         media_type=content_type_for(output_format),
         filename=f"denoised.{output_format}",
+        job_ext=output_format,
+        endpoint=f"/v1/audio/noise-reduce/{engine}",
         output_path=output_path,
         output_url=output_url,
         extra_json=_extra(),
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2486,42 +2593,22 @@ async def trim(
         raise HTTPException(status_code=400, detail="end_sec must be > start_sec")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _ss, _es = start_sec, end_sec
-
-        async def _trim_coro():
-            try:
-                _b = await asyncio.to_thread(trim_audio, _raw, _fn, _ss, _es, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"trimmed.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"start_sec": _ss, "end_sec": _es, "output_format": output_format},
-            )
-
-        return await _submit_job(
-            _trim_coro(), endpoint="/v1/audio/trim",
-            webhook_url=webhook_url, job_id=job_id,
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
+            trim_audio, raw, filename, start_sec, end_sec, output_format,
         )
 
-    try:
-        audio_bytes = await asyncio.to_thread(
-            trim_audio, raw, filename, start_sec, end_sec, output_format
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"trimmed.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/trim",
         output_path=output_path,
         output_url=output_url,
         extra_json={"start_sec": start_sec, "end_sec": end_sec, "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2567,39 +2654,20 @@ async def mix(
             ) from exc
         mix_inputs.append((raw, filename, gain_db))
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _inputs = mix_inputs
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(mix_audio, mix_inputs, output_format)
 
-        async def _mix_coro():
-            try:
-                _b = await asyncio.to_thread(mix_audio, _inputs, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"mixed.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"track_count": len(_inputs), "output_format": output_format},
-            )
-
-        return await _submit_job(
-            _mix_coro(), endpoint="/v1/audio/mix",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(mix_audio, mix_inputs, output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"mixed.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/mix",
         output_path=output_path,
         output_url=output_url,
         extra_json={"track_count": len(mix_inputs), "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2640,39 +2708,20 @@ async def concat(
             ) from exc
         concat_inputs.append((raw, filename))
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _inputs = concat_inputs
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(concat_audio, concat_inputs, output_format)
 
-        async def _concat_coro():
-            try:
-                _b = await asyncio.to_thread(concat_audio, _inputs, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"concat.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"file_count": len(_inputs), "output_format": output_format},
-            )
-
-        return await _submit_job(
-            _concat_coro(), endpoint="/v1/audio/concat",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(concat_audio, concat_inputs, output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"concat.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/concat",
         output_path=output_path,
         output_url=output_url,
         extra_json={"file_count": len(concat_inputs), "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2701,39 +2750,20 @@ async def speed(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _sp = raw, filename, speed
+    async def _produce_speed() -> bytes:
+        return await asyncio.to_thread(speed_audio, raw, filename, speed, output_format)
 
-        async def _speed_coro():
-            try:
-                _b = await asyncio.to_thread(speed_audio, _raw, _fn, _sp, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"speed.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"speed": _sp, "output_format": output_format},
-            )
-
-        return await _submit_job(
-            _speed_coro(), endpoint="/v1/audio/speed",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(speed_audio, raw, filename, speed, output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce_speed,
         media_type=content_type_for(output_format),
         filename=f"speed.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/speed",
         output_path=output_path,
         output_url=output_url,
         extra_json={"speed": speed, "output_format": output_format},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2767,39 +2797,17 @@ async def convert(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _sr, _ch = sample_rate, channels
-
-        async def _convert_coro():
-            try:
-                _b = await asyncio.to_thread(convert_audio, _raw, _fn, output_format, _sr, _ch)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"converted.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"output_format": output_format, "sample_rate": _sr, "channels": _ch},
-            )
-
-        return await _submit_job(
-            _convert_coro(), endpoint="/v1/audio/convert",
-            webhook_url=webhook_url, job_id=job_id,
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
+            convert_audio, raw, filename, output_format, sample_rate, channels,
         )
 
-    try:
-        audio_bytes = await asyncio.to_thread(
-            convert_audio, raw, filename, output_format, sample_rate, channels
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"converted.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/convert",
         output_path=output_path,
         output_url=output_url,
         extra_json={
@@ -2807,6 +2815,8 @@ async def convert(
             "sample_rate": sample_rate,
             "channels": channels,
         },
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -2946,46 +2956,23 @@ async def fade(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _fi, _fo, _cv = fade_in, fade_out, curve
-
-        async def _fade_coro():
-            try:
-                _b = await asyncio.to_thread(
-                    fade_audio, _raw, _fn, output_format,
-                    fade_in=_fi, fade_out=_fo, curve=_cv,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"faded.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"fade_in": _fi, "fade_out": _fo, "curve": _cv},
-            )
-
-        return await _submit_job(
-            _fade_coro(), endpoint="/v1/audio/fade",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
             fade_audio, raw, filename, output_format,
             fade_in=fade_in, fade_out=fade_out, curve=curve,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"faded.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/fade",
         output_path=output_path,
         output_url=output_url,
         extra_json={"fade_in": fade_in, "fade_out": fade_out, "curve": curve},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3007,39 +2994,20 @@ async def reverse(
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(reverse_audio, raw, filename, output_format)
 
-        async def _reverse_coro():
-            try:
-                _b = await asyncio.to_thread(reverse_audio, _raw, _fn, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"reversed.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-            )
-
-        return await _submit_job(
-            _reverse_coro(), endpoint="/v1/audio/reverse",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
-            reverse_audio, raw, filename, output_format
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"reversed.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/reverse",
         output_path=output_path,
         output_url=output_url,
+        extra_json=None,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3067,40 +3035,20 @@ async def loop(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _ct = raw, filename, count
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(loop_audio, raw, filename, output_format, count)
 
-        async def _loop_coro():
-            try:
-                _b = await asyncio.to_thread(loop_audio, _raw, _fn, output_format, _ct)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"looped.{output_format}",
-                output_path=_eff_path, output_url=output_url, extra_json={"count": _ct},
-            )
-
-        return await _submit_job(
-            _loop_coro(), endpoint="/v1/audio/loop",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
-            loop_audio, raw, filename, output_format, count
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"looped.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/loop",
         output_path=output_path,
         output_url=output_url,
         extra_json={"count": count},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3142,74 +3090,38 @@ async def bpm_match(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _le, _se = librosa_eng, stretch_eng
-        _tb, _ps = target_bpm, pitch_semitones
+    # extra_json fields depend on detected source_bpm — populated by produce()
+    meta: dict[str, Any] = {
+        "target_bpm": target_bpm, "pitch_semitones": pitch_semitones,
+    }
 
-        async def _bpm_match_coro():
-            try:
-                _beats = await _le.beats(_raw, _fn)
-                _src_bpm = _beats["tempo_bpm"]
-                if not _src_bpm:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="could not detect source BPM from audio",
-                    )
-                _tf = _tb / _src_bpm
-                _b = await _se.stretch(
-                    _raw, _fn, tempo_factor=_tf, pitch_semitones=_ps,
-                    output_format=output_format,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"bpm_matched.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={
-                    "source_bpm": round(_src_bpm, 2), "target_bpm": _tb,
-                    "tempo_factor": round(_tf, 4), "pitch_semitones": _ps,
-                },
-            )
-
-        return await _submit_job(
-            _bpm_match_coro(), endpoint="/v1/audio/bpm-match",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
+    async def _produce() -> bytes:
         beats_result = await librosa_eng.beats(raw, filename)
         source_bpm = beats_result["tempo_bpm"]
         if not source_bpm:
             raise HTTPException(
-                status_code=400,
-                detail="could not detect source BPM from audio",
+                status_code=400, detail="could not detect source BPM from audio",
             )
         tempo_factor = target_bpm / source_bpm
-        audio_bytes = await stretch_eng.stretch(
-            raw,
-            filename,
-            tempo_factor=tempo_factor,
-            pitch_semitones=pitch_semitones,
+        meta["source_bpm"] = round(source_bpm, 2)
+        meta["tempo_factor"] = round(tempo_factor, 4)
+        return await stretch_eng.stretch(
+            raw, filename,
+            tempo_factor=tempo_factor, pitch_semitones=pitch_semitones,
             output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"bpm_matched.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/bpm-match",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "source_bpm": round(source_bpm, 2),
-            "target_bpm": target_bpm,
-            "tempo_factor": round(tempo_factor, 4),
-            "pitch_semitones": pitch_semitones,
-        },
+        extra_json=meta,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3238,40 +3150,20 @@ async def stereo_width(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _w = raw, filename, width
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(stereo_width_audio, raw, filename, output_format, width)
 
-        async def _sw_coro():
-            try:
-                _b = await asyncio.to_thread(stereo_width_audio, _raw, _fn, output_format, _w)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"stereo_width.{output_format}",
-                output_path=_eff_path, output_url=output_url, extra_json={"width": _w},
-            )
-
-        return await _submit_job(
-            _sw_coro(), endpoint="/v1/audio/stereo-width",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
-            stereo_width_audio, raw, filename, output_format, width
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"stereo_width.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/stereo-width",
         output_path=output_path,
         output_url=output_url,
         extra_json={"width": width},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3376,31 +3268,20 @@ async def split(
     zip_dict = {f"segment_{i:03d}": seg for i, seg in enumerate(segments)}
     zip_bytes = multi_stream_zip(zip_dict, output_format)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.zip")
-        _zb, _mode = zip_bytes, mode
-        _seg_count = len(segments)
+    async def _produce() -> bytes:
+        return zip_bytes  # split work is already done above
 
-        async def _split_coro():
-            return await write_output(
-                _zb, media_type="application/zip", filename="split.zip",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"segments": _seg_count, "mode": _mode},
-            )
-
-        return await _submit_job(
-            _split_coro(), endpoint="/v1/audio/split",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    return await write_output(
-        zip_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type="application/zip",
         filename="split.zip",
+        job_ext="zip",
+        endpoint="/v1/audio/split",
         output_path=output_path,
         output_url=output_url,
         extra_json={"segments": len(segments), "mode": mode},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3428,40 +3309,20 @@ async def pan(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _pos = raw, filename, position
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(pan_audio, raw, filename, output_format, position)
 
-        async def _pan_coro():
-            try:
-                _b = await asyncio.to_thread(pan_audio, _raw, _fn, output_format, _pos)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"panned.{output_format}",
-                output_path=_eff_path, output_url=output_url, extra_json={"position": _pos},
-            )
-
-        return await _submit_job(
-            _pan_coro(), endpoint="/v1/audio/pan",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
-            pan_audio, raw, filename, output_format, position
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"panned.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/pan",
         output_path=output_path,
         output_url=output_url,
         extra_json={"position": position},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3494,41 +3355,20 @@ async def eq(
         ) from exc
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _bl = raw, filename, band_list
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(eq_audio, raw, filename, output_format, band_list)
 
-        async def _eq_coro():
-            try:
-                _b = await asyncio.to_thread(eq_audio, _raw, _fn, output_format, _bl)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"eq.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"band_count": len(_bl)},
-            )
-
-        return await _submit_job(
-            _eq_coro(), endpoint="/v1/audio/eq",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
-            eq_audio, raw, filename, output_format, band_list
-        )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"eq.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/eq",
         output_path=output_path,
         output_url=output_url,
         extra_json={"band_count": len(band_list)},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3566,67 +3406,34 @@ async def key_match(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _cde, _se = chord_detect_eng, stretch_eng
-        _ts, _tk = target_semitone, target_key
+    meta: dict[str, Any] = {"target_key": target_key.strip()}
 
-        async def _km_coro():
-            try:
-                _src = await _cde.detect_chords(_raw, _fn)
-                _skey = _src["key"]
-                _ss = _parse_key_root(_skey)
-                _diff = (_ts - _ss) % 12
-                if _diff > 6:
-                    _diff -= 12
-                _b = await _se.stretch(_raw, _fn, tempo_factor=1.0, pitch_semitones=float(_diff), output_format=output_format)
-            except HTTPException:
-                raise
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"key_matched.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"source_key": _skey, "target_key": _tk.strip(), "semitones": _diff},
-            )
-
-        return await _submit_job(
-            _km_coro(), endpoint="/v1/audio/key-match",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
+    async def _produce() -> bytes:
         source_result = await chord_detect_eng.detect_chords(raw, filename)
         source_key = source_result["key"]
         source_semitone = _parse_key_root(source_key)
         diff = (target_semitone - source_semitone) % 12
         if diff > 6:
             diff -= 12
-        audio_bytes = await stretch_eng.stretch(
-            raw,
-            filename,
-            tempo_factor=1.0,
-            pitch_semitones=float(diff),
+        meta["source_key"] = source_key
+        meta["semitones"] = diff
+        return await stretch_eng.stretch(
+            raw, filename,
+            tempo_factor=1.0, pitch_semitones=float(diff),
             output_format=output_format,
         )
-    except HTTPException:
-        raise
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"key_matched.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/key-match",
         output_path=output_path,
         output_url=output_url,
-        extra_json={
-            "source_key": source_key,
-            "target_key": target_key.strip(),
-            "semitones": diff,
-        },
+        extra_json=meta,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3662,50 +3469,24 @@ async def sidechain_duck_endpoint(
         field_prefix="trigger_file",
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _traw, _tfn = trigger_raw, trigger_filename
-        _tdb, _r, _a, _rel = threshold_db, ratio, attack_ms, release_ms
-
-        async def _duck_coro():
-            try:
-                _b = await asyncio.to_thread(
-                    sidechain_duck, _raw, _fn, _traw, _tfn,
-                    output_format, _tdb, _r, _a, _rel,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"ducked.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"threshold_db": _tdb, "ratio": _r},
-            )
-
-        return await _submit_job(
-            _duck_coro(), endpoint="/v1/audio/sidechain-duck",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
             sidechain_duck,
-            raw, filename,
-            trigger_raw, trigger_filename,
-            output_format,
-            threshold_db, ratio, attack_ms, release_ms,
+            raw, filename, trigger_raw, trigger_filename,
+            output_format, threshold_db, ratio, attack_ms, release_ms,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"ducked.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/sidechain-duck",
         output_path=output_path,
         output_url=output_url,
         extra_json={"threshold_db": threshold_db, "ratio": ratio},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3788,44 +3569,22 @@ async def mid_side(
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _mode = raw, filename, mode
-
-        async def _ms_coro():
-            try:
-                if _mode == "encode":
-                    _b = await asyncio.to_thread(mid_side_encode, _raw, _fn, output_format)
-                else:
-                    _b = await asyncio.to_thread(mid_side_decode, _raw, _fn, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"mid_side_{_mode}.{output_format}",
-                output_path=_eff_path, output_url=output_url, extra_json={"mode": _mode},
-            )
-
-        return await _submit_job(
-            _ms_coro(), endpoint="/v1/audio/mid-side",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
+    async def _produce() -> bytes:
         if mode == "encode":
-            audio_bytes = await asyncio.to_thread(mid_side_encode, raw, filename, output_format)
-        else:
-            audio_bytes = await asyncio.to_thread(mid_side_decode, raw, filename, output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+            return await asyncio.to_thread(mid_side_encode, raw, filename, output_format)
+        return await asyncio.to_thread(mid_side_decode, raw, filename, output_format)
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"mid_side_{mode}.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/mid-side",
         output_path=output_path,
         output_url=output_url,
         extra_json={"mode": mode},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3851,46 +3610,27 @@ async def beat_slice_endpoint(
         raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.zip")
-        _raw, _fn, _le = raw, filename, librosa_eng
+    meta: dict[str, Any] = {"output_format": output_format}
 
-        async def _bs_coro():
-            try:
-                beats_result = await _le.beats(_raw, _fn)
-                beat_times = beats_result.get("beats", [])
-                if not beat_times:
-                    raise HTTPException(status_code=400, detail="no beats detected in audio")
-                _b = await asyncio.to_thread(beat_slice, _raw, _fn, beat_times, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type="application/zip", filename="beat_slices.zip",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"beat_count": len(beat_times), "output_format": output_format},
-            )
-
-        return await _submit_job(
-            _bs_coro(), endpoint="/v1/audio/beat-slice",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
+    async def _produce() -> bytes:
         beats_result = await librosa_eng.beats(raw, filename)
         beat_times = beats_result.get("beats", [])
         if not beat_times:
             raise HTTPException(status_code=400, detail="no beats detected in audio")
-        zip_bytes = await asyncio.to_thread(beat_slice, raw, filename, beat_times, output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        zip_bytes,
+        meta["beat_count"] = len(beat_times)
+        return await asyncio.to_thread(beat_slice, raw, filename, beat_times, output_format)
+
+    return await _run_with_optional_job(
+        _produce,
         media_type="application/zip",
         filename="beat_slices.zip",
+        job_ext="zip",
+        endpoint="/v1/audio/beat-slice",
         output_path=output_path,
         output_url=output_url,
-        extra_json={"beat_count": len(beat_times), "output_format": output_format},
+        extra_json=meta,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3928,46 +3668,23 @@ async def conv_reverb_endpoint(
         field_prefix="ir_file",
     )
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _ir_raw, _ir_fn = ir_raw, ir_filename
-        _wm = wet_mix
-
-        async def _cr_coro():
-            try:
-                _b = await asyncio.to_thread(
-                    conv_reverb, _raw, _fn, _ir_raw, _ir_fn,
-                    wet_mix=_wm, output_format=output_format,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"conv_reverb.{output_format}",
-                output_path=_eff_path, output_url=output_url, extra_json={"wet_mix": _wm},
-            )
-
-        return await _submit_job(
-            _cr_coro(), endpoint="/v1/audio/conv-reverb",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
             conv_reverb, raw, filename, ir_raw, ir_filename,
             wet_mix=wet_mix, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"conv_reverb.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/conv-reverb",
         output_path=output_path,
         output_url=output_url,
         extra_json={"wet_mix": wet_mix},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -3993,49 +3710,86 @@ async def transient_endpoint(
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-        _ag, _sg = attack_gain_db, sustain_gain_db
-
-        async def _ts_coro():
-            try:
-                _b = await asyncio.to_thread(
-                    transient_shape, _raw, _fn,
-                    attack_gain_db=_ag, sustain_gain_db=_sg,
-                    output_format=output_format,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"transient.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"attack_gain_db": _ag, "sustain_gain_db": _sg},
-            )
-
-        return await _submit_job(
-            _ts_coro(), endpoint="/v1/audio/transient",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
             transient_shape, raw, filename,
             attack_gain_db=attack_gain_db,
             sustain_gain_db=sustain_gain_db,
             output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"transient.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/transient",
         output_path=output_path,
         output_url=output_url,
-        extra_json={"attack_gain_db": attack_gain_db, "sustain_gain_db": sustain_gain_db},
+        extra_json={
+            "attack_gain_db": attack_gain_db,
+            "sustain_gain_db": sustain_gain_db,
+        },
+        async_job=async_job,
+        webhook_url=webhook_url,
+    )
+
+
+# ── /v1/audio/multiband-compress — N-band compressor ─────────────────────────
+
+
+@app.post("/v1/audio/multiband-compress")
+async def multiband_compress_endpoint(
+    file: UploadFile | None = File(default=None),
+    file_path: str | None = Form(default=None),
+    file_url: str | None = Form(default=None),
+    output_path: str | None = Form(default=None),
+    output_url: str | None = Form(default=None),
+    crossovers_hz: str = Form(...),
+    bands: str = Form(...),
+    output_format: str = Form(default="wav"),
+    async_job: bool = Form(default=False),
+    webhook_url: str | None = Form(default=None),
+) -> Response:
+    """Multiband compression.
+
+    crossovers_hz: JSON array of ascending crossover frequencies (Hz),
+      e.g. "[200, 2000]" for a 3-band split (low/mid/high).
+    bands: JSON array of compressor specs, one per band (len = len(crossovers_hz)+1).
+      Each: {threshold_db, ratio, attack_ms?, release_ms?, makeup_db?}.
+
+    Bands split with zero-phase LR4-equivalent filters; sum reconstructs
+    when bypassed. Output is the summed compressed signal."""
+    _validate_output_format(output_format)
+    try:
+        xo = json.loads(crossovers_hz)
+        bds = json.loads(bands)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"crossovers_hz and bands must be valid JSON: {exc}",
+        ) from exc
+
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
+            multiband_compress, raw, filename,
+            crossovers_hz=xo, bands=bds,
+            output_format=output_format,
+        )
+
+    return await _run_with_optional_job(
+        _produce,
+        media_type=content_type_for(output_format),
+        filename=f"multiband.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/multiband-compress",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={"crossovers_hz": xo, "bands": bds},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -4080,70 +3834,34 @@ async def remix(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
-        _sms = stem_mix_spec
+    meta: dict[str, Any] = {"engine": engine}
 
-        async def _remix_coro():
-            await _evict_siblings(engine)
-            try:
-                stems = await _eng.separate(_raw, _fn, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            mix_inputs: list[tuple[bytes, str, float]] = []
-            for stem_name, stem_bytes in stems.items():
-                spec = _sms.get(stem_name, {})
-                if spec.get("mute", False):
-                    continue
-                gain_db = float(spec.get("gain_db", 0.0))
-                mix_inputs.append((stem_bytes, f"{stem_name}.{output_format}", gain_db))
-            if not mix_inputs:
-                raise HTTPException(status_code=400, detail="all stems are muted")
-            try:
-                bounced = await asyncio.to_thread(mix_audio, mix_inputs, output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                bounced, media_type=content_type_for(output_format),
-                filename=f"remix.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"engine": engine, "stems": list(stems.keys())},
-            )
-
-        return await _submit_job(
-            _remix_coro(), endpoint="/v1/audio/remix",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    await _evict_siblings(engine)
-    try:
+    async def _produce() -> bytes:
+        await _evict_siblings(engine)
         stems = await eng.separate(raw, filename, output_format=output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        mix_inputs: list[tuple[bytes, str, float]] = []
+        for stem_name, stem_bytes in stems.items():
+            spec = stem_mix_spec.get(stem_name, {})
+            if spec.get("mute", False):
+                continue
+            gain_db = float(spec.get("gain_db", 0.0))
+            mix_inputs.append((stem_bytes, f"{stem_name}.{output_format}", gain_db))
+        if not mix_inputs:
+            raise HTTPException(status_code=400, detail="all stems are muted")
+        meta["stems"] = list(stems.keys())
+        return await asyncio.to_thread(mix_audio, mix_inputs, output_format)
 
-    mix_inputs_sync: list[tuple[bytes, str, float]] = []
-    for stem_name, stem_bytes in stems.items():
-        spec = stem_mix_spec.get(stem_name, {})
-        if spec.get("mute", False):
-            continue
-        gain_db = float(spec.get("gain_db", 0.0))
-        mix_inputs_sync.append((stem_bytes, f"{stem_name}.{output_format}", gain_db))
-    if not mix_inputs_sync:
-        raise HTTPException(status_code=400, detail="all stems are muted")
-
-    try:
-        bounced = await asyncio.to_thread(mix_audio, mix_inputs_sync, output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        bounced,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"remix.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/remix",
         output_path=output_path,
         output_url=output_url,
-        extra_json={"engine": engine, "stems": list(stems.keys())},
+        extra_json=meta,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -4264,39 +3982,20 @@ async def pitch_correct_endpoint(
         raise HTTPException(status_code=404, detail="pitch-correct engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
+    async def _produce() -> bytes:
+        return await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
 
-        async def _pc_coro():
-            try:
-                _b = await _eng.pitch_correct(_raw, _fn, strength=strength, output_format=output_format)
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"pitch_correct.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"strength": strength},
-            )
-
-        return await _submit_job(
-            _pc_coro(), endpoint="/v1/audio/pitch-correct",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"pitch_correct.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/pitch-correct",
         output_path=output_path,
         output_url=output_url,
         extra_json={"strength": strength},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -4323,47 +4022,24 @@ async def repair_endpoint(
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-
-        async def _rep_coro():
-            try:
-                _b = await asyncio.to_thread(
-                    repair_audio, _raw, _fn,
-                    declip=declip, dehum=dehum, hum_freq=hum_freq,
-                    output_format=output_format,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                _b, media_type=content_type_for(output_format),
-                filename=f"repaired.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"declip": declip, "dehum": dehum, "hum_freq": hum_freq},
-            )
-
-        return await _submit_job(
-            _rep_coro(), endpoint="/v1/audio/repair",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        audio_bytes = await asyncio.to_thread(
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
             repair_audio, raw, filename,
             declip=declip, dehum=dehum, hum_freq=hum_freq,
             output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"repaired.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/repair",
         output_path=output_path,
         output_url=output_url,
         extra_json={"declip": declip, "dehum": dehum, "hum_freq": hum_freq},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -4561,47 +4237,24 @@ async def deess_endpoint(
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn = raw, filename
-
-        async def _deess_coro():
-            try:
-                result = await asyncio.to_thread(
-                    deess, _raw, _fn,
-                    threshold_db=threshold_db, frequency_hz=frequency_hz,
-                    ratio=ratio, output_format=output_format,
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                result, media_type=content_type_for(output_format),
-                filename=f"deessed.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json={"threshold_db": threshold_db, "frequency_hz": frequency_hz, "ratio": ratio},
-            )
-
-        return await _submit_job(
-            _deess_coro(), endpoint="/v1/audio/deess",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
-        result = await asyncio.to_thread(
+    async def _produce() -> bytes:
+        return await asyncio.to_thread(
             deess, raw, filename,
             threshold_db=threshold_db, frequency_hz=frequency_hz,
             ratio=ratio, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        result,
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"deessed.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/deess",
         output_path=output_path,
         output_url=output_url,
         extra_json={"threshold_db": threshold_db, "frequency_hz": frequency_hz, "ratio": ratio},
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -4651,43 +4304,26 @@ async def thumbnail_endpoint(
         raise HTTPException(status_code=404, detail="thumbnail engine not configured")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
-    if async_job:
-        job_id = JOB_QUEUE.new_id()
-        _eff_path = output_path or (None if output_url else f"jobs/{job_id}.{output_format}")
-        _raw, _fn, _eng = raw, filename, eng
+    thumb_meta: dict[str, Any] = {}
 
-        async def _thumb_coro():
-            try:
-                audio_bytes, meta = await _eng.thumbnail(
-                    _raw, _fn, duration_sec=duration_sec, output_format=output_format
-                )
-            except AudioConversionError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await write_output(
-                audio_bytes, media_type=content_type_for(output_format),
-                filename=f"thumbnail.{output_format}",
-                output_path=_eff_path, output_url=output_url,
-                extra_json=meta,
-            )
-
-        return await _submit_job(
-            _thumb_coro(), endpoint="/v1/audio/thumbnail",
-            webhook_url=webhook_url, job_id=job_id,
-        )
-
-    try:
+    async def _produce() -> bytes:
         audio_bytes, meta = await eng.thumbnail(
-            raw, filename, duration_sec=duration_sec, output_format=output_format
+            raw, filename, duration_sec=duration_sec, output_format=output_format,
         )
-    except AudioConversionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await write_output(
-        audio_bytes,
+        thumb_meta.update(meta)
+        return audio_bytes
+
+    return await _run_with_optional_job(
+        _produce,
         media_type=content_type_for(output_format),
         filename=f"thumbnail.{output_format}",
+        job_ext=output_format,
+        endpoint="/v1/audio/thumbnail",
         output_path=output_path,
         output_url=output_url,
-        extra_json=meta,
+        extra_json=thumb_meta,
+        async_job=async_job,
+        webhook_url=webhook_url,
     )
 
 
@@ -4934,5 +4570,5 @@ def files_delete(path: str) -> JSONResponse:
 # is set in build_mcp_server so the mount at "/v1/mcp" doesn't double-prefix.
 # Built once here so the lifespan can `async with MCP_SERVER.session_manager.run()`.
 
-MCP_SERVER = build_mcp_server(engines=ENGINES, registry=REGISTRY)
+MCP_SERVER = build_mcp_server(engines=ENGINES, registry=REGISTRY, presets=PRESETS)
 app.mount("/v1/mcp", MCP_SERVER.streamable_http_app())

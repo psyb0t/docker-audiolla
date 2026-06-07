@@ -141,17 +141,17 @@ test_trim_negative_start_400() {
     echo "OK: trim_negative_start_400"
 }
 
-# ── missing file → 400 ───────────────────────────────────────────────────────
+# ── missing file → 404 (staged file not found) ──────────────────────────────
 
-test_trim_missing_file_400() {
+test_trim_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=no/such.wav" \
         -F "end_sec=3.0" \
         "${AUDIOLLA_BASE_URL}/v1/audio/trim")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: trim_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: trim_missing_file_404"
 }
 
 # ── output_path: staged file is readable ─────────────────────────────────────
@@ -186,5 +186,5 @@ harness_run_tests \
     test_trim_missing_end_sec_422 \
     test_trim_end_before_start_400 \
     test_trim_negative_start_400 \
-    test_trim_missing_file_400 \
+    test_trim_missing_file_404 \
     test_trim_output_path

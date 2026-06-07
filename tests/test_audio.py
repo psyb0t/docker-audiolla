@@ -154,3 +154,45 @@ def test_run_ffmpeg_passes_on_zero(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _FakeProc())
     _run_ffmpeg(["ffmpeg", "-i", "ok"])  # no exception
+
+
+# ── multiband_compress validation ───────────────────────────────────────────
+#
+# The processing path needs numpy + scipy + pedalboard + soundfile + ffmpeg
+# (covered by the integration suite). These tests exercise just the cheap
+# validation paths that reject malformed inputs before any heavy import.
+
+def test_multiband_compress_rejects_empty_crossovers():
+    from audiolla.audio import multiband_compress
+
+    with pytest.raises(AudioConversionError, match="non-empty list"):
+        multiband_compress(b"x", "a.wav", crossovers_hz=[], bands=[])
+
+
+def test_multiband_compress_rejects_bands_length_mismatch():
+    from audiolla.audio import multiband_compress
+
+    # 1 crossover requires 2 bands, only 1 supplied
+    with pytest.raises(AudioConversionError, match="length len\\(crossovers_hz\\)\\+1"):
+        multiband_compress(
+            b"x", "a.wav", crossovers_hz=[1000], bands=[{"threshold_db": -10, "ratio": 2}]
+        )
+
+
+def test_multiband_compress_rejects_non_positive_crossover():
+    from audiolla.audio import multiband_compress
+
+    with pytest.raises(AudioConversionError, match="must be > 0 Hz"):
+        multiband_compress(
+            b"x", "a.wav", crossovers_hz=[-100], bands=[{}, {}]
+        )
+
+
+def test_multiband_compress_rejects_bad_output_format():
+    from audiolla.audio import multiband_compress
+
+    with pytest.raises(AudioConversionError, match="unsupported output format"):
+        multiband_compress(
+            b"x", "a.wav", crossovers_hz=[1000], bands=[{}, {}],
+            output_format="bogus",
+        )

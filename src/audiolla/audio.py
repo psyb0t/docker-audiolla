@@ -1,9 +1,20 @@
-"""Audio ingress/egress helpers — ffmpeg encode/decode.
+"""Audio DSP toolkit — ffmpeg / scipy / pedalboard wrappers.
 
-Decode any format to float32 stereo/mono WAV at the original sample rate
-for processing. Encode processed audio back to the requested output format
-at egress. All conversion via ffmpeg subprocess — broad codec matrix without
-extra Python deps.
+Stateless functions only. Anything that needs lazy model load, lock, or
+lifecycle management belongs in `engines/` instead (see CLAUDE.md).
+
+Sections (search for the banner to navigate):
+
+  CORE         AudioConversionError, format tables, encode/decode helpers,
+               audio_info, multi_stream_zip, _run_ffmpeg
+  TRANSFORM    trim, mix, concat, speed, convert, fade, reverse, loop,
+               stereo_width, split_audio_equal, pan, eq
+  STEREO       mid_side_encode/decode, stereo_field
+  DYNAMICS     sidechain_duck, transient_shape, multiband_compress, deess
+  RESTORE      clip_detect, repair_audio
+  EFFECTS      beat_slice, conv_reverb
+  ANALYZE      loudness_curve
+  MIDI         chords_to_midi_bytes
 """
 
 from __future__ import annotations
@@ -11,6 +22,11 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CORE — error class, format tables, ffmpeg encode/decode, audio_info
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 class AudioConversionError(Exception):
@@ -183,6 +199,12 @@ def audio_info(raw_bytes: bytes, original_filename: str) -> dict:
     if frames is not None:
         result["frames"] = frames
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TRANSFORM — basic ops: trim, mix, concat, speed, convert, fade, reverse,
+#             loop, stereo_width, split_audio_equal, pan, eq
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def trim_audio(
@@ -711,6 +733,11 @@ def eq_audio(
             os.unlink(out_path)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# DYNAMICS — sidechain_duck, transient_shape, multiband_compress, deess
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 def sidechain_duck(
     raw_bytes: bytes,
     original_filename: str,
@@ -776,6 +803,11 @@ def _run_ffmpeg(args: list[str]) -> None:
         raise AudioConversionError(f"ffmpeg failed: {stderr or 'unknown error'}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# RESTORE — clip_detect, repair_audio
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 def clip_detect(raw: bytes, filename: str) -> dict:
     """Detect digital clipping in audio.
 
@@ -818,6 +850,11 @@ def clip_detect(raw: bytes, filename: str) -> dict:
         "sample_rate": int(sr),
         "channels": channels,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STEREO — mid_side_encode/decode, stereo_field (also see stereo_field below)
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def mid_side_encode(raw: bytes, filename: str, output_format: str = "wav") -> bytes:
@@ -906,6 +943,11 @@ def mid_side_decode(raw: bytes, filename: str, output_format: str = "wav") -> by
         for p in (in_path, wav_path, out_wav_path):
             if p and os.path.exists(p):
                 os.unlink(p)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EFFECTS — beat_slice, conv_reverb
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def beat_slice(
@@ -1122,6 +1164,137 @@ def transient_shape(
                 os.unlink(p)
 
 
+def multiband_compress(
+    raw: bytes,
+    filename: str,
+    *,
+    crossovers_hz: list[float],
+    bands: list[dict],
+    output_format: str = "wav",
+) -> bytes:
+    """Multiband compression — split into N+1 bands at the given crossovers,
+    compress each band independently, sum bands back.
+
+    crossovers_hz: ascending list of crossover frequencies in Hz, length N.
+    bands: list of N+1 band dicts with compressor params:
+        threshold_db (required), ratio (required),
+        attack_ms (default 10), release_ms (default 100),
+        makeup_db (default 0.0).
+
+    Bands are split with zero-phase 4th-order Butterworth (LR4-equivalent
+    via sosfiltfilt double-pass) — phase-flat reconstruction, no allpass
+    artifacts at the crossovers when bypassed.
+    """
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    if not isinstance(crossovers_hz, list) or not crossovers_hz:
+        raise AudioConversionError(
+            "crossovers_hz must be a non-empty list of ascending frequencies"
+        )
+    if not isinstance(bands, list) or len(bands) != len(crossovers_hz) + 1:
+        raise AudioConversionError(
+            f"bands must have length len(crossovers_hz)+1 "
+            f"({len(crossovers_hz) + 1}), got {len(bands) if isinstance(bands, list) else type(bands).__name__}"
+        )
+    xo = sorted(float(f) for f in crossovers_hz)
+    for i, f in enumerate(xo):
+        if f <= 0:
+            raise AudioConversionError(
+                f"crossovers_hz[{i}] must be > 0 Hz, got {f}"
+            )
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+    from scipy.signal import butter, sosfiltfilt  # noqa: PLC0415
+    try:
+        import pedalboard  # noqa: PLC0415
+    except ImportError as exc:
+        raise AudioConversionError(
+            "pedalboard is not installed; cannot run multiband_compress"
+        ) from exc
+
+    in_path = write_temp_input(raw, filename)
+    wav_path = None
+    out_wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(prefix="audiolla-mbc-", suffix=".wav")
+        os.close(wav_fd)
+        _run_ffmpeg(["ffmpeg", "-y", "-i", in_path, "-c:a", "pcm_f32le", wav_path])
+        data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+
+        nyq = sr / 2.0
+        for i, f in enumerate(xo):
+            if f >= nyq:
+                raise AudioConversionError(
+                    f"crossovers_hz[{i}]={f} >= nyquist {nyq}; "
+                    f"file sample rate is {sr}"
+                )
+
+        # Split into len(xo)+1 bands using cascaded LP/HP butterworth + zero-phase.
+        # band[0] = LP(xo[0]); band[i] = HP(xo[i-1]) THEN LP(xo[i]); band[-1] = HP(xo[-1])
+        band_signals: list = []
+        for i in range(len(xo) + 1):
+            sig = data
+            if i > 0:
+                sos_hp = butter(2, xo[i - 1] / nyq, btype="highpass", output="sos")
+                sig = sosfiltfilt(sos_hp, sig, axis=0)
+            if i < len(xo):
+                sos_lp = butter(2, xo[i] / nyq, btype="lowpass", output="sos")
+                sig = sosfiltfilt(sos_lp, sig, axis=0)
+            band_signals.append(np.ascontiguousarray(sig, dtype=np.float32))
+
+        # Per-band compression
+        compressed: list = []
+        for i, (sig, band) in enumerate(zip(band_signals, bands)):
+            if not isinstance(band, dict):
+                raise AudioConversionError(
+                    f"bands[{i}] must be an object, got {type(band).__name__}"
+                )
+            try:
+                thr = float(band["threshold_db"])
+                ratio = float(band["ratio"])
+            except KeyError as exc:
+                raise AudioConversionError(
+                    f"bands[{i}] missing required field: {exc.args[0]}"
+                ) from exc
+            attack = float(band.get("attack_ms", 10.0))
+            release = float(band.get("release_ms", 100.0))
+            makeup_db = float(band.get("makeup_db", 0.0))
+            board = pedalboard.Pedalboard([
+                pedalboard.Compressor(
+                    threshold_db=thr, ratio=ratio,
+                    attack_ms=attack, release_ms=release,
+                )
+            ])
+            out = board(sig.T, sr).T
+            if makeup_db != 0.0:
+                out = out * (10.0 ** (makeup_db / 20.0))
+            compressed.append(out)
+
+        summed = np.sum(compressed, axis=0).astype(np.float32)
+        np.clip(summed, -1.0, 1.0, out=summed)
+
+        out_wav_fd, out_wav_path = tempfile.mkstemp(
+            prefix="audiolla-mbc-out-", suffix=".wav"
+        )
+        os.close(out_wav_fd)
+        sf.write(out_wav_path, summed, sr, subtype="FLOAT")
+        out_bytes, _ = encode_audio(out_wav_path, output_format)
+        return out_bytes
+    finally:
+        for p in (in_path, wav_path, out_wav_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ANALYZE — loudness_curve, stereo_field (defined further below)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 def loudness_curve(raw: bytes, filename: str, *, hop_length: int = 512) -> dict:
     """Compute RMS envelope as a loudness curve over time.
     Returns {curve: [{time_sec, rms_db}, ...], duration, sample_rate, hop_length}."""
@@ -1232,6 +1405,11 @@ def repair_audio(
         for p in (in_path, wav_path, out_wav_path):
             if p and os.path.exists(p):
                 os.unlink(p)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MIDI — chords_to_midi_bytes (and other tiny MIDI helpers)
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def chords_to_midi_bytes(

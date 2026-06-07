@@ -1,4 +1,26 @@
-"""Engine factory — build engines keyed by slug from the registry."""
+"""Engine factory — build engines keyed by slug from the registry.
+
+Rule of thumb for "engine vs audio.py function":
+
+  Engine (subclass of EngineBase, lives in `engines/`)
+    Anything stateful, heavy, or with a lifecycle:
+    - loads model weights at first use, holds them in memory
+    - is evicted from RAM after AUDIOLLA_IDLE_TIMEOUT_SEC
+    - serializes requests via its own `_lock`
+    - has a slug in `engines.json` so the registry knows about it
+
+  audio.py function (top-level callable in `audio.py`)
+    Anything stateless and self-contained:
+    - no model weights, no shared mutable state
+    - cheap to invoke, no init cost worth caching
+    - pure DSP (numpy/scipy/pedalboard/ffmpeg)
+    - called directly from server handlers / MCP tools
+    - does NOT need a slug in engines.json
+
+When in doubt: if the function would be slow on every call without
+caching some loaded resource, it's an engine. Otherwise it's a free
+function in audio.py.
+"""
 
 from __future__ import annotations
 

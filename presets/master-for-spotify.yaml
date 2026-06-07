@@ -1,0 +1,29 @@
+name: master-for-spotify
+description: |
+  Three-band mastering pass with -14 LUFS target (Spotify / YouTube / Apple
+  Music streaming spec). Splits the signal at 200 Hz and 3 kHz, compresses
+  each band with a sensible default ratio, then normalises to the streaming
+  target loudness.
+steps:
+  - op: multiband_compress
+    params:
+      crossovers_hz: [200, 3000]
+      bands:
+        - threshold_db: -18.0
+          ratio: 3.0
+          attack_ms: 15.0
+          release_ms: 150.0
+          makeup_db: 1.5
+        - threshold_db: -14.0
+          ratio: 2.5
+          attack_ms: 8.0
+          release_ms: 80.0
+          makeup_db: 1.0
+        - threshold_db: -10.0
+          ratio: 2.0
+          attack_ms: 3.0
+          release_ms: 40.0
+          makeup_db: 0.5
+  - op: normalize
+    params:
+      target_lufs: -14.0

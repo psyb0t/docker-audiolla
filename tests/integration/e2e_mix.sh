@@ -119,16 +119,16 @@ test_mix_missing_tracks_422() {
     echo "OK: mix_missing_tracks_422"
 }
 
-# ── track file not found → 400 ───────────────────────────────────────────────
+# ── track file not found → 404 (status propagates from input_resolver) ──────
 
-test_mix_missing_track_file_400() {
+test_mix_missing_track_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F 'tracks=[{"file_path":"mix/track_a.wav"},{"file_path":"mix/ghost.wav"}]' \
         "${AUDIOLLA_BASE_URL}/v1/audio/mix")
-    assert_eq "$code" "400" "missing track file -> 400" || return 1
-    echo "OK: mix_missing_track_file_400"
+    assert_eq "$code" "404" "missing track file -> 404" || return 1
+    echo "OK: mix_missing_track_file_404"
 }
 
 # ── output_path staging ───────────────────────────────────────────────────────
@@ -160,5 +160,5 @@ harness_run_tests \
     test_mix_one_track_400 \
     test_mix_invalid_tracks_json_400 \
     test_mix_missing_tracks_422 \
-    test_mix_missing_track_file_400 \
+    test_mix_missing_track_file_404 \
     test_mix_output_path

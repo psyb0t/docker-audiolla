@@ -36,6 +36,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -45,6 +46,7 @@ from . import files as files_mod
 import asyncio
 
 from .audio import AudioConversionError, content_type_for, clip_detect, mid_side_encode, mid_side_decode, beat_slice, conv_reverb, transient_shape
+from .audio import multiband_compress as _multiband_compress_fn
 
 _log = logging.getLogger("audiolla.mcp")
 
@@ -53,6 +55,7 @@ def build_mcp_server(
     *,
     engines: dict[str, Any],
     registry: dict[str, dict[str, Any]],
+    presets: dict[str, Any] | None = None,
 ) -> FastMCP:
     """Construct the FastMCP server. Mount under ``/v1/mcp`` so clients
     connect to ``/v1/mcp`` directly (the FastMCP SDK's streamable_http_path
@@ -139,6 +142,20 @@ def build_mcp_server(
             "output_format": output_format,
         }
 
+    async def _run_audio_tool(
+        file_path: str | None,
+        file_url: str | None,
+        work: Callable[[bytes, str], Awaitable[bytes]],
+        output_format: str,
+        output_url: str | None,
+    ) -> dict[str, Any]:
+        """Unified MCP audio-tool flow: load input → run `work(raw, filename)`
+        → emit audio (base64 or presigned PUT). AudioConversionError is
+        translated to ValueError so the MCP framework reports it cleanly."""
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await work(raw, filename)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+
     # ── engine discovery ────────────────────────────────────────────────────
 
     @mcp.tool()
@@ -158,6 +175,84 @@ def build_mcp_server(
                 }
             )
         return {"engines": out}
+
+    # ── workflow: presets + pipeline + ops discovery ────────────────────────
+
+    @mcp.tool()
+    async def list_presets() -> dict[str, Any]:
+        """List server-side curated workflows (name + description).
+        Use ``run_preset`` to execute one against a file."""
+        if not presets:
+            return {"presets": []}
+        return {
+            "presets": [
+                {"name": p.name, "description": p.description}
+                for p in presets.values()
+            ],
+        }
+
+    @mcp.tool()
+    async def describe_preset(name: str) -> dict[str, Any]:
+        """Get the full step list of a preset before running it."""
+        if not presets or name not in presets:
+            raise ValueError(
+                f"unknown preset {name!r}; configured: {sorted(presets or [])}"
+            )
+        return presets[name].to_dict()
+
+    @mcp.tool()
+    async def list_ops() -> dict[str, Any]:
+        """List pipeline op slugs available in ``/v1/pipeline`` and presets."""
+        from .pipeline import available_ops  # noqa: PLC0415
+        return {"ops": available_ops()}
+
+    @mcp.tool()
+    async def run_preset(
+        name: str,
+        file_path: str | None = None,
+        file_url: str | None = None,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Run a curated preset pipeline against an input file.
+        Returns ``{audio_base64, ...}`` by default, or PUTs to ``output_url``."""
+        from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
+
+        if not presets or name not in presets:
+            raise ValueError(
+                f"unknown preset {name!r}; configured: {sorted(presets or [])}"
+            )
+        preset = presets[name]
+
+        async def _work(raw: bytes, filename: str) -> bytes:
+            try:
+                payload, _log = await run_pipeline(engines, raw, filename, preset.steps)
+            except PipelineError as exc:
+                raise ValueError(str(exc)) from exc
+            return payload
+
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+
+    @mcp.tool()
+    async def run_pipeline_tool(
+        steps: list[dict[str, Any]],
+        file_path: str | None = None,
+        file_url: str | None = None,
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Run an ad-hoc op pipeline: ``steps=[{op, params}, ...]``. Each step's
+        output feeds the next. See ``list_ops`` for available op slugs."""
+        from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
+
+        async def _work(raw: bytes, filename: str) -> bytes:
+            try:
+                payload, _log = await run_pipeline(engines, raw, filename, steps)
+            except PipelineError as exc:
+                raise ValueError(str(exc)) from exc
+            return payload
+
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     # ── audio processing tools ──────────────────────────────────────────────
 
@@ -1192,14 +1287,11 @@ def build_mcp_server(
         import asyncio as _asyncio  # noqa: PLC0415
         if end_sec <= start_sec:
             raise ValueError("end_sec must be > start_sec")
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(
-                _trim, raw, name, start_sec, end_sec, output_format
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(
+                _trim, raw, filename, start_sec, end_sec, output_format
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def mix(
@@ -1266,15 +1358,12 @@ def build_mcp_server(
         import asyncio as _asyncio  # noqa: PLC0415
         if fade_in <= 0.0 and fade_out <= 0.0:
             raise ValueError("at least one of fade_in or fade_out must be > 0")
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(
-                _fade, raw, name, output_format,
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(
+                _fade, raw, filename, output_format,
                 fade_in=fade_in, fade_out=fade_out, curve=curve,
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def reverse(
@@ -1286,12 +1375,9 @@ def build_mcp_server(
         """Reverse audio playback direction. Returns base64 audio."""
         from .audio import reverse_audio as _reverse  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(_reverse, raw, name, output_format)
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(_reverse, raw, filename, output_format)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def loop(
@@ -1306,12 +1392,9 @@ def build_mcp_server(
         import asyncio as _asyncio  # noqa: PLC0415
         if count < 2:
             raise ValueError(f"count must be >= 2, got {count}")
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(_loop, raw, name, output_format, count)
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(_loop, raw, filename, output_format, count)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def bpm_match(
@@ -1370,14 +1453,11 @@ def build_mcp_server(
         import asyncio as _asyncio  # noqa: PLC0415
         if not (0.0 <= width <= 3.0):
             raise ValueError(f"width must be in [0.0, 3.0], got {width}")
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(
-                _stereo_width, raw, name, output_format, width
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(
+                _stereo_width, raw, filename, output_format, width
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     # ── split / pan / eq / key-match / sidechain-duck ─────────────────────────
 
@@ -1466,14 +1546,11 @@ def build_mcp_server(
 
         if not (-1.0 <= position <= 1.0):
             raise ValueError(f"position must be in [-1.0, 1.0], got {position}")
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(
-                _pan, raw, name, output_format, position
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(
+                _pan, raw, filename, output_format, position
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def eq(
@@ -1490,14 +1567,11 @@ def build_mcp_server(
 
         if not bands:
             raise ValueError("bands must contain at least one entry")
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(
-                _eq, raw, name, output_format, bands
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(
+                _eq, raw, filename, output_format, bands
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def key_match(
@@ -1649,12 +1723,9 @@ def build_mcp_server(
         import asyncio as _asyncio  # noqa: PLC0415
         if not (0.1 <= speed <= 10.0):
             raise ValueError(f"speed must be in [0.1, 10.0], got {speed}")
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(_speed, raw, name, speed, output_format)
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(_speed, raw, filename, speed, output_format)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def convert(
@@ -1670,14 +1741,11 @@ def build_mcp_server(
         channels: 1 (mono) or 2 (stereo). Returns base64 audio unless output_url is set."""
         from .audio import convert_audio as _convert  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
-        raw, name = await _load_input(file_path, file_url)
-        try:
-            audio_bytes = await _asyncio.to_thread(
-                _convert, raw, name, output_format, sample_rate, channels
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await _asyncio.to_thread(
+                _convert, raw, filename, output_format, sample_rate, channels
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     @mcp.tool()
     async def similar(
@@ -2002,17 +2070,39 @@ def build_mcp_server(
         """Shape transients via dual-compressor attack/sustain blending.
         attack_gain_db > 0 makes drums punchier; sustain_gain_db < 0 cuts room tail.
         Returns processed audio base64 or uploads to output_url."""
-        raw, filename = await _load_input(file_path, file_url)
-        try:
-            result = await asyncio.to_thread(
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await asyncio.to_thread(
                 transient_shape, raw, filename,
                 attack_gain_db=attack_gain_db,
                 sustain_gain_db=sustain_gain_db,
                 output_format=output_format,
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(result, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+
+    # ── multiband_compress — N-band compressor ────────────────────────────
+
+    @mcp.tool()
+    async def multiband_compress(
+        file_path: str | None = None,
+        file_url: str | None = None,
+        crossovers_hz: list[float] = [],
+        bands: list[dict[str, Any]] = [],
+        output_format: str = "wav",
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Multiband compression. ``crossovers_hz`` is an ascending list of
+        crossover frequencies in Hz (length N). ``bands`` is a list of N+1
+        compressor specs, each with ``threshold_db``, ``ratio``, and optional
+        ``attack_ms``, ``release_ms``, ``makeup_db``. Splits signal into N+1
+        bands with zero-phase LR4-equivalent filters, compresses each
+        independently, sums the result."""
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await asyncio.to_thread(
+                _multiband_compress_fn, raw, filename,
+                crossovers_hz=crossovers_hz, bands=bands,
+                output_format=output_format,
+            )
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     # ── dj_prep — BPM + key + LUFS + Camelot ─────────────────────────────
 
@@ -2123,12 +2213,9 @@ def build_mcp_server(
         eng = next((e for e in engines.values() if is_pitch_correct_engine(e)), None)
         if eng is None:
             raise ValueError("pitch-correct engine not configured")
-        raw, filename = await _load_input(file_path, file_url)
-        try:
-            result = await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(result, output_format, output_url)
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     # ── repair_audio — declip + dehum ─────────────────────────────────────
 
@@ -2147,16 +2234,13 @@ def build_mcp_server(
         dehum: notch-filter 50 or 60 Hz hum + harmonics.
         hum_freq: 50 (EU) or 60 (US) Hz."""
         from .audio import repair_audio as _repair  # noqa: PLC0415
-        raw, filename = await _load_input(file_path, file_url)
-        try:
-            result = await asyncio.to_thread(
+        async def _work(raw: bytes, filename: str) -> bytes:
+            return await asyncio.to_thread(
                 _repair, raw, filename,
                 declip=declip, dehum=dehum, hum_freq=hum_freq,
                 output_format=output_format,
             )
-        except AudioConversionError as exc:
-            raise ValueError(str(exc)) from exc
-        return await _emit_audio(result, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
 
     # ── find_loop_point — best seamless loop boundary ─────────────────────
 
@@ -2392,5 +2476,16 @@ def build_mcp_server(
             "velocity_pct": velocity_pct,
         }
 
-    _log.info("mcp server initialised: 81 tools")
+    # Log the live tool count via the public list_tools() API — avoids a
+    # hardcoded number that drifts every time a tool is added/removed.
+    try:
+        _tool_count = len(asyncio.get_event_loop().run_until_complete(mcp.list_tools()))
+    except (RuntimeError, AttributeError):
+        # No running loop in some import contexts — fall back to async-counter
+        # built into the manager.
+        try:
+            _tool_count = len(asyncio.run(mcp.list_tools()))
+        except (RuntimeError, AttributeError):
+            _tool_count = -1
+    _log.info("mcp server initialised: %d tools", _tool_count)
     return mcp

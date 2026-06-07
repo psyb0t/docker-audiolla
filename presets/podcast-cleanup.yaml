@@ -1,0 +1,17 @@
+name: podcast-cleanup
+description: |
+  Voice enhancement + sibilance reduction + loudness target for podcast
+  publishing. Runs DeepFilterNet neural enhancement to denoise/dereverb,
+  drops sibilance peaks, then normalises to -16 LUFS (Apple Podcasts spec).
+steps:
+  - op: enhance
+    params:
+      engine: deepfilter
+  - op: deess
+    params:
+      threshold_db: -18.0
+      frequency_hz: 6500.0
+      ratio: 4.0
+  - op: normalize
+    params:
+      target_lufs: -16.0

@@ -63,7 +63,7 @@ test_loudness_normalize_to_minus14() {
         -F "file=@${FIXTURE}" \
         -F "target_lufs=-14" \
         -F "output_format=wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness")
+        "${AUDIOLLA_BASE_URL}/v1/audio/normalize")
     assert_eq "$code" "200" "normalize -> 200" || return 1
     local head4
     head4=$(head -c 4 "$tmp" | od -An -c | tr -d ' \n')

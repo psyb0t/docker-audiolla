@@ -103,16 +103,16 @@ with zipfile.ZipFile(sys.argv[1]) as z:
     echo "OK: hpss_output_format_mp3 (entries: $entries)"
 }
 
-# ── missing file → 400 ──────────────────────────────────────────────────────
+# ── missing file → 404 (staged file not found) ─────────────────────────────
 
-test_hpss_missing_file_400() {
+test_hpss_missing_file_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST \
         -F "file_path=nonexistent/ghost.wav" \
         "${AUDIOLLA_BASE_URL}/v1/audio/separate/hpss")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
-    echo "OK: hpss_missing_file_400"
+    assert_eq "$code" "404" "missing file -> 404" || return 1
+    echo "OK: hpss_missing_file_404"
 }
 
 # ── output_path: writes ZIP to staging area ──────────────────────────────────
@@ -143,5 +143,5 @@ harness_run_tests \
     test_hpss_zip_contains_both_stems \
     test_hpss_stems_are_valid_wav \
     test_hpss_output_format_mp3 \
-    test_hpss_missing_file_400 \
+    test_hpss_missing_file_404 \
     test_hpss_output_path

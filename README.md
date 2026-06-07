@@ -71,8 +71,11 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 | ✂️ **Beat slice** | Slice audio at detected beat positions — returns ZIP of segments |
 | 🏟️ **Conv reverb** | Convolution reverb via impulse response — wet_mix control |
 | 🥁 **Transient shaper** | Attack/sustain dual-compressor — punch up drums, cut room tail |
+| 🎚️ **Multiband compress** | N-band compressor with zero-phase LR4 crossovers — mastering-grade dynamics |
 | 🎛️ **DJ prep** | One call: BPM + key + Camelot wheel position + integrated LUFS |
 | 📦 **Batch** | Run trim/convert/fade/reverse/speed/eq on staged files in sequence |
+| 🧩 **Presets + pipeline** | Curated YAML workflows (`master-for-spotify`, `podcast-cleanup`, …) + ad-hoc op chaining server-side |
+| 🗂️ **Catalog** | `GET /v1/catalog` — machine-readable endpoint list grouped by category for discovery |
 | ⚡ **Async jobs** | Every endpoint supports `async_job=true` — fire-and-forget + webhook callbacks |
 
 ---
@@ -140,6 +143,7 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Beat slice](#beat-slice)
   - [Convolution reverb](#convolution-reverb)
   - [Transient shaper](#transient-shaper)
+  - [Multiband compression](#multiband-compression)
   - [DJ prep](#dj-prep)
   - [De-ess](#de-ess)
   - [Stereo field analysis](#stereo-field-analysis)
@@ -150,6 +154,8 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
   - [Stage files](#stage-files)
   - [Remote URLs](#remote-urls)
 - [Engines](#engines)
+- [Workflows — presets + pipeline](#workflows--presets--pipeline)
+- [API catalog](#api-catalog)
 - [Endpoints](#endpoints)
 - [MCP](#mcp)
 - [Configuration](#configuration)
@@ -1533,6 +1539,25 @@ curl -X POST http://localhost:8000/v1/audio/transient \
   -o softened.wav
 ```
 
+### Multiband compression
+
+Split the signal into N+1 frequency bands and compress each one independently. Bands are split with zero-phase LR4-equivalent crossovers, so a bypassed chain reconstructs the original. Mastering-engineer staple — tame bass thump without squashing vocal sibilance, level out a busy mid-range, etc.
+
+```bash
+# 3-band mastering pass: low/mid/high
+curl -X POST http://localhost:8000/v1/audio/multiband-compress \
+  -F "file=@mixdown.wav" \
+  -F 'crossovers_hz=[200, 3000]' \
+  -F 'bands=[
+    {"threshold_db":-18,"ratio":4,"attack_ms":15,"release_ms":150,"makeup_db":1.5},
+    {"threshold_db":-14,"ratio":3,"attack_ms":8, "release_ms":80, "makeup_db":1.0},
+    {"threshold_db":-10,"ratio":2,"attack_ms":3, "release_ms":40, "makeup_db":0.5}
+  ]' \
+  -o mastered.wav
+```
+
+`crossovers_hz` length is N, `bands` length is N+1. Each band: required `threshold_db` + `ratio`, optional `attack_ms` (default 10), `release_ms` (default 100), `makeup_db` (default 0).
+
 ### DJ prep
 
 One call returns everything a DJ needs about a track. Requires `librosa-analyze` + `chord-detect`. LUFS is reported when a loudness engine is available.
@@ -1838,6 +1863,62 @@ Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). 
 
 ---
 
+## Workflows — presets + pipeline
+
+Two ways to chain operations server-side without re-uploading the audio between calls:
+
+**Curated presets** — server-side YAML workflows shipped in `presets/`. Run one with a single POST:
+
+```bash
+# Master a mix for Spotify (-14 LUFS) — multiband compress + normalise
+curl -X POST http://localhost:8000/v1/presets/master-for-spotify \
+  -F "file=@mix.wav" \
+  -o mastered.wav
+
+# List available presets
+curl http://localhost:8000/v1/presets | jq '.data[] | {name, description}'
+
+# Inspect a preset's steps before running
+curl http://localhost:8000/v1/presets/podcast-cleanup | jq '.steps'
+```
+
+Shipped presets: `master-for-spotify` (3-band master + -14 LUFS), `podcast-cleanup` (DeepFilterNet + de-ess + -16 LUFS), `vocal-cleanup` (UVR dereverb + denoise + de-ess + light comp). Add your own as a YAML file in `presets/`.
+
+**Ad-hoc pipeline** — chain any registered ops in a single call:
+
+```bash
+# Restore + multiband + normalise in one request — intermediates stay
+# server-side, no re-upload between steps.
+curl -X POST http://localhost:8000/v1/pipeline \
+  -F "file=@track.wav" \
+  -F 'steps=[
+    {"op":"restore","params":{"engine":"uvr-denoise"}},
+    {"op":"multiband_compress","params":{
+      "crossovers_hz":[200,3000],
+      "bands":[
+        {"threshold_db":-18,"ratio":3},
+        {"threshold_db":-14,"ratio":2.5},
+        {"threshold_db":-10,"ratio":2}
+      ]
+    }},
+    {"op":"normalize","params":{"target_lufs":-14}}
+  ]' \
+  -o pipelined.wav
+
+# Discover available ops
+curl http://localhost:8000/v1/ops | jq .
+```
+
+The response of pipeline + preset endpoints includes a `steps` log so you can audit what ran. Both endpoints support `async_job=true`, `output_path`, `output_url` like every other audio-producing endpoint.
+
+## API catalog
+
+`GET /v1/catalog` returns the machine-readable list of every endpoint grouped by category (`separation`, `restoration`, `dynamics`, `eq-spatial`, `mastering`, `time-pitch`, `editing`, `analysis`, `effects-creative`, `visualize`, `midi`, `metadata`, `workflow`, `speech`, `files`, `jobs`, `management`). Use it for discovery; LLM agents and codegen scripts both consume it.
+
+```bash
+curl http://localhost:8000/v1/catalog | jq '.categories[] | {name, endpoint_count: (.endpoints | length)}'
+```
+
 ## Endpoints
 
 Full wire contract: [`openapi.yaml`](openapi.yaml).
@@ -1905,12 +1986,26 @@ bytes.
 | `POST` | `/v1/audio/beat-slice` | ZIP of numbered beat slices — requires `librosa-analyze` |
 | `POST` | `/v1/audio/conv-reverb` | audio bytes — `ir_file` / `ir_file_path` / `ir_file_url` required; `wet_mix` [0.0–1.0] |
 | `POST` | `/v1/audio/transient` | audio bytes — `attack_gain_db` + `sustain_gain_db` |
+| `POST` | `/v1/audio/multiband-compress` | audio bytes — N-band compressor; `crossovers_hz` + `bands` JSON arrays |
 | `POST` | `/v1/audio/dj-prep` | JSON — bpm, key, camelot, integrated_lufs; requires `librosa-analyze` + `chord-detect` |
 | `POST` | `/v1/audio/loop-point` | JSON — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}`; requires `librosa-analyze` |
 | `POST` | `/v1/audio/chords-to-midi` | MIDI bytes — chord progression from audio; requires `chord-detect` |
 | `POST` | `/v1/audio/deess` | audio bytes — split-band sibilance attenuation; `threshold_db`, `frequency_hz`, `ratio` |
 | `POST` | `/v1/audio/stereo-field` | JSON — `{correlation, width, balance_db, mono_compatible, mid_level_db, side_level_db, phase_issues, …}` |
 | `POST` | `/v1/audio/thumbnail` | audio bytes — most energetic `duration_sec` segment; `start_sec`/`end_sec` in JSON when `output_path` set; requires `librosa-analyze` |
+
+### Workflow — presets, pipeline, catalog
+
+Server-side multi-step chains + discovery. See [Workflows](#workflows--presets--pipeline) for narrative + curl examples.
+
+| Method | Path | |
+|--------|------|-|
+| `GET`  | `/v1/catalog` | machine-readable endpoint list grouped by category (17 categories) |
+| `GET`  | `/v1/ops` | list of pipeline op slugs (~24) usable in presets + `/v1/pipeline` |
+| `GET`  | `/v1/presets` | list curated server-side workflows (name + description) |
+| `GET`  | `/v1/presets/{name}` | describe one preset including all steps |
+| `POST` | `/v1/presets/{name}` | audio bytes — run a curated preset (full async_job / output_path / output_url support) |
+| `POST` | `/v1/pipeline` | audio bytes — ad-hoc `steps=[{op, params}, …]` chain, server-side intermediates |
 
 ### Batch
 
@@ -1955,7 +2050,7 @@ Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` o
 | Method | Path | |
 |--------|------|-|
 | `GET` | `/healthz` | liveness — always unauthenticated |
-| `GET` | `/v1/engines` | list configured engines |
+| `GET` | `/v1/engines` | list configured engines + `loaded` / `idle_seconds` per engine |
 | `GET` | `/v1/ps` | list engines in memory right now |
 | `DELETE` | `/v1/ps/{engine}` | evict one engine |
 | `POST` | `/v1/unload` | evict everything |
@@ -1975,6 +2070,11 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | Tool | What it does |
 |------|--------------|
 | `list_engines` | List configured engines and whether they're loaded |
+| `list_presets` | List curated server-side workflows (name + description) |
+| `describe_preset` | Show full step list of a preset before running |
+| `list_ops` | List the ~24 pipeline op slugs available in `run_pipeline_tool` / presets |
+| `run_preset` | Run a curated preset against an input file |
+| `run_pipeline_tool` | Run an ad-hoc `[{op, params}, …]` chain server-side |
 | `separate` | Demucs stem separation — base64 stems back, or per-stem PUT via `output_urls` |
 | `master` | Reference mastering (matchering) or preset chain (pedalboard) |
 | `analyze` | BPM, key, LUFS, spectral features via librosa |
@@ -2036,6 +2136,7 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `slice_at_beats` | Slice audio at beat positions — returns `{zip_base64, beat_count}` |
 | `convolution_reverb` | Apply IR reverb — `ir_file_path`/`ir_file_url` + `wet_mix` [0.0–1.0] |
 | `transient_shaper` | Attack/sustain shaping — `attack_gain_db`, `sustain_gain_db` |
+| `multiband_compress` | N-band compressor — `crossovers_hz` list + `bands` list of per-band specs |
 | `dj_prep` | BPM + key + Camelot wheel + LUFS in one call |
 | `find_loop_point` | Find best seamless loop boundary — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}` |
 | `deess` | Split-band sibilance attenuation — `threshold_db`, `frequency_hz`, `ratio` |
@@ -2060,6 +2161,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 |----------|---------|-|
 | `AUDIOLLA_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or `cuda:N` |
 | `AUDIOLLA_ENGINES_FILE` | `/app/engines.json` | path to engines registry |
+| `AUDIOLLA_PRESETS_DIR` | `/app/presets` | directory of `*.yaml` preset workflows loaded at startup |
 | `AUDIOLLA_DATA_DIR` | `/data` | where models and staged files live |
 | `AUDIOLLA_UVR_MODELS_DIR` | `<DATA_DIR>/uvr_models` | where UVR model files are cached |
 | `AUDIOLLA_AUTH_TOKEN` | — | bearer token; empty means no auth |
@@ -2123,7 +2225,7 @@ make pkg-remove PKG=name      # remove a dep
 make pkg-compile-heavy        # recompile requirements-heavy-{cpu,cuda}.txt
 ```
 
-Every `make pkg-*` bumps `[tool.uv] exclude-newer` to today's UTC midnight before touching anything — packages younger than the gate are refused. Everything runs inside the dev container. Host needs `docker`, `make`, `git`.
+Every `make pkg-*` bumps `[tool.uv] exclude-newer` to UTC midnight **7 days before** the bump date before touching anything — packages published in the last week are invisible to the resolver. The 7-day floor is the supply-chain attack window: fresh wheels (typosquats, hijacked maintainer releases) typically get caught and yanked within hours-to-days, so the floor gives malicious uploads a week of community scrutiny before they're eligible to enter the lockfile. Everything runs inside the dev container. Host needs `docker`, `make`, `git`.
 
 ---
 

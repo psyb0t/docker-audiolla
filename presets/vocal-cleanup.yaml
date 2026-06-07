@@ -1,0 +1,30 @@
+name: vocal-cleanup
+description: |
+  De-reverb + de-noise + de-ess + light compression for a clean vocal take.
+  Removes room ambience with BS-Roformer, scrubs broadband noise with the
+  UVR MelBand Roformer denoiser, then tames sibilance and gently compresses
+  with a 3:1 ratio around -18 dB.
+steps:
+  - op: restore
+    params:
+      engine: uvr-dereverb
+  - op: restore
+    params:
+      engine: uvr-denoise
+  - op: deess
+    params:
+      threshold_db: -20.0
+      frequency_hz: 7000.0
+      ratio: 4.0
+  - op: fx
+    params:
+      effects:
+        - type: Compressor
+          params:
+            threshold_db: -18.0
+            ratio: 3.0
+            attack_ms: 5.0
+            release_ms: 100.0
+        - type: Gain
+          params:
+            gain_db: 2.0

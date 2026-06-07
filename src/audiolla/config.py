@@ -78,6 +78,10 @@ ENGINES_FILE: Path = Path(
     os.environ.get("AUDIOLLA_ENGINES_FILE", "/app/engines.json")
 ).resolve()
 
+PRESETS_DIR: Path = Path(
+    os.environ.get("AUDIOLLA_PRESETS_DIR", "/app/presets")
+).resolve()
+
 DATA_DIR: Path = Path(os.environ.get("AUDIOLLA_DATA_DIR", "/data")).resolve()
 
 # Flat per-engine snapshot directory: engines with weights get
