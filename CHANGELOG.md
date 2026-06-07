@@ -4,6 +4,17 @@ All notable changes per release. Versions follow [semver](https://semver.org)
 pre-1.0 conventions: minor bumps may include breaking REST changes (called
 out explicitly), patch bumps are docs / build / fixes only.
 
+## v0.23.0 — 2026-06-07
+
+MCP tools now support local staging (`output_path`) in addition to base64 + presigned PUT.
+
+- `_emit_audio` MCP helper grew an `output_path` branch — writes to `FILES_DIR/<path>` via the same code as the REST layer's `/v1/files` and returns `{path, size, output_format}`. Mutually exclusive with `output_url`.
+- `_run_audio_tool` helper forwards `output_path`. Every MCP tool that used the helper (and most that called `_emit_audio` directly) now exposes the param.
+- **35 of 81 MCP tools** now accept `output_path` (or `output_paths` per-stem map on `separate`) — up from **3**. The remaining 46 are analysis tools that return JSON only; they don't produce audio so the param doesn't apply.
+- `visualize` tool: takes `output_path` across all three modes (PNG spectrogram, PNG waveform, MP4/WebM video).
+- `separate` tool: takes `output_paths={stem_name: path}` map mirroring the existing `output_urls` shape. Both per-stem maps are mutually exclusive.
+- Bug fix: `_run_audio_tool` was infinite-recursing (left over from an earlier regex sweep). REST tests passed because they never exercised the MCP path. Live MCP clients would have crashed on every audio-producing tool that used the helper.
+
 ## v0.22.2 — 2026-06-07
 
 Docs-only refresh of `.agents/.skills/audiolla/SKILL.md` — was a v0.1.0 artifact heavily drifted from the live API.

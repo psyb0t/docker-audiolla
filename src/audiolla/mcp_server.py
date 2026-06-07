@@ -123,9 +123,37 @@ def build_mcp_server(
         data: bytes,
         output_format: str,
         output_url: str | None,
+        output_path: str | None = None,
     ) -> dict[str, Any]:
-        """Return audio either base64-encoded (default) or as a presigned-PUT
-        upload confirmation when output_url is set."""
+        """Return audio in one of three forms:
+        - ``output_path`` set → stage to FILES_DIR/<output_path>, return
+          ``{path, size, output_format}`` (the path is what /v1/files API uses).
+        - ``output_url`` set → PUT to the presigned URL, return
+          ``{url, size, output_format}``.
+        - neither → return ``{audio_base64, output_format}`` (default).
+
+        ``output_path`` and ``output_url`` are mutually exclusive — passing
+        both raises ValueError to match the REST layer's 400 behaviour."""
+        if output_path and output_url:
+            raise ValueError("provide only one of: output_path, output_url")
+        if output_path:
+            from . import files as files_mod  # noqa: PLC0415
+            try:
+                rel = files_mod.sanitize_path(output_path)
+                dest = files_mod.resolve_under(config.FILES_DIR, rel)
+            except files_mod.FilePathError as exc:
+                raise ValueError(str(exc)) from exc
+            if len(data) > config.MAX_UPLOAD_BYTES:
+                raise ValueError(
+                    f"output too large to stage ({len(data)} bytes > "
+                    f"{config.MAX_UPLOAD_BYTES})"
+                )
+            files_mod.write_atomic(dest, data)
+            return {
+                "path": str(rel),
+                "size": len(data),
+                "output_format": output_format,
+            }
         if output_url:
             try:
                 await fetch.upload_bytes(
@@ -151,13 +179,17 @@ def build_mcp_server(
         work: Callable[[bytes, str], Awaitable[bytes]],
         output_format: str,
         output_url: str | None,
+        output_path: str | None = None,
     ) -> dict[str, Any]:
         """Unified MCP audio-tool flow: load input → run `work(raw, filename)`
-        → emit audio (base64 or presigned PUT). AudioConversionError is
-        translated to ValueError so the MCP framework reports it cleanly."""
-        async def _work(raw: bytes, filename: str) -> bytes:
-            return await work(raw, filename)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        → emit audio (base64 / staged path / presigned PUT). AudioConversionError
+        is translated to ValueError so the MCP framework reports it cleanly."""
+        raw, filename = await _load_input(file_path, file_url)
+        try:
+            data = await work(raw, filename)
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(data, output_format, output_url, output_path)
 
     # ── engine discovery ────────────────────────────────────────────────────
 
@@ -215,6 +247,7 @@ def build_mcp_server(
         file_path: str | None = None,
         file_url: str | None = None,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Run a curated preset pipeline against an input file.
@@ -234,7 +267,7 @@ def build_mcp_server(
                 raise ValueError(str(exc)) from exc
             return payload
 
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def run_pipeline_tool(
@@ -242,6 +275,7 @@ def build_mcp_server(
         file_path: str | None = None,
         file_url: str | None = None,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Run an ad-hoc op pipeline: ``steps=[{op, params}, ...]``. Each step's
@@ -255,7 +289,7 @@ def build_mcp_server(
                 raise ValueError(str(exc)) from exc
             return payload
 
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     # ── audio processing tools ──────────────────────────────────────────────
 
@@ -266,16 +300,25 @@ def build_mcp_server(
         file_path: str | None = None,
         file_url: str | None = None,
         output_format: str = "wav",
+        output_paths: dict[str, str] | None = None,
         output_urls: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Demucs stem separation.
 
-        Provide exactly one of `file_path` or `file_url`. By default the
-        per-stem audio comes back base64-encoded under `stems`. Pass
-        `output_urls={stem_name: presigned_put_url}` to have the server
-        PUT each requested stem to its URL instead — response then has
-        `uploaded_stems` mapping stem -> {url, size}.
+        Provide exactly one of `file_path` or `file_url`. Three output modes
+        (mutually exclusive — pass at most one):
+
+        - default: per-stem audio base64-encoded under `stems`.
+        - `output_paths={stem_name: path}`: stage each stem in FILES_DIR;
+          response has `staged_stems` mapping stem -> {path, size}.
+        - `output_urls={stem_name: presigned_put_url}`: PUT each stem to
+          its URL; response has `uploaded_stems` mapping stem -> {url, size}.
+
+        Both per-stem maps must cover every returned stem (no partials).
         """
+        if output_paths and output_urls:
+            raise ValueError("provide only one of: output_paths, output_urls")
+
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get(engine)
         if eng is None or not hasattr(eng, "separate"):
@@ -288,6 +331,35 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
+
+        if output_paths:
+            missing = [s for s in result if s not in output_paths]
+            if missing:
+                raise ValueError(
+                    f"output_paths missing entries for stem(s) {missing}; "
+                    f"got keys {sorted(output_paths)}"
+                )
+            from . import files as files_mod  # noqa: PLC0415
+            staged: dict[str, dict[str, Any]] = {}
+            for stem_name, audio in result.items():
+                if len(audio) > config.MAX_UPLOAD_BYTES:
+                    raise ValueError(
+                        f"stem {stem_name!r} too large to stage "
+                        f"({len(audio)} > {config.MAX_UPLOAD_BYTES})"
+                    )
+                try:
+                    rel = files_mod.sanitize_path(output_paths[stem_name])
+                    dest = files_mod.resolve_under(config.FILES_DIR, rel)
+                except files_mod.FilePathError as exc:
+                    raise ValueError(
+                        f"stem {stem_name!r}: {exc}"
+                    ) from exc
+                files_mod.write_atomic(dest, audio)
+                staged[stem_name] = {"path": str(rel), "size": len(audio)}
+            return {
+                "staged_stems": staged,
+                "output_format": output_format,
+            }
 
         if output_urls:
             missing = [s for s in result if s not in output_urls]
@@ -330,6 +402,7 @@ def build_mcp_server(
         preset: str | None = None,
         target_lufs: float | None = None,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Master audio.
@@ -379,7 +452,7 @@ def build_mcp_server(
                 )
             except AudioConversionError as exc:
                 raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio, output_format, output_url)
+        return await _emit_audio(audio, output_format, output_url, output_path)
 
     @mcp.tool()
     async def analyze(
@@ -409,6 +482,7 @@ def build_mcp_server(
         file_path: str | None = None,
         file_url: str | None = None,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """pysox DSP transform chain.
@@ -431,7 +505,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio, output_format, output_url)
+        return await _emit_audio(audio, output_format, output_url, output_path)
 
     @mcp.tool()
     async def loudness(
@@ -456,6 +530,7 @@ def build_mcp_server(
         file_url: str | None = None,
         target_lufs: float = -14.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Normalize audio to a target LUFS level via pyloudnorm.
@@ -477,7 +552,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        emitted = await _emit_audio(audio, output_format, output_url)
+        emitted = await _emit_audio(audio, output_format, output_url, output_path)
         emitted["measured_lufs"] = measured
         emitted["target_lufs"] = target_lufs
         return emitted
@@ -490,6 +565,7 @@ def build_mcp_server(
         file_path: str | None = None,
         file_url: str | None = None,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Generic effects chain.
@@ -513,7 +589,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio, output_format, output_url)
+        return await _emit_audio(audio, output_format, output_url, output_path)
 
     # ── MIDI tools ──────────────────────────────────────────────────────────
 
@@ -569,6 +645,7 @@ def build_mcp_server(
         output_format: str = "wav",
         gain: float = 0.5,
         samplerate: int = 44100,
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Render a MIDI file to audio via fluidsynth + SoundFont.
@@ -593,7 +670,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio, output_format, output_url)
+        return await _emit_audio(audio, output_format, output_url, output_path)
 
     @mcp.tool()
     async def midi_generate(
@@ -602,6 +679,7 @@ def build_mcp_server(
         output_format: str = "wav",
         gain: float = 0.5,
         samplerate: int = 44100,
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Compose AND render a song spec in one call — JSON in, audio
@@ -622,7 +700,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        result = await _emit_audio(audio, output_format, output_url)
+        result = await _emit_audio(audio, output_format, output_url, output_path)
         result["midi_size"] = len(midi)
         return result
 
@@ -756,6 +834,7 @@ def build_mcp_server(
         scale: str = "log",
         fps: int = 30,
         container: str = "mp4",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Render audio visualization.
@@ -768,42 +847,64 @@ def build_mcp_server(
         - ``spectrum`` / ``waves`` / ``cqt`` / ``freqs`` / ``volume`` /
           ``vectorscope`` / ``phasemeter`` / ``histogram`` — animated MP4/WebM video
 
-        PNG modes return ``{image_base64, size, engine, mode}``; video modes return
-        ``{video_base64, size, engine, mode, container}``. Pass ``output_url`` to PUT instead.
+        Output: PNG modes return ``{image_base64, ...}`` / video modes return
+        ``{video_base64, ...}``. Pass ``output_path`` to stage in FILES_DIR
+        and get ``{path, ...}`` back, or ``output_url`` for a presigned PUT
+        returning ``{url, ...}``. ``output_path`` + ``output_url`` are mutually
+        exclusive.
         """
+        if output_path and output_url:
+            raise ValueError("provide only one of: output_path, output_url")
+        from . import files as files_mod  # noqa: PLC0415
+
+        def _stage(data: bytes) -> dict[str, Any]:
+            try:
+                rel = files_mod.sanitize_path(output_path)  # type: ignore[arg-type]
+                dest = files_mod.resolve_under(config.FILES_DIR, rel)
+            except files_mod.FilePathError as exc:
+                raise ValueError(str(exc)) from exc
+            if len(data) > config.MAX_UPLOAD_BYTES:
+                raise ValueError(
+                    f"output too large to stage ({len(data)} bytes > "
+                    f"{config.MAX_UPLOAD_BYTES})"
+                )
+            files_mod.write_atomic(dest, data)
+            return {"path": str(rel), "size": len(data)}
+
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get(engine)
         if eng is None:
             raise ValueError(f"engine {engine!r} not configured")
         try:
-            if mode == "spectrogram":
-                out = await eng.spectrogram(raw, name, width=width, height=height, color=color, scale=scale)
+            if mode in ("spectrogram", "waveform"):
+                if mode == "spectrogram":
+                    out = await eng.spectrogram(raw, name, width=width, height=height, color=color, scale=scale)
+                else:
+                    out = await eng.waveform(raw, name, width=width, height=height, color=color)
+                base = {"engine": engine, "mode": mode}
+                if output_path:
+                    return {**_stage(out), **base}
                 if output_url:
                     await fetch.upload_bytes(output_url, out, "image/png")
-                    return {"url": output_url, "size": len(out), "engine": engine, "mode": mode}
-                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "engine": engine, "mode": mode}
-            if mode == "waveform":
-                out = await eng.waveform(raw, name, width=width, height=height, color=color)
-                if output_url:
-                    await fetch.upload_bytes(output_url, out, "image/png")
-                    return {"url": output_url, "size": len(out), "engine": engine, "mode": mode}
-                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), "engine": engine, "mode": mode}
+                    return {"url": output_url, "size": len(out), **base}
+                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), **base}
             out = await eng.visualize(raw, name, mode=mode, width=width, height=height, fps=fps, container=container)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         media_type = "video/mp4" if container == "mp4" else "video/webm"
+        base = {"engine": engine, "mode": mode, "container": container}
+        if output_path:
+            return {**_stage(out), **base}
         if output_url:
             try:
                 await fetch.upload_bytes(output_url, out, media_type)
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
-            return {"url": output_url, "size": len(out), "engine": engine, "mode": mode, "container": container}
+            return {"url": output_url, "size": len(out), **base}
         return {
             "video_base64": base64.b64encode(out).decode("ascii"),
             "size": len(out),
-            "engine": engine,
-            "mode": mode,
-            "container": container,
+            **base,
         }
 
     # ── fingerprint (Chromaprint) ──────────────────────────────────────────
@@ -886,6 +987,7 @@ def build_mcp_server(
         file_url: str | None = None,
         engine: str = "uvr-denoise",
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Remove broadband background noise (ML path via UVR MelBand Roformer).
@@ -906,7 +1008,7 @@ def build_mcp_server(
             audio_bytes = await eng.restore(raw, name, output_format=output_format)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _emit_audio(audio_bytes, output_format, output_url, output_path)
 
     # ── MIDI inspect + transform (mido) ────────────────────────────────────
 
@@ -1282,6 +1384,7 @@ def build_mcp_server(
         start_sec: float = 0.0,
         end_sec: float = 0.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Cut audio to [start_sec, end_sec). end_sec required and must be > start_sec.
@@ -1294,12 +1397,13 @@ def build_mcp_server(
             return await _asyncio.to_thread(
                 _trim, raw, filename, start_sec, end_sec, output_format
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def mix(
         tracks: list[dict[str, Any]],
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Mix multiple audio tracks with per-track gain.
@@ -1323,7 +1427,7 @@ def build_mcp_server(
             audio_bytes = await _asyncio.to_thread(_mix, mix_inputs, output_format)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _emit_audio(audio_bytes, output_format, output_url, output_path)
 
     @mcp.tool()
     async def classify(
@@ -1353,6 +1457,7 @@ def build_mcp_server(
         fade_out: float = 0.0,
         curve: str = "tri",
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Apply fade-in/fade-out. curve: tri/qsin/esin/hsin/log/exp/lin/etc.
@@ -1366,13 +1471,14 @@ def build_mcp_server(
                 _fade, raw, filename, output_format,
                 fade_in=fade_in, fade_out=fade_out, curve=curve,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def reverse(
         file_path: str | None = None,
         file_url: str | None = None,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Reverse audio playback direction. Returns base64 audio."""
@@ -1380,7 +1486,7 @@ def build_mcp_server(
         import asyncio as _asyncio  # noqa: PLC0415
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(_reverse, raw, filename, output_format)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def loop(
@@ -1388,6 +1494,7 @@ def build_mcp_server(
         file_url: str | None = None,
         count: int = 2,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Repeat audio count times (minimum 2). Returns base64 audio."""
@@ -1397,7 +1504,7 @@ def build_mcp_server(
             raise ValueError(f"count must be >= 2, got {count}")
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(_loop, raw, filename, output_format, count)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def bpm_match(
@@ -1406,6 +1513,7 @@ def build_mcp_server(
         target_bpm: float = 120.0,
         pitch_semitones: float = 0.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Detect source BPM then time-stretch to target_bpm.
@@ -1435,7 +1543,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        result = await _emit_audio(audio_bytes, output_format, output_url)
+        result = await _emit_audio(audio_bytes, output_format, output_url, output_path)
         result["source_bpm"] = round(source_bpm, 2)
         result["target_bpm"] = target_bpm
         result["tempo_factor"] = round(tempo_factor, 4)
@@ -1447,6 +1555,7 @@ def build_mcp_server(
         file_url: str | None = None,
         width: float = 1.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Adjust stereo image width via M/S processing.
@@ -1460,7 +1569,7 @@ def build_mcp_server(
             return await _asyncio.to_thread(
                 _stereo_width, raw, filename, output_format, width
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     # ── split / pan / eq / key-match / sidechain-duck ─────────────────────────
 
@@ -1539,6 +1648,7 @@ def build_mcp_server(
         file_url: str | None = None,
         position: float = 0.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Pan audio in the stereo field.
@@ -1553,7 +1663,7 @@ def build_mcp_server(
             return await _asyncio.to_thread(
                 _pan, raw, filename, output_format, position
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def eq(
@@ -1561,6 +1671,7 @@ def build_mcp_server(
         file_url: str | None = None,
         bands: list[dict[str, Any]] = [],
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Parametric EQ. bands: [{freq, gain_db, width_hz (opt)}].
@@ -1574,7 +1685,7 @@ def build_mcp_server(
             return await _asyncio.to_thread(
                 _eq, raw, filename, output_format, bands
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def key_match(
@@ -1582,6 +1693,7 @@ def build_mcp_server(
         file_url: str | None = None,
         target_key: str = "C",
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Detect source key then pitch-shift to target_key (e.g. C, F#, Bb).
@@ -1639,7 +1751,7 @@ def build_mcp_server(
             raise
         except Exception as exc:
             raise ValueError(str(exc)) from exc
-        result = await _emit_audio(audio_bytes, output_format, output_url)
+        result = await _emit_audio(audio_bytes, output_format, output_url, output_path)
         result["source_key"] = source_key
         result["target_key"] = target_key.strip()
         result["semitones"] = diff
@@ -1656,6 +1768,7 @@ def build_mcp_server(
         attack_ms: float = 10.0,
         release_ms: float = 200.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Duck primary audio when trigger audio is loud.
@@ -1679,7 +1792,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _emit_audio(audio_bytes, output_format, output_url, output_path)
 
     # ── audio utilities: concat / speed / convert / similar / midi_quantize ──
 
@@ -1687,6 +1800,7 @@ def build_mcp_server(
     async def concat(
         files: list[dict[str, Any]],
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Concatenate N audio files in order.
@@ -1709,7 +1823,7 @@ def build_mcp_server(
             audio_bytes = await _asyncio.to_thread(_concat, concat_inputs, output_format)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _emit_audio(audio_bytes, output_format, output_url, output_path)
 
     @mcp.tool()
     async def speed(
@@ -1717,6 +1831,7 @@ def build_mcp_server(
         file_url: str | None = None,
         speed: float = 1.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Change playback speed without pitch shift via ffmpeg atempo.
@@ -1728,7 +1843,7 @@ def build_mcp_server(
             raise ValueError(f"speed must be in [0.1, 10.0], got {speed}")
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(_speed, raw, filename, speed, output_format)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def convert(
@@ -1737,6 +1852,7 @@ def build_mcp_server(
         output_format: str = "wav",
         sample_rate: int | None = None,
         channels: int | None = None,
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Re-encode audio to a different format, sample rate, or channel count.
@@ -1748,7 +1864,7 @@ def build_mcp_server(
             return await _asyncio.to_thread(
                 _convert, raw, filename, output_format, sample_rate, channels
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     @mcp.tool()
     async def similar(
@@ -1852,6 +1968,7 @@ def build_mcp_server(
         stationary: bool = False,
         prop_decrease: float = 1.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Noise reduction — DSP or ML depending on engine.
@@ -1882,7 +1999,7 @@ def build_mcp_server(
                 raise ValueError(f"engine {engine!r} does not support noise reduction")
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(audio_bytes, output_format, output_url)
+        return await _emit_audio(audio_bytes, output_format, output_url, output_path)
 
     # ── file staging tools ──────────────────────────────────────────────────
 
@@ -1987,6 +2104,7 @@ def build_mcp_server(
         file_url: str | None = None,
         mode: str = "encode",
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Encode stereo audio to Mid/Side or decode M/S back to L/R.
@@ -2000,7 +2118,7 @@ def build_mcp_server(
             result = await asyncio.to_thread(fn, raw, filename, output_format)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(result, output_format, output_url)
+        return await _emit_audio(result, output_format, output_url, output_path)
 
     # ── beat_slice — slice audio at beat positions ──────────────────────────
 
@@ -2041,6 +2159,7 @@ def build_mcp_server(
         ir_file_url: str | None = None,
         wet_mix: float = 0.3,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Apply convolution reverb to audio using an impulse response (IR) file.
@@ -2057,7 +2176,7 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return await _emit_audio(result, output_format, output_url)
+        return await _emit_audio(result, output_format, output_url, output_path)
 
     # ── transient — transient shaper ──────────────────────────────────────
 
@@ -2068,6 +2187,7 @@ def build_mcp_server(
         attack_gain_db: float = 0.0,
         sustain_gain_db: float = 0.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Shape transients via dual-compressor attack/sustain blending.
@@ -2080,7 +2200,7 @@ def build_mcp_server(
                 sustain_gain_db=sustain_gain_db,
                 output_format=output_format,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     # ── multiband_compress — N-band compressor ────────────────────────────
 
@@ -2091,6 +2211,7 @@ def build_mcp_server(
         crossovers_hz: list[float] = [],
         bands: list[dict[str, Any]] = [],
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Multiband compression. ``crossovers_hz`` is an ascending list of
@@ -2105,7 +2226,7 @@ def build_mcp_server(
                 crossovers_hz=crossovers_hz, bands=bands,
                 output_format=output_format,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     # ── dj_prep — BPM + key + LUFS + Camelot ─────────────────────────────
 
@@ -2207,6 +2328,7 @@ def build_mcp_server(
         file_url: str | None = None,
         strength: float = 1.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Pitch-correct audio toward the nearest chromatic semitone.
@@ -2218,7 +2340,7 @@ def build_mcp_server(
             raise ValueError("pitch-correct engine not configured")
         async def _work(raw: bytes, filename: str) -> bytes:
             return await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     # ── repair_audio — declip + dehum ─────────────────────────────────────
 
@@ -2230,6 +2352,7 @@ def build_mcp_server(
         dehum: bool = False,
         hum_freq: float = 50.0,
         output_format: str = "wav",
+        output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Repair audio artifacts: interpolate clipped samples and/or remove mains hum.
@@ -2243,7 +2366,7 @@ def build_mcp_server(
                 declip=declip, dehum=dehum, hum_freq=hum_freq,
                 output_format=output_format,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url)
+        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
     # ── find_loop_point — best seamless loop boundary ─────────────────────
 
