@@ -2061,7 +2061,7 @@ Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` o
 
 audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp`. Point any MCP-capable LLM agent at it and it gets the full audio processing surface as callable tools — separate stems, detect chords, transcribe to MIDI, diarize speakers, compose music from a JSON spec, read/write tags, submit async jobs — all over JSON-RPC without writing a line of integration code.
 
-Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow: `put_file` to stage a file, call whatever tools you need, `get_file` to pull results back. Use `list_jobs` / `get_job` / `cancel_job` to manage long-running async work.
+Audio over MCP supports the same three output modes as REST: pass nothing → audio comes back **base64-encoded** in the response (JSON-RPC can't carry raw bytes natively); pass **`output_path`** → server stages the result in `FILES_DIR`, response is `{path, size, ...}` and the client retrieves it via the `get_file` tool or `/v1/files/<path>` over HTTP; pass **`output_url`** (presigned PUT) → server PUTs the encoded bytes to the URL, response is `{url, size, ...}`. `output_path` and `output_url` are mutually exclusive — passing both raises `ValueError`. Use `list_jobs` / `get_job` / `cancel_job` to manage long-running async work.
 
 **Endpoint:** `http://localhost:8000/v1/mcp`
 
@@ -2075,7 +2075,7 @@ Audio over MCP is base64-encoded (JSON-RPC can't carry raw bytes). The workflow:
 | `list_ops` | List the ~24 pipeline op slugs available in `run_pipeline_tool` / presets |
 | `run_preset` | Run a curated preset against an input file |
 | `run_pipeline_tool` | Run an ad-hoc `[{op, params}, …]` chain server-side |
-| `separate` | Demucs stem separation — base64 stems back, or per-stem PUT via `output_urls` |
+| `separate` | Demucs stem separation — base64 stems back, per-stem staging via `output_paths={stem:path}`, or per-stem PUT via `output_urls={stem:url}` |
 | `master` | Reference mastering (matchering) or preset chain (pedalboard) |
 | `analyze` | BPM, key, LUFS, spectral features via librosa |
 | `beats` | Beat grid — BPM + timestamps; optional click-track audio |

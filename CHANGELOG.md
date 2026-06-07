@@ -4,6 +4,15 @@ All notable changes per release. Versions follow [semver](https://semver.org)
 pre-1.0 conventions: minor bumps may include breaking REST changes (called
 out explicitly), patch bumps are docs / build / fixes only.
 
+## v0.23.1 — 2026-06-07
+
+README sync for v0.23.0 MCP changes.
+
+- MCP section rewritten to describe all three output modes (default base64 / `output_path` for FILES_DIR staging / `output_url` for presigned PUT). Previous wording claimed audio over MCP is always base64-encoded — true before v0.23.0, no longer accurate.
+- `separate` tool row in the MCP tools table now mentions `output_paths={stem:path}` alongside `output_urls={stem:url}`.
+
+Docs only — no code changes.
+
 ## v0.23.0 — 2026-06-07
 
 MCP tools now support local staging (`output_path`) in addition to base64 + presigned PUT.
