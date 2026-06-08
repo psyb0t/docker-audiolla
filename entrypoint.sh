@@ -24,6 +24,21 @@ export AUDIOLLA_ENGINES_FILE AUDIOLLA_DATA_DIR
 export AUDIOLLA_ENABLED_ENGINES
 export TORCH_HOME
 
+# HuggingFace token aliasing. huggingface_hub (used by diffusers,
+# transformers, etc. for gated-model auth) reads HF_TOKEN as the
+# canonical name. Audiolla's own pyannote engine + older docs use
+# HUGGINGFACE_TOKEN. Mirror in both directions so operators only need
+# to set ONE name and gated downloads (stable-audio-open, musicgen-*,
+# pyannote, etc.) work regardless of which name they picked.
+if [ -n "${HUGGINGFACE_TOKEN:-}" ] && [ -z "${HF_TOKEN:-}" ]; then
+    HF_TOKEN="${HUGGINGFACE_TOKEN}"
+    export HF_TOKEN
+fi
+if [ -n "${HF_TOKEN:-}" ] && [ -z "${HUGGINGFACE_TOKEN:-}" ]; then
+    HUGGINGFACE_TOKEN="${HF_TOKEN}"
+    export HUGGINGFACE_TOKEN
+fi
+
 mkdir -p "${AUDIOLLA_DATA_DIR}/models"
 mkdir -p "${AUDIOLLA_DATA_DIR}/files"
 mkdir -p "${TORCH_HOME}/hub/checkpoints"

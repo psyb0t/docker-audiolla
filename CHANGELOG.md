@@ -5,6 +5,26 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.3 — 2026-06-08
+
+**HF token alias fix.** `huggingface_hub` (used by diffusers, transformers,
+etc. for gated-model auth) reads `HF_TOKEN` as the canonical name.
+Audiolla's pyannote engine + older docs use `HUGGINGFACE_TOKEN`. Operators
+who only set `HUGGINGFACE_TOKEN` were hitting `401 Unauthorized` on gated
+models like `stabilityai/stable-audio-open-1.0` and `facebook/musicgen-*`
+because the HF lib went anonymous despite the token being available under
+a different env var.
+
+`entrypoint.sh` now mirrors `HUGGINGFACE_TOKEN` ↔ `HF_TOKEN` in both
+directions before exec'ing the server, so setting either name unlocks
+gated downloads regardless of which env var the operator picked.
+
+- `entrypoint.sh`: bidirectional alias between `HUGGINGFACE_TOKEN` and
+  `HF_TOKEN`.
+- `README.md`: env table now lists both names + clarifies which gated
+  engines need a token (pyannote, stable-audio-open, musicgen-*). The
+  diarization "Note" block updated to point at `HF_TOKEN` first.
+
 ## v1.0.2 — 2026-06-08
 
 **Runtime default flip — `HF_HUB_OFFLINE=0`.** Previously the prod image

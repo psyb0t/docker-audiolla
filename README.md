@@ -624,11 +624,11 @@ pyannote/speaker-diarization-3.1 — state-of-the-art speaker diarization from H
 
 > **Note:** This engine requires a HuggingFace account. You must accept the model terms at
 > [https://huggingface.co/pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
-> and then set `HUGGINGFACE_TOKEN` when starting the container. A read-only token with model access is enough.
+> and then set `HF_TOKEN` (or the older alias `HUGGINGFACE_TOKEN` — the entrypoint mirrors them both ways) when starting the container. A read-only token with model access is enough. The same token also unlocks the gated text-to-audio engines (`stable-audio-open`, `musicgen-small`, `musicgen-medium`) provided you've accepted their licences on huggingface.co.
 
 ```bash
 docker run ... \
-  -e HUGGINGFACE_TOKEN=hf_your_token_here \
+  -e HF_TOKEN=hf_your_token_here \
   psyb0t/audiolla:latest
 ```
 
@@ -2256,7 +2256,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_DATA_DIR` | `/data` | where models and staged files live |
 | `AUDIOLLA_UVR_MODELS_DIR` | `<DATA_DIR>/uvr_models` | where UVR model files are cached |
 | `AUDIOLLA_AUTH_TOKEN` | — | bearer token; empty means no auth |
-| `HUGGINGFACE_TOKEN` | — | HuggingFace access token; required for `pyannote` speaker diarization (accept model terms at huggingface.co/pyannote/speaker-diarization-3.1 first) |
+| `HF_TOKEN` / `HUGGINGFACE_TOKEN` | — | HuggingFace access token. The entrypoint mirrors the two names so setting either works. Required for the gated engines: `pyannote` speaker diarization, `stable-audio-open`, `musicgen-small`, `musicgen-medium`. Accept each model's licence on huggingface.co before using. |
 | `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
 | `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
