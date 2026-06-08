@@ -5,6 +5,43 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.4 — 2026-06-08
+
+**Bug fix + structured logging overhaul.**
+
+- **Fix: `/v1/audio/enhance/deepfilter` no longer returns 400 before
+  first load.** `is_deepfilter_engine()` was checking for `_df_state` (a
+  private attribute set only inside `_load_sync()` on first inference)
+  in addition to the public `enhance` method. The first call after
+  container boot saw `_df_state` missing → predicate False → handler
+  responded `400 engine 'deepfilter' does not support neural
+  enhancement`. The predicate now checks only the public contract; the
+  engine loads on the same call.
+- **JSON logging via a single centralised init path.** Every audiolla
+  process funnels through `audiolla.logging.configure()` (called once
+  from `__main__` before uvicorn starts). Uvicorn's own loggers
+  (`uvicorn`, `uvicorn.error`, `uvicorn.access`) are aligned with the
+  same handler + formatter so all log lines are line-delimited JSON
+  with the same shape regardless of origin.
+- **`LOG_LEVEL` env var.** Accepts `DEBUG` / `INFO` / `WARNING` /
+  `ERROR` / `CRITICAL` (case-insensitive; `WARN` accepted as alias).
+  Default `INFO`.
+- **Rich observability fields in every record.** Per-record JSON:
+  `ts` (ISO-8601 UTC), `level`, `logger`, `file`, `line`, `func`,
+  `msg`, `service`, `version`, `pid`, `host`, `thread`. Anything passed
+  via the stdlib's `extra={}` kwarg becomes a top-level key. Exception
+  tracebacks fold into the same JSON line under `exc` (line-delimited
+  JSON / NDJSON friendly).
+- **Request correlation IDs via contextvars + per-request middleware.**
+  Every HTTP request gets a `request_id` (honoured from inbound
+  `X-Request-Id`, else a fresh uuid4 hex). It's bound to a contextvar
+  so every log line emitted during the request lifetime carries it
+  automatically, no `extra=` plumbing required. The ID is echoed back
+  on the response. Summary log per request is level-scaled:
+  `DEBUG` for `/healthz`, `INFO` for 2xx/3xx, `WARNING` for 4xx,
+  `ERROR` for 5xx — with method, path, status, duration_ms, client IP
+  (X-Forwarded-For honored), user agent, request/response byte sizes.
+
 ## v1.0.3 — 2026-06-08
 
 **HF token alias fix.** `huggingface_hub` (used by diffusers, transformers,

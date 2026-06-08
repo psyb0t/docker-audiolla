@@ -425,8 +425,163 @@ class _MCPSlashRewriteMiddleware:
         await self.app(scope, receive, send)
 
 
+class _RequestLogMiddleware:
+    """Per-request observability — correlation ID + level-scaled summary log.
+
+    On every HTTP request:
+
+    1. Read ``X-Request-Id`` from the inbound headers, or generate a new
+       one if absent. Bind it (plus method + path) to contextvars in
+       ``audiolla.logging`` so every log line emitted during the request
+       carries the correlation fields automatically.
+    2. Echo the request ID back as a response header so callers can
+       grep logs by it after the fact.
+    3. After the response, emit one summary log line at a level scaled
+       to the status code:
+           DEBUG    /healthz (would otherwise flood at the 30 s sweep)
+           INFO     2xx / 3xx
+           WARNING  4xx (client error)
+           ERROR    5xx (server error; the handler already logged the
+                    underlying exception, this records the surface)
+       The line carries: method, path, status, duration_ms, client IP
+       (X-Forwarded-For honored when set), user agent, request/response
+       byte sizes, and the request ID.
+
+    Logger name is ``audiolla.request`` so an operator can silence it
+    independently of the rest of the application.
+    """
+
+    _LOG = logging.getLogger("audiolla.request")
+    _HEALTHZ = "/healthz"
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    @staticmethod
+    def _header(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None:
+        for k, v in headers:
+            if k.lower() == name:
+                try:
+                    return v.decode("latin-1")
+                except Exception:  # noqa: BLE001
+                    return None
+        return None
+
+    @staticmethod
+    def _client_ip(scope: Any) -> str | None:
+        # Honour X-Forwarded-For first (reverse proxy / load balancer).
+        fwd = _RequestLogMiddleware._header(
+            scope.get("headers") or [], b"x-forwarded-for",
+        )
+        if fwd:
+            # Take the first hop (the original client).
+            return fwd.split(",", 1)[0].strip()
+        client = scope.get("client")
+        if isinstance(client, (list, tuple)) and client:
+            return str(client[0])
+        return None
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        import time  # noqa: PLC0415
+        from .logging import (  # noqa: PLC0415
+            new_request_id,
+            request_id_ctx,
+            request_method_ctx,
+            request_path_ctx,
+        )
+
+        start = time.perf_counter()
+        method = scope.get("method", "?")
+        path = scope.get("path", "?")
+        query = scope.get("query_string") or b""
+        headers = scope.get("headers") or []
+
+        # X-Request-Id: honour incoming, else generate.
+        rid = self._header(headers, b"x-request-id") or new_request_id()
+        ua = self._header(headers, b"user-agent")
+        req_len_hdr = self._header(headers, b"content-length")
+        try:
+            req_len = int(req_len_hdr) if req_len_hdr else 0
+        except ValueError:
+            req_len = 0
+        client_ip = self._client_ip(scope)
+
+        tok_rid = request_id_ctx.set(rid)
+        tok_method = request_method_ctx.set(method)
+        tok_path = request_path_ctx.set(path)
+
+        status_holder: dict[str, int] = {"code": 0}
+        resp_len_holder: dict[str, int] = {"bytes": 0}
+
+        async def _send(message: Any) -> None:
+            mtype = message.get("type")
+            if mtype == "http.response.start":
+                status_holder["code"] = int(message.get("status", 0))
+                # Echo X-Request-Id back on the response.
+                resp_headers = list(message.get("headers") or [])
+                resp_headers.append((b"x-request-id", rid.encode("ascii")))
+                message = dict(message)
+                message["headers"] = resp_headers
+            elif mtype == "http.response.body":
+                body = message.get("body") or b""
+                resp_len_holder["bytes"] += len(body)
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            self._LOG.exception(
+                "%s %s -> EXCEPTION in %.1fms",
+                method, path, elapsed_ms,
+                extra={
+                    "status": 500,
+                    "duration_ms": round(elapsed_ms, 2),
+                    "client_ip": client_ip,
+                    "user_agent": ua,
+                    "req_bytes": req_len,
+                    "query": query.decode("latin-1", errors="replace") or None,
+                },
+            )
+            raise
+        finally:
+            request_id_ctx.reset(tok_rid)
+            request_method_ctx.reset(tok_method)
+            request_path_ctx.reset(tok_path)
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        status = status_holder["code"]
+        resp_bytes = resp_len_holder["bytes"]
+        extra = {
+            "status": status,
+            "duration_ms": round(elapsed_ms, 2),
+            "client_ip": client_ip,
+            "user_agent": ua,
+            "req_bytes": req_len,
+            "resp_bytes": resp_bytes,
+            "query": query.decode("latin-1", errors="replace") or None,
+        }
+        msg = "%s %s -> %d in %.1fms"
+        args = (method, path, status, elapsed_ms)
+        if status >= 500:
+            self._LOG.error(msg, *args, extra=extra)
+        elif status >= 400:
+            self._LOG.warning(msg, *args, extra=extra)
+        elif path == self._HEALTHZ:
+            self._LOG.debug(msg, *args, extra=extra)
+        else:
+            self._LOG.info(msg, *args, extra=extra)
+
+
 # Optional bearer auth covers every route — mounted MCP transport included.
 app.add_middleware(BearerAuthMiddleware, token=config.AUTH_TOKEN)
+# Per-request log line at the right level (DEBUG for healthz, INFO for 2xx,
+# WARN for 4xx, ERROR for 5xx). Logger name: audiolla.request.
+app.add_middleware(_RequestLogMiddleware)
 # Outermost: normalise `/v1/mcp` → `/v1/mcp/` so the Mount's 307 redirect
 # doesn't surprise non-strict clients.
 app.add_middleware(_MCPSlashRewriteMiddleware)

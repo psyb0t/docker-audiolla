@@ -242,7 +242,10 @@ def is_basic_pitch_engine(engine: Any) -> bool:
 
 
 def is_deepfilter_engine(engine: Any) -> bool:
-    return hasattr(engine, "enhance") and hasattr(engine, "_df_state")
+    # _df_state is set lazily inside _load_sync(), so it's absent until
+    # first inference. Check only the public contract (the `enhance`
+    # method) to avoid a spurious 400 on the first request after boot.
+    return hasattr(engine, "enhance")
 
 
 def is_chord_detect_engine(engine: Any) -> bool:

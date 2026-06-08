@@ -2257,6 +2257,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_UVR_MODELS_DIR` | `<DATA_DIR>/uvr_models` | where UVR model files are cached |
 | `AUDIOLLA_AUTH_TOKEN` | — | bearer token; empty means no auth |
 | `HF_TOKEN` / `HUGGINGFACE_TOKEN` | — | HuggingFace access token. The entrypoint mirrors the two names so setting either works. Required for the gated engines: `pyannote` speaker diarization, `stable-audio-open`, `musicgen-small`, `musicgen-medium`. Accept each model's licence on huggingface.co before using. |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` (case-insensitive; `WARN` aliased to `WARNING`). Controls every audiolla logger + uvicorn's loggers. Logs are line-delimited JSON — each record carries `ts` / `level` / `logger` / `file` / `line` / `func` / `msg` plus `service` / `version` / `pid` / `host` / `thread`. HTTP requests additionally carry `request_id` (honoured from inbound `X-Request-Id`, else generated and echoed on the response), `method`, `path`, `status`, `duration_ms`, `client_ip`, `user_agent`, `req_bytes`, `resp_bytes`. |
 | `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
 | `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
