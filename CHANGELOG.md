@@ -5,6 +5,26 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.2 — 2026-06-08
+
+**Runtime default flip — `HF_HUB_OFFLINE=0`.** Previously the prod image
+baked `HF_HUB_OFFLINE=1` for the prefetched-deployment use case. In
+practice, downstream consumers running the audio generation engines
+(`/v1/audio/generate/{stable-audio-open,musicgen-*,riffusion,audioldm2}`)
+or the HF-backed analysis engines (`ast-tag`, `clap-embed`, `pyannote`)
+were hitting `OSError: model is not cached locally` on first call —
+unusable out of the box. New default: `HF_HUB_OFFLINE=0`, models lazy-
+download on first call into `HF_HOME=/data/hf` (mount a volume for
+persistence). For locked-down deployments, prefetch with
+`huggingface-cli download <model>` against the volume and pass
+`-e HF_HUB_OFFLINE=1` at run time — same offline guarantee as before,
+just opt-in.
+
+- `Dockerfile` + `Dockerfile.cuda`: `HF_HUB_OFFLINE=1` → `HF_HUB_OFFLINE=0`.
+- README "Audio tagging" + the `tag` / `embed` handler docstrings
+  updated to reflect lazy-download as the default; the offline-only
+  mode is now opt-in via `-e HF_HUB_OFFLINE=1` after prefetch.
+
 ## v1.0.1 — 2026-06-08
 
 **CI fix.** No code changes — the v1.0.0 image is functionally identical

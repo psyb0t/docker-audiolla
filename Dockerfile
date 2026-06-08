@@ -73,7 +73,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AUDIOLLA_DATA_DIR=/data \
     AUDIOLLA_SOUNDFONT=/usr/share/sounds/sf2/FluidR3_GM.sf2 \
     HF_HOME=/data/hf \
-    HF_HUB_OFFLINE=1
+    HF_HUB_OFFLINE=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \

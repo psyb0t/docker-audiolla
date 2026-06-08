@@ -870,7 +870,7 @@ curl -X POST http://localhost:8000/v1/audio/tag \
 
 Requires the HF model cache. First run downloads the weights to `/data/hf/`. Optional: `top_k` (default 10).
 
-> Run the container once with `-e HF_HUB_OFFLINE=0` and send one request to pull the model down. Subsequent runs use the cache with `HF_HUB_OFFLINE=1`.
+> The image defaults to `HF_HUB_OFFLINE=0` so first call lazy-downloads the weights into `/data/hf/`. For locked-down deployments (no egress), prefetch the model with `huggingface-cli download <model>` into a mounted `/data/hf` volume, then start the container with `-e HF_HUB_OFFLINE=1`.
 
 ### Audio embeddings
 

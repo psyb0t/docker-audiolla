@@ -2715,7 +2715,8 @@ async def stretch(req: AudioStretchRequest) -> Response:
 @app.post("/v1/audio/tag")
 async def tag(req: AudioTagRequest) -> JSONResponse:
     """Top-K AudioSet label predictions via Audio Spectrogram Transformer.
-    Requires model cache (set HF_HUB_OFFLINE=0 on first run to download)."""
+    Weights download lazily on first call (cached under HF_HOME=/data/hf).
+    For offline deployments, prefetch with huggingface-cli + set HF_HUB_OFFLINE=1."""
     validate_input_xor(req.file_path, req.file_url)
     # ── shim locals so the rest of the handler body stays unchanged ──
     file = None
@@ -2740,7 +2741,8 @@ async def tag(req: AudioTagRequest) -> JSONResponse:
 async def embed(req: AudioEmbedRequest) -> JSONResponse:
     """512-dim L2-normalised audio embedding via LAION CLAP. With query_text,
     also returns cosine similarity to the text description.
-    Requires model cache (set HF_HUB_OFFLINE=0 on first run to download)."""
+    Weights download lazily on first call (cached under HF_HOME=/data/hf).
+    For offline deployments, prefetch with huggingface-cli + set HF_HUB_OFFLINE=1."""
     validate_input_xor(req.file_path, req.file_url)
     # ── shim locals so the rest of the handler body stays unchanged ──
     file = None
