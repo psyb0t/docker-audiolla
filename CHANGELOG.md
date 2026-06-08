@@ -5,6 +5,21 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.1 — 2026-06-08
+
+**CI fix.** No code changes — the v1.0.0 image is functionally identical
+to v1.0.1. CUDA build was OOMing the GitHub-hosted `ubuntu-latest` runner
+disk during torch 2.5.1+cu126 unpack (~5 GB) plus the rest of the
+heavy-deps layer. Switched the reusable workflow to v0.6.0 which
+optionally frees ~25-30 GB before building (strips Android SDK, .NET,
+Haskell, CodeQL, large apt packages, preloaded docker images; tool cache
++ swap left intact). Pinned the reusable workflow by SHA per the project's
+supply-chain rules.
+
+- Bumped `psyb0t/reusable-github-workflows` reference to v0.6.0
+  (SHA `59d43bac747f6bf66eeddb103a845b6dbf367c6b`) and enabled the new
+  `free_disk_space: true` input.
+
 ## v1.0.0 — 2026-06-07
 
 **Stable API milestone.** The REST contract is now spec-first

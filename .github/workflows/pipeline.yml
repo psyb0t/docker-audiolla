@@ -4,13 +4,19 @@ on: [push]
 
 jobs:
   call-docker-image-workflow:
-    uses: psyb0t/reusable-github-workflows/.github/workflows/docker-image-workflow.yml@master
+    uses: psyb0t/reusable-github-workflows/.github/workflows/docker-image-workflow.yml@59d43bac747f6bf66eeddb103a845b6dbf367c6b # v0.6.0
 
     with:
       repository_name: psyb0t/audiolla
       target_platforms: "linux/amd64"
       scan_severity: "high"
       cache_mode: "min"
+      # CUDA image (~5 GB unpacked torch + nvidia-* deps) OODs on the default
+      # ubuntu-latest 14 GB free. v0.6.0 of the reusable workflow optionally
+      # strips Android SDK / .NET / Haskell / CodeQL / large apt pkgs /
+      # preloaded docker images first (~25-30 GB freed). Tool cache + swap
+      # left intact.
+      free_disk_space: true
       build_targets: |
         [
           {"file": "Dockerfile",      "tag_suffix": "",      "platforms": "linux/amd64"},
