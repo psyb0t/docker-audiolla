@@ -86,27 +86,32 @@ test_mcp_tools_list_has_new_tools() {
 # ── midi_compose: spec → base64 MIDI bytes (verified MThd header) ────────────
 
 test_mcp_midi_compose_returns_smf_base64() {
-    local payload body b64 size decoded
+    local payload body resp_path size fetched
+    # v1.0.0: MCP binary-output tools require output_path; raw base64 removed.
     payload=$(jq -n --argjson spec "$SPEC" \
-        '{jsonrpc:"2.0",id:10,method:"tools/call",params:{name:"midi_compose",arguments:{spec:$spec}}}')
+        '{jsonrpc:"2.0",id:10,method:"tools/call",params:{name:"midi_compose",arguments:{spec:$spec,output_path:"mcp/compose-out.mid"}}}')
     body=$(mcp_call "$payload")
-    b64=$(mcp_result_field "$body" "midi_base64") || { echo "  FAIL: isError; body: $body"; return 1; }
+    resp_path=$(mcp_result_field "$body" "path") || { echo "  FAIL: isError; body: $body"; return 1; }
     size=$(mcp_result_field "$body" "size")
-    if [ -z "$b64" ] || [ -z "$size" ]; then
-        echo "  FAIL: missing midi_base64 / size; body: $body"
+    if [ -z "$resp_path" ] || [ -z "$size" ]; then
+        echo "  FAIL: missing path / size; body: $body"
         return 1
     fi
-    decoded=$(mktemp)
-    echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "MThd"; then
-        echo "  FAIL: decoded base64 is not MIDI (no MThd)"
-        rm -f "$decoded"; return 1
+    fetched=$(mktemp)
+    local code
+    code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/${resp_path}")
+    if [ "$code" != "200" ]; then
+        echo "  FAIL: staged MIDI unreachable -> $code"; rm -f "$fetched"; return 1
+    fi
+    if ! head -c 4 "$fetched" | grep -q "MThd"; then
+        echo "  FAIL: staged file is not MIDI (no MThd)"; rm -f "$fetched"; return 1
     fi
     local actual
-    actual=$(stat -c%s "$decoded")
-    rm -f "$decoded"
+    actual=$(stat -c%s "$fetched")
+    rm -f "$fetched"
     if [ "$actual" != "$size" ]; then
-        echo "  FAIL: reported size=$size doesn't match decoded=$actual"
+        echo "  FAIL: reported size=$size doesn't match staged=$actual"
         return 1
     fi
     echo "OK: mcp_midi_compose_returns_smf_base64 ($size bytes)"
@@ -145,23 +150,26 @@ test_mcp_midi_compose_output_path() {
 # ── midi_generate: spec → audio (one-shot compose + render) ─────────────────
 
 test_mcp_midi_generate_returns_wav_base64() {
-    local payload body b64 decoded size
+    local payload body resp_path fetched size code
+    # v1.0.0: audio-producing MCP tools require output_path; raw base64 removed.
     payload=$(jq -n --argjson spec "$SPEC" \
-        '{jsonrpc:"2.0",id:12,method:"tools/call",params:{name:"midi_generate",arguments:{spec:$spec,output_format:"wav"}}}')
+        '{jsonrpc:"2.0",id:12,method:"tools/call",params:{name:"midi_generate",arguments:{spec:$spec,output_format:"wav",output_path:"mcp/generate-out.wav"}}}')
     body=$(mcp_call "$payload")
-    b64=$(mcp_result_field "$body" "audio_base64") || { echo "  FAIL: isError; body: $body"; return 1; }
-    if [ -z "$b64" ]; then
-        echo "  FAIL: no audio_base64 in result; body: $body"
-        return 1
+    resp_path=$(mcp_result_field "$body" "path") || { echo "  FAIL: isError; body: $body"; return 1; }
+    if [ -z "$resp_path" ]; then
+        echo "  FAIL: no path in result; body: $body"; return 1
     fi
-    decoded=$(mktemp)
-    echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "RIFF"; then
-        echo "  FAIL: decoded base64 is not WAV (no RIFF)"
-        rm -f "$decoded"; return 1
+    fetched=$(mktemp)
+    code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/${resp_path}")
+    if [ "$code" != "200" ]; then
+        echo "  FAIL: staged WAV unreachable -> $code"; rm -f "$fetched"; return 1
     fi
-    size=$(stat -c%s "$decoded")
-    rm -f "$decoded"
+    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
+        echo "  FAIL: staged file is not WAV (no RIFF)"; rm -f "$fetched"; return 1
+    fi
+    size=$(stat -c%s "$fetched")
+    rm -f "$fetched"
     if [ "$size" -lt 1000 ]; then
         echo "  FAIL: rendered WAV suspiciously small ($size bytes)"
         return 1
@@ -181,23 +189,27 @@ test_mcp_put_file_then_midi_render() {
         echo "  FAIL: compose-to-stage isError; body: $body"; return 1
     fi
 
-    # 2. midi_render with file_path → base64 WAV.
-    payload='{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"midi_render","arguments":{"file_path":"mcp/render-in.mid","output_format":"wav"}}}'
+    # 2. midi_render with file_path → output_path staged WAV.
+    payload='{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"midi_render","arguments":{"file_path":"mcp/render-in.mid","output_format":"wav","output_path":"mcp/render-out.wav"}}}'
     body=$(mcp_call "$payload")
-    local b64
-    b64=$(mcp_result_field "$body" "audio_base64") || { echo "  FAIL: isError; body: $body"; return 1; }
-    if [ -z "$b64" ]; then
-        echo "  FAIL: no audio_base64; body: $body"; return 1
+    local resp_path
+    resp_path=$(mcp_result_field "$body" "path") || { echo "  FAIL: isError; body: $body"; return 1; }
+    if [ -z "$resp_path" ]; then
+        echo "  FAIL: no path in result; body: $body"; return 1
     fi
-    local decoded size
-    decoded=$(mktemp)
-    echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "RIFF"; then
-        echo "  FAIL: decoded base64 is not WAV"
-        rm -f "$decoded"; return 1
+    local fetched size code
+    fetched=$(mktemp)
+    code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/${resp_path}")
+    if [ "$code" != "200" ]; then
+        echo "  FAIL: staged WAV unreachable -> $code"; rm -f "$fetched"; return 1
     fi
-    size=$(stat -c%s "$decoded")
-    rm -f "$decoded"
+    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
+        echo "  FAIL: staged file is not WAV"
+        rm -f "$fetched"; return 1
+    fi
+    size=$(stat -c%s "$fetched")
+    rm -f "$fetched"
     echo "OK: mcp_put_file_then_midi_render ($size bytes)"
 }
 
@@ -216,7 +228,7 @@ test_mcp_fx_chain_with_staged_file() {
         echo "  FAIL: REST PUT to stage fixture -> $code"; return 1
     fi
 
-    # 2. fx: chain Compressor + Reverb + Gain via file_path.
+    # 2. fx: chain Compressor + Reverb + Gain via file_path + output_path.
     payload='{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"fx","arguments":{
         "file_path":"mcp/in.wav",
         "effects":[
@@ -224,22 +236,26 @@ test_mcp_fx_chain_with_staged_file() {
             {"type":"Reverb","params":{"room_size":0.5,"wet_level":0.3}},
             {"type":"Gain","params":{"gain_db":-3.0}}
         ],
-        "output_format":"wav"
+        "output_format":"wav",
+        "output_path":"mcp/fx-out.wav"
     }}}'
     body=$(mcp_call "$payload")
-    local b64
-    b64=$(mcp_result_field "$body" "audio_base64") || { echo "  FAIL: fx isError; body: $body"; return 1; }
-    if [ -z "$b64" ]; then
-        echo "  FAIL: fx no audio_base64; body: $body"; return 1
+    local resp_path
+    resp_path=$(mcp_result_field "$body" "path") || { echo "  FAIL: fx isError; body: $body"; return 1; }
+    if [ -z "$resp_path" ]; then
+        echo "  FAIL: fx no path; body: $body"; return 1
     fi
-    local decoded
-    decoded=$(mktemp)
-    echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "RIFF"; then
-        echo "  FAIL: fx output is not WAV"
-        rm -f "$decoded"; return 1
+    local fetched code2
+    fetched=$(mktemp)
+    code2=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/${resp_path}")
+    if [ "$code2" != "200" ]; then
+        echo "  FAIL: fx staged WAV unreachable -> $code2"; rm -f "$fetched"; return 1
     fi
-    rm -f "$decoded"
+    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
+        echo "  FAIL: fx output is not WAV"; rm -f "$fetched"; return 1
+    fi
+    rm -f "$fetched"
     echo "OK: mcp_fx_chain_with_staged_file"
 }
 
@@ -281,15 +297,28 @@ test_mcp_put_get_roundtrip() {
         echo "  FAIL: put_file isError; body: $body"; return 1
     fi
 
+    # v1.0.0: get_file returns {path, size} — fetch bytes via REST GET to verify.
     payload='{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"get_file","arguments":{"path":"mcp/roundtrip.bin"}}}'
     body=$(mcp_call "$payload")
-    fetched_b64=$(mcp_result_field "$body" "content_base64") || { echo "  FAIL: get_file isError; body: $body"; return 1; }
-    if [ "$fetched_b64" != "$content_b64" ]; then
-        echo "  FAIL: round-trip mismatch — bytes differ"
-        return 1
+    if ! mcp_result_field "$body" "path" >/dev/null; then
+        echo "  FAIL: get_file isError; body: $body"; return 1
     fi
     size_out=$(mcp_result_field "$body" "size")
     assert_eq "$size_out" "$size_in" "round-trip size" || return 1
+    local fetched local_hash remote_hash code
+    fetched=$(mktemp)
+    code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/mcp/roundtrip.bin")
+    if [ "$code" != "200" ]; then
+        echo "  FAIL: staged round-trip file unreachable -> $code"; rm -f "$fetched"; return 1
+    fi
+    local_hash=$(echo "$content_b64" | base64 -d 2>/dev/null | sha256sum | awk '{print $1}')
+    remote_hash=$(sha256sum "$fetched" | awk '{print $1}')
+    rm -f "$fetched"
+    if [ "$local_hash" != "$remote_hash" ]; then
+        echo "  FAIL: round-trip mismatch — bytes differ (local=$local_hash remote=$remote_hash)"
+        return 1
+    fi
     echo "OK: mcp_put_get_roundtrip"
 }
 
@@ -348,18 +377,23 @@ test_mcp_transform_via_file_path() {
     if [ "$code" != "201" ]; then
         echo "  FAIL: stage fixture -> $code"; return 1
     fi
-    body=$(mcp_call '{"jsonrpc":"2.0","id":120,"method":"tools/call","params":{"name":"transform","arguments":{"file_path":"mcp/transform.wav","operations":[{"op":"gain","params":{"db":-3}},{"op":"reverb","params":{"reverberance":50}}],"output_format":"wav"}}}')
-    b64=$(mcp_result_field "$body" "audio_base64") || { echo "  FAIL: isError; body: $body"; return 1; }
-    if [ -z "$b64" ]; then
-        echo "  FAIL: no audio_base64; body: $body"; return 1
+    body=$(mcp_call '{"jsonrpc":"2.0","id":120,"method":"tools/call","params":{"name":"transform","arguments":{"file_path":"mcp/transform.wav","operations":[{"op":"gain","params":{"db":-3}},{"op":"reverb","params":{"reverberance":50}}],"output_format":"wav","output_path":"mcp/transform-out.wav"}}}')
+    local resp_path
+    resp_path=$(mcp_result_field "$body" "path") || { echo "  FAIL: isError; body: $body"; return 1; }
+    if [ -z "$resp_path" ]; then
+        echo "  FAIL: no path; body: $body"; return 1
     fi
-    decoded=$(mktemp)
-    echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "RIFF"; then
-        echo "  FAIL: not a WAV"
-        rm -f "$decoded"; return 1
+    local fetched code2
+    fetched=$(mktemp)
+    code2=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/${resp_path}")
+    if [ "$code2" != "200" ]; then
+        echo "  FAIL: staged WAV unreachable -> $code2"; rm -f "$fetched"; return 1
     fi
-    rm -f "$decoded"
+    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
+        echo "  FAIL: not a WAV"; rm -f "$fetched"; return 1
+    fi
+    rm -f "$fetched"
     echo "OK: mcp_transform_via_file_path"
 }
 
@@ -381,41 +415,41 @@ test_mcp_loudness_measure() {
     if [ -z "$lufs" ] || [ "$lufs" = "null" ]; then
         echo "  FAIL: no loudness_lufs; body: $body"; return 1
     fi
-    # Verify normalized=false on the measurement path.
-    if ! echo "$body" | jq -e '.result.structuredContent.normalized == false' >/dev/null 2>&1; then
-        echo "  FAIL: normalized should be false on measure-only call"
-        return 1
-    fi
+    # v1.0.0: loudness MCP tool is measure-only — no normalized field.
     echo "OK: mcp_loudness_measure (LUFS=$lufs)"
 }
 
 # ── loudness (normalize): with target_lufs → base64 audio + measured LUFS ──
 
 test_mcp_loudness_normalize() {
-    local code body b64 measured
+    local code body resp_path measured
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X PUT --data-binary "@${FIXTURE}" \
         "${AUDIOLLA_BASE_URL}/v1/files/mcp/loud-norm.wav")
     if [ "$code" != "201" ]; then
         echo "  FAIL: stage fixture -> $code"; return 1
     fi
-    body=$(mcp_call '{"jsonrpc":"2.0","id":131,"method":"tools/call","params":{"name":"loudness","arguments":{"file_path":"mcp/loud-norm.wav","target_lufs":-14,"output_format":"wav"}}}')
-    b64=$(mcp_result_field "$body" "audio_base64") || { echo "  FAIL: isError; body: $body"; return 1; }
-    if [ -z "$b64" ]; then
-        echo "  FAIL: no audio_base64; body: $body"; return 1
+    # v1.0.0: separate `normalize` tool; audio-producing -> needs output_path.
+    body=$(mcp_call '{"jsonrpc":"2.0","id":131,"method":"tools/call","params":{"name":"normalize","arguments":{"file_path":"mcp/loud-norm.wav","target_lufs":-14,"output_format":"wav","output_path":"mcp/loud-normed.wav"}}}')
+    resp_path=$(mcp_result_field "$body" "path") || { echo "  FAIL: isError; body: $body"; return 1; }
+    if [ -z "$resp_path" ]; then
+        echo "  FAIL: no path; body: $body"; return 1
     fi
     measured=$(echo "$body" | jq -r '.result.structuredContent.measured_lufs // empty')
     if [ -z "$measured" ] || [ "$measured" = "null" ]; then
         echo "  FAIL: no measured_lufs; body: $body"; return 1
     fi
-    local decoded
-    decoded=$(mktemp)
-    echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "RIFF"; then
-        echo "  FAIL: normalized output is not WAV"
-        rm -f "$decoded"; return 1
+    local fetched code2
+    fetched=$(mktemp)
+    code2=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
+        "${AUDIOLLA_BASE_URL}/v1/files/${resp_path}")
+    if [ "$code2" != "200" ]; then
+        echo "  FAIL: staged WAV unreachable -> $code2"; rm -f "$fetched"; return 1
     fi
-    rm -f "$decoded"
+    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
+        echo "  FAIL: normalized output is not WAV"; rm -f "$fetched"; return 1
+    fi
+    rm -f "$fetched"
     echo "OK: mcp_loudness_normalize (measured=$measured -> -14 LUFS)"
 }
 

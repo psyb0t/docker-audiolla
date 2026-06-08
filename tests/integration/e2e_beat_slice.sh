@@ -27,9 +27,20 @@ test_beat_slice_returns_zip_of_wavs() {
     build_beat_fixture || return 1
     local tmpz code
     tmpz=$(mktemp --suffix=.zip)
-    code=$(curl -s -o "$tmpz" -w "%{http_code}" --max-time 60 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "$tmpz" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beat-slice")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmpz" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "beat-slice -> 200" || { rm -f "$tmpz"; return 1; }
     local count
     count=$(python3 -c "import zipfile,sys; z=zipfile.ZipFile('$tmpz'); print(len(z.namelist()))" 2>/dev/null || echo 0)
@@ -57,9 +68,15 @@ print(len(bad))
 test_beat_slice_output_path() {
     build_beat_fixture || return 1
     local body code fetched
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
-        -F "output_path=beat_slice_test/slices.zip" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"beat_slice_test/slices.zip\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beat-slice")
     if ! echo "$body" | jq -e '.path == "beat_slice_test/slices.zip"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
@@ -86,10 +103,20 @@ test_beat_slice_output_format_mp3() {
     build_beat_fixture || return 1
     local tmpz code
     tmpz=$(mktemp --suffix=.zip)
-    code=$(curl -s -o "$tmpz" -w "%{http_code}" --max-time 90 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
-        -F "output_format=mp3" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_format\":\"mp3\",\"output_path\":\"$_out\"}" \
+        -o "$tmpz" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beat-slice")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmpz" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "beat-slice mp3 -> 200" || { rm -f "$tmpz"; return 1; }
     # MP3 files start with ID3 or sync word (0xFF 0xFB).
     local bad

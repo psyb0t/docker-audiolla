@@ -19,8 +19,15 @@ harness_start "librosa-analyze"
 
 test_stereo_field_shape() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/stereo-field")
     for field in correlation width balance_db mono_compatible mid_level_db side_level_db phase_issues channels sample_rate duration; do
         if ! echo "$body" | jq -e "has(\"$field\")" >/dev/null 2>&1; then
@@ -34,8 +41,15 @@ test_stereo_field_shape() {
 
 test_stereo_field_correlation_range() {
     local body corr
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/stereo-field")
     if ! echo "$body" | jq -e '.correlation >= -1 and .correlation <= 1' >/dev/null 2>&1; then
         corr=$(echo "$body" | jq -r '.correlation')
@@ -50,8 +64,15 @@ test_stereo_field_correlation_range() {
 
 test_stereo_field_sine_is_correlated() {
     local body corr
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/stereo-field")
     corr=$(echo "$body" | jq -r '.correlation')
     if ! echo "$body" | jq -e '.correlation > 0.99' >/dev/null 2>&1; then
@@ -67,8 +88,15 @@ test_stereo_field_sine_is_correlated() {
 
 test_stereo_field_width_nonneg() {
     local body width
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/stereo-field")
     if ! echo "$body" | jq -e '.width >= 0' >/dev/null 2>&1; then
         width=$(echo "$body" | jq -r '.width')
@@ -82,16 +110,20 @@ test_stereo_field_width_nonneg() {
 
 test_stereo_field_file_path() {
     local staged_body body
-    staged_body=$(curl -s --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_path=stereofield_test/in.wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    staged_body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"stereofield_test/in.wav\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/convert")
     if ! echo "$staged_body" | jq -e '.path == "stereofield_test/in.wav"' >/dev/null 2>&1; then
         echo "  FAIL: staging failed; body: $staged_body"; return 1
     fi
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file_path=stereofield_test/in.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/stereo-field")
+    body=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"stereofield_test/in.wav\"}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/stereo-field")
     if ! echo "$body" | jq -e 'has("correlation")' >/dev/null 2>&1; then
         echo "  FAIL: missing correlation for file_path mode; body: $body"; return 1
     fi

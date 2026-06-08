@@ -25,8 +25,15 @@ build_beat_fixture() { return 0; }
 
 test_dj_prep_response_shape() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/dj-prep")
     for field in bpm key camelot integrated_lufs; do
         if ! echo "$body" | jq -e "has(\"$field\")" >/dev/null 2>&1; then
@@ -41,8 +48,15 @@ test_dj_prep_response_shape() {
 test_dj_prep_click_track_bpm() {
     build_beat_fixture || return 1
     local body bpm
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/dj-prep")
     bpm=$(echo "$body" | jq -r '.bpm // empty')
     if [ -z "$bpm" ] || [ "$bpm" = "null" ]; then
@@ -59,8 +73,15 @@ test_dj_prep_click_track_bpm() {
 
 test_dj_prep_lufs_is_number() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/dj-prep")
     if ! echo "$body" | jq -e '.integrated_lufs | (. == null or type == "number")' >/dev/null 2>&1; then
         echo "  FAIL: integrated_lufs not null or number; body: $body"; return 1
@@ -74,8 +95,15 @@ test_dj_prep_missing_engine_with_bad_engines() {
     # We can't easily reconfigure engines at runtime, so just verify the
     # endpoint path exists and returns a meaningful structure.
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/dj-prep")
     if echo "$body" | jq -e '.detail != null' >/dev/null 2>&1; then
         echo "OK: dj_prep_missing_engine_with_bad_engines (got error: $(echo "$body" | jq -r '.detail'))"

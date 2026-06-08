@@ -196,6 +196,10 @@ _VALID_EXECUTORS = frozenset(
         "hpss",
         "noise_reduce",
         "metadata",
+        "stable_audio_open",
+        "musicgen",
+        "riffusion",
+        "audioldm2",
     }
 )
 

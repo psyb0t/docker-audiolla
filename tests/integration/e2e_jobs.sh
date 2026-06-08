@@ -20,9 +20,15 @@ harness_start "ffmpeg-render"
 
 test_async_job_submit_and_poll() {
     local submit_body job_id poll_body status
-    submit_body=$(curl -s --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "async_job=true" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    submit_body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"async_job\":true,\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/waveform")
     job_id=$(echo "$submit_body" | jq -r '.job_id // empty')
     if [ -z "$job_id" ]; then
@@ -98,9 +104,15 @@ test_job_not_found_404() {
 
 test_async_job_cancel() {
     local submit_body job_id cancel_body status
-    submit_body=$(curl -s --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "async_job=true" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    submit_body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"async_job\":true,\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/waveform")
     job_id=$(echo "$submit_body" | jq -r '.job_id // empty')
     if [ -z "$job_id" ]; then

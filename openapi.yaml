@@ -2,22 +2,37 @@ openapi: "3.1.0"
 
 info:
   title: audiolla
-  version: "0.3.0"
+  version: "1.0.0"
   description: |
     Self-hosted audio-production REST + MCP API. Stem separation,
     restoration, mastering, MIR analysis, DSP transforms, loudness,
     speech enhancement, voice activity detection, speaker diarization,
-    MIDI transcription + composition, curated workflow presets and
-    ad-hoc op pipelines. OpenAPI 3.1-spec'd, FastAPI server, generated
-    Pydantic models.
+    MIDI transcription + composition, text-to-music + text-to-SFX
+    generation, curated workflow presets, ad-hoc op pipelines.
 
     The MCP endpoint at /v1/mcp is JSON-RPC over a streamable HTTP
     transport and is NOT described in this document — use an MCP client.
 
-    ## License note
-    matchering and pedalboard are GPL v3 — fine for self-hosted use.
-    Distributing the Docker image as a product requires GPL compliance
-    review.
+    ## API contract (v1.0.0 — breaking changes from v0.23.x)
+
+    Every audio endpoint takes a JSON body. Multipart upload is supported
+    only on `PUT /v1/files/{path}` — the local-staging interface.
+
+    **Input** — exactly one of:
+      - `file_path` (FILES_DIR-relative, server reads from local /v1/files
+        staging area)
+      - `file_url` (any HTTP/HTTPS URL the server fetches; works with
+        AWS Sig V4 presigned GETs, plain HTTP, hybrids3 buckets, etc.)
+
+    **Output** — exactly one of:
+      - `output_path` (server writes to FILES_DIR/<path>, response JSON is
+        `{path, size, ...}`; caller downloads via `GET /v1/files/<path>`)
+      - `output_url` (server PUTs to the URL — must be a presigned PUT URL
+        for AWS Sig V4 services or a plain PUT-accepting endpoint;
+        response JSON is `{url, size, ...}`)
+
+    `async_job=true` auto-stages to `jobs/{id}.{ext}` under FILES_DIR if
+    neither output is given.
 
 servers:
   - url: http://localhost:8000
@@ -25,222 +40,1142 @@ servers:
 security:
   - BearerAuth: []
 
+tags:
+  - name: Health
+    description: Liveness probes and discovery.
+  - name: Engines
+    description: List, inspect, evict registered engines.
+  - name: Files
+    description: Local staging area — upload, download, delete files referenced by other endpoints.
+  - name: Jobs
+    description: Async-job queue — submit, poll, cancel long-running operations.
+  - name: Audio Analysis
+    description: Audio → JSON. BPM / key / chords / loudness / beats / fingerprint / chroma / VAD / silence / classify / similarity / metadata / info / clip detection.
+  - name: Audio Transform
+    description: Audio → audio. DSP transforms — normalize, EQ, fade, trim, reverse, speed, stretch, pitch correct, loop, pan, FX, sox chains.
+  - name: Audio Restoration
+    description: Audio → audio. Noise reduction, de-essing, multiband compression, dynamics, repair, conv reverb.
+  - name: Audio Separation
+    description: Stem separation, harmonic/percussive split, vocal isolation, restoration via UVR / Demucs.
+  - name: Audio Mixing
+    description: Multi-file → audio. Concat, mix, remix, BPM/key match, DJ prep, batch.
+  - name: Audio Generation
+    description: Text → audio. Stable Audio Open, MusicGen, Riffusion, AudioLDM 2.
+  - name: Audio Visualization
+    description: Audio → image/video. Spectrogram, waveform, animated visualizers.
+  - name: MIDI
+    description: MIDI composition, rendering, transformation, audio→MIDI transcription.
+  - name: Workflow
+    description: Presets, ad-hoc pipelines, named workflows.
+
+
 components:
   securitySchemes:
     BearerAuth:
       type: http
       scheme: bearer
 
+  parameters:
+    EnginePath:
+      in: path
+      name: engine
+      required: true
+      schema:
+        type: string
+      description: Engine slug (e.g. `htdemucs`, `uvr-vocal-bsr`, `basic-pitch`).
+    ModePath:
+      in: path
+      name: mode
+      required: true
+      schema:
+        type: string
+      description: Endpoint-specific mode token (e.g. `encode`/`decode` for mid-side).
+    FilesPath:
+      in: path
+      name: path
+      required: true
+      schema:
+        type: string
+      description: FILES_DIR-relative path (slashes allowed).
+    JobIdPath:
+      in: path
+      name: job_id
+      required: true
+      schema:
+        type: string
+      description: UUID of an async job.
+
+  responses:
+    "400":
+      description: Bad request — invalid input or constraint violation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    "401":
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    "404":
+      description: Engine or file not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    "413":
+      description: Payload too large.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    "415":
+      description: Unsupported output format / media type.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    "422":
+      description: Validation error — request body schema mismatch.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    "500":
+      description: Internal server error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+
   schemas:
     ErrorBody:
       type: object
       required: [detail]
       properties:
-        detail:
-          type: string
-          description: Human-readable error description.
+        detail: { type: string }
+
+    OutputFormat:
+      type: string
+      enum: [wav, mp3, flac, opus, aac, pcm]
 
     AudioBlob:
       type: string
       format: binary
-      description: Raw audio bytes in the requested output format.
+
+    BaseAudioInputRequest:
+      type: object
+      description: |
+        Single-file audio input. Provide exactly one of `file_path` or
+        `file_url`. Mutually exclusive, validated server-side.
+      properties:
+        file_path:
+          type: string
+          nullable: true
+          description: FILES_DIR-relative path (pre-staged via PUT /v1/files/{path}).
+        file_url:
+          type: string
+          format: uri
+          nullable: true
+          description: HTTP/HTTPS URL the server fetches (subject to AUDIOLLA_FETCH_MODE).
+
+    MultiAudioInputRequest:
+      type: object
+      description: |
+        Multi-file audio input. Provide exactly one of `file_paths` or `file_urls`.
+      properties:
+        file_paths:
+          type: array
+          items: { type: string }
+          minItems: 1
+          nullable: true
+        file_urls:
+          type: array
+          items: { type: string, format: uri }
+          minItems: 1
+          nullable: true
+
+    BaseAudioOutputRequest:
+      type: object
+      description: |
+        Audio-producing endpoint output. Provide exactly one of `output_path` or
+        `output_url`. async_job=true auto-stages to jobs/{id}.{ext} if neither.
+      properties:
+        output_format:
+          $ref: "#/components/schemas/OutputFormat"
+          default: wav
+        output_path:
+          type: string
+          nullable: true
+          description: FILES_DIR-relative path; response is JSON {path, size, ...}.
+        output_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Presigned PUT URL (S3, hybrids3, MinIO, R2, etc.) — response is JSON {url, size, ...}.
+        async_job:
+          type: boolean
+          default: false
+        webhook_url:
+          type: string
+          format: uri
+          nullable: true
+
+    BaseGenerateRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: { type: string, minLength: 1 }
+        duration_sec:
+          type: number
+          minimum: 0.001
+          default: 10.0
+        seed: { type: integer, nullable: true }
 
     StagedOutputResponse:
       type: object
-      description: Returned when `output_path` is set on an audio-producing endpoint — bytes were written under FILES_DIR / path instead of streamed inline.
       required: [path, size]
       properties:
-        path:
-          type: string
-          description: Relative path under the staging area (resolves to FILES_DIR / path on disk).
-        size:
-          type: integer
-          description: Bytes written.
-        output_format:
-          type: string
-          description: Echo of the requested output_format.
+        path: { type: string }
+        size: { type: integer }
+        output_format: { type: string, nullable: true }
 
     UrlOutputResponse:
       type: object
-      description: Returned when `output_url` is set on an audio-producing endpoint — bytes were PUT to the URL instead of streamed inline.
       required: [url, size]
       properties:
-        url:
-          type: string
-          format: uri
-          description: The presigned PUT URL the bytes were uploaded to.
-        size:
-          type: integer
-          description: Bytes uploaded.
-        output_format:
-          type: string
-          description: Echo of the requested output_format.
+        url: { type: string, format: uri }
+        size: { type: integer }
+        output_format: { type: string, nullable: true }
 
-    EngineInfo:
+    JobAcceptedResponse:
       type: object
-      required: [slug, executor]
+      required: [job_id, status_url]
       properties:
-        slug:
-          type: string
-          description: Unique engine identifier (key in engines.json).
-        executor:
-          type: string
-          description: Backend type (demucs, matchering, pedalboard_chain, librosa_analyze, sox_transform).
-        variant:
-          type: string
-          nullable: true
-          description: Demucs model variant (htdemucs, htdemucs_ft, etc.). Null for non-demucs engines.
-        stems:
-          type: array
-          items:
-            type: string
-          description: Available stem names. Populated for demucs engines only.
-        presets:
-          type: array
-          items:
-            type: string
-          description: Available preset names. Populated for pedalboard-chain only.
-        description:
-          type: string
+        job_id: { type: string }
+        status_url: { type: string, format: uri }
+
+    NormalizeResponse:
+      allOf:
+        - $ref: "#/components/schemas/StagedOutputResponse"
+        - type: object
+          properties:
+            target_lufs: { type: number, nullable: true }
+            measured_lufs: { type: number, nullable: true }
 
     AnalyzeResult:
       type: object
       properties:
-        bpm:
-          type: number
-          nullable: true
-          description: Estimated tempo in beats per minute.
-        key:
-          type: string
-          nullable: true
-          description: Estimated musical key (e.g. "C major", "A minor").
-        loudness_lufs:
-          type: number
-          nullable: true
-          description: Integrated loudness in LUFS (ITU-R BS.1770-4).
-        duration:
-          type: number
-          nullable: true
-          description: Duration in seconds.
-        spectral_centroid:
-          type: number
-          nullable: true
-          description: Mean spectral centroid in Hz.
-        rms:
-          type: number
-          nullable: true
-          description: Root mean square energy.
-        zcr:
-          type: number
-          nullable: true
-          description: Mean zero-crossing rate.
+        bpm: { type: number, nullable: true }
+        key: { type: string, nullable: true }
+        loudness_lufs: { type: number, nullable: true }
+        duration: { type: number, nullable: true }
+        spectral_centroid: { type: number, nullable: true }
+        rms: { type: number, nullable: true }
+        zcr: { type: number, nullable: true }
 
     LoudnessResult:
       type: object
       required: [loudness_lufs]
       properties:
-        loudness_lufs:
-          type: number
-          description: Measured integrated loudness in LUFS.
-        target_lufs:
-          type: number
-          nullable: true
-          description: The requested target_lufs (echoed back). Null if analyze-only.
-        normalized:
-          type: boolean
-          description: True if normalization was applied, false for analyze-only.
-
-    SoxOperation:
-      type: object
-      required: [op]
-      properties:
-        op:
-          type: string
-          enum: [gain, equalizer, compand, reverb, pitch, tempo, rate, channels, trim, pad]
-          description: SoX effect name.
-        params:
-          type: object
-          additionalProperties: true
-          description: Effect-specific parameters. See SoX documentation for each effect's options.
+        loudness_lufs: { type: number }
+        target_lufs: { type: number, nullable: true }
+        normalized: { type: boolean }
 
     HealthResponse:
       type: object
       required: [ok, device, engines]
       properties:
-        ok:
-          type: boolean
-        device:
-          type: string
-          description: Active compute device (cpu, cuda, cuda:N).
+        ok: { type: boolean }
+        device: { type: string }
         engines:
           type: array
-          items:
-            type: string
-          description: Configured engine slugs.
+          items: { type: string }
 
-    PsEntry:
+    EngineInfo:
       type: object
-      required: [slug, executor, loaded]
+      required: [slug, executor]
       properties:
-        slug:
-          type: string
-        executor:
-          type: string
-        loaded:
-          type: boolean
-        idle_seconds:
-          type: number
-          nullable: true
+        slug: { type: string }
+        executor: { type: string }
+        variant: { type: string, nullable: true }
+        stems:
+          type: array
+          items: { type: string }
+        presets:
+          type: array
+          items: { type: string }
+        loaded: { type: boolean, nullable: true }
+        idle_seconds: { type: number, nullable: true }
+        description: { type: string, nullable: true }
 
-  responses:
-    400:
-      description: Bad request — invalid input or missing required field.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorBody"
-    401:
-      description: Missing or invalid bearer token.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorBody"
-    404:
-      description: Engine or file not found.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorBody"
-    413:
-      description: Upload too large.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorBody"
-    415:
-      description: Unsupported media type or output format.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorBody"
-    422:
-      description: Validation error — schema mismatch in request body or query params.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorBody"
-    500:
-      description: Internal server error.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorBody"
+    # ── per-endpoint request schemas (generated from server handler signatures) ──
+    AudioSeparateRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [engine]
+          properties:
+            engine:
+              type: string
+              default: htdemucs
+              description: |
+                Stem-separation engine slug. Demucs (`htdemucs`,
+                `htdemucs_ft`, `mdx_extra`) or UVR variant
+                (`uvr-vocal-bsr`, `uvr-karaoke`, `uvr-dereverb`, etc.).
+            stems:
+              type: array
+              items:
+                type: string
+              default: []
+              description: Subset of stems to return. Empty = all available stems.
+
+    AudioMasterRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [reference, chain]
+            reference_path:
+              type: string
+              nullable: true
+            reference_url:
+              type: string
+              format: uri
+              nullable: true
+            preset:
+              type: string
+              nullable: true
+            target_lufs:
+              type: number
+              nullable: true
+
+    AudioAnalyzeRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            features:
+              type: array
+              items:
+                type: string
+              default: []
+
+    AudioTransformRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [operations]
+          properties:
+            operations:
+              type: array
+              description: SoX effect chain — each entry is {op, params}.
+              items:
+                type: object
+                properties:
+                  op: { type: string }
+                  params: { type: object, additionalProperties: true }
+
+    AudioLoudnessRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+
+    AudioNormalizeRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [target_lufs]
+          properties:
+            target_lufs:
+              type: number
+
+    AudioFxRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [effects]
+          properties:
+            effects:
+              type: array
+              description: Pedalboard effect chain — each entry is {type, params}.
+              items:
+                type: object
+                properties:
+                  type: { type: string }
+                  params: { type: object, additionalProperties: true }
+
+    MidiRenderRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            soundfont_path:
+              type: string
+              nullable: true
+            gain:
+              type: number
+              default: 0.5
+            samplerate:
+              type: integer
+              default: 44100
+
+    AudioBeatsRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            click_track:
+              type: boolean
+              default: false
+            start_bpm:
+              type: number
+              nullable: true
+
+    AudioOnsetsRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+
+    AudioMelodyRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            fmin:
+              type: number
+              default: 65.0
+            fmax:
+              type: number
+              default: 2093.0
+            as_midi:
+              type: boolean
+              default: false
+
+    AudioSegmentsRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            num_segments:
+              type: integer
+              default: 6
+
+    AudioSilenceRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            threshold_db:
+              type: number
+              default: -30.0
+            min_duration_sec:
+              type: number
+              default: 0.5
+            trim_mode:
+              type: string
+              nullable: true
+
+    AudioVisualizeImageSpectrogramRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            width:
+              type: integer
+              default: 1280
+            height:
+              type: integer
+              default: 720
+            color:
+              type: string
+              default: intensity
+            scale:
+              type: string
+              default: log
+
+    AudioVisualizeImageWaveformRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            width:
+              type: integer
+              default: 1280
+            height:
+              type: integer
+              default: 720
+            color:
+              type: string
+              default: lime
+
+    AudioVisualizeVideoRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            width:
+              type: integer
+              default: 1280
+            height:
+              type: integer
+              default: 720
+            fps:
+              type: integer
+              default: 30
+            container:
+              type: string
+              default: mp4
+
+    AudioFingerprintRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            analyze_seconds:
+              type: number
+              default: 120.0
+            return_raw:
+              type: boolean
+              default: false
+
+    AudioRestoreRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            aggressive:
+              type: boolean
+              default: false
+
+    MidiInspectRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+
+    MidiTransformRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            transpose_semitones:
+              type: integer
+              default: 0
+            quantize_grid_beats:
+              type: number
+              nullable: true
+            tempo_bpm:
+              type: number
+              nullable: true
+            keep_channels:
+              type: string
+              nullable: true
+            drop_channels:
+              type: string
+              nullable: true
+
+    AudioToMidiRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            onset_threshold:
+              type: number
+              default: 0.5
+            frame_threshold:
+              type: number
+              default: 0.3
+            minimum_note_length_ms:
+              type: number
+              default: 58.0
+            minimum_frequency:
+              type: number
+              nullable: true
+            maximum_frequency:
+              type: number
+              nullable: true
+            multiple_pitch_bends:
+              type: boolean
+              default: false
+            melodia_trick:
+              type: boolean
+              default: true
+
+    AudioEnhanceRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+
+    AudioChordsRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            hop_length:
+              type: integer
+              default: 512
+            segment_min_duration_sec:
+              type: number
+              default: 0.5
+
+    AudioVadRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            threshold:
+              type: number
+              default: 0.5
+            min_speech_duration_ms:
+              type: number
+              default: 250.0
+            min_silence_duration_ms:
+              type: number
+              default: 100.0
+
+    AudioDiarizeRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            num_speakers:
+              type: integer
+              nullable: true
+            min_speakers:
+              type: integer
+              nullable: true
+            max_speakers:
+              type: integer
+              nullable: true
+
+    AudioStretchRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            tempo_factor:
+              type: number
+              default: 1.0
+            pitch_semitones:
+              type: number
+              default: 0.0
+
+    AudioTagRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            top_k:
+              type: integer
+              default: 10
+
+    AudioEmbedRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            query_text:
+              type: string
+              nullable: true
+
+    AudioSeparateHpssRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            margin:
+              type: number
+              default: 1.0
+            kernel_size:
+              type: integer
+              default: 31
+
+    AudioNoiseReduceRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            stationary:
+              type: boolean
+              default: false
+            prop_decrease:
+              type: number
+              default: 1.0
+
+    AudioInfoRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+
+    AudioTrimRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [end_sec]
+          properties:
+            start_sec:
+              type: number
+              default: 0.0
+            end_sec:
+              type: number
+
+    AudioMixRequest:
+      allOf:
+        - $ref: "#/components/schemas/MultiAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+
+    AudioConcatRequest:
+      allOf:
+        - $ref: "#/components/schemas/MultiAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+
+    AudioSpeedRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [speed]
+          properties:
+            speed:
+              type: number
+
+    AudioConvertRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            sample_rate:
+              type: integer
+              nullable: true
+            channels:
+              type: integer
+              nullable: true
+
+    AudioSimilarRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            reference_file_path:
+              type: string
+              nullable: true
+            reference_file_url:
+              type: string
+              nullable: true
+
+    MidiQuantizeRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            grid_beats:
+              type: number
+              default: 0.25
+
+    AudioClassifyRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          required: [labels]
+          properties:
+            labels:
+              type: array
+              description: Candidate label strings to score the audio against.
+              items: { type: string }
+
+    AudioFadeRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            fade_in:
+              type: number
+              default: 0.0
+            fade_out:
+              type: number
+              default: 0.0
+            curve:
+              type: string
+              default: tri
+
+    AudioReverseRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+
+    AudioLoopRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            count:
+              type: integer
+              default: 2
+
+    AudioBpmMatchRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [target_bpm]
+          properties:
+            target_bpm:
+              type: number
+            pitch_semitones:
+              type: number
+              default: 0.0
+
+    AudioStereoWidthRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            width:
+              type: number
+              default: 1.0
+
+    AudioSplitRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            mode:
+              type: string
+              enum: [equal, silence]
+              default: equal
+            count:
+              type: integer
+              nullable: true
+            threshold_db:
+              type: number
+              default: -30.0
+            min_duration_sec:
+              type: number
+              default: 0.5
+
+    AudioPanRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            position:
+              type: number
+              default: 0.0
+
+    AudioEqRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [bands]
+          properties:
+            bands:
+              type: array
+              description: Array of band specifications (object per band).
+              items: { type: object, additionalProperties: true }
+
+    AudioKeyMatchRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [target_key]
+          properties:
+            target_key:
+              type: string
+
+    AudioSidechainDuckRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            trigger_file_path:
+              type: string
+              nullable: true
+            trigger_file_url:
+              type: string
+              nullable: true
+            threshold_db:
+              type: number
+              default: -20.0
+            ratio:
+              type: number
+              default: 4.0
+            attack_ms:
+              type: number
+              default: 10.0
+            release_ms:
+              type: number
+              default: 200.0
+
+    AudioMetadataRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            tags:
+              type: string
+              nullable: true
+
+    AudioClipDetectRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+
+    AudioMidSideRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [encode, decode]
+
+    AudioBeatSliceRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+
+    AudioConvReverbRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            ir_file_path:
+              type: string
+              nullable: true
+            ir_file_url:
+              type: string
+              nullable: true
+            wet_mix:
+              type: number
+              default: 0.3
+
+    AudioTransientRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            attack_gain_db:
+              type: number
+              default: 0.0
+            sustain_gain_db:
+              type: number
+              default: 0.0
+
+    AudioMultibandCompressRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          required: [bands, crossovers_hz]
+          properties:
+            crossovers_hz:
+              type: array
+              description: Ascending crossover frequencies (Hz). 1 fewer than the number of bands.
+              items: { type: number }
+            bands:
+              type: array
+              description: Array of band specifications (object per band).
+              items: { type: object, additionalProperties: true }
+
+    AudioRemixRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            engine:
+              type: string
+              default: htdemucs
+              description: Stem-separation engine for the unmix step.
+            stem_mix:
+              type: object
+              additionalProperties:
+                type: number
+              description: |
+                Per-stem gain dict — keys are stem names ('vocals', 'drums',
+                'bass', 'other'), values are linear gain multipliers (1.0 =
+                keep, 0.0 = mute, 0.5 = -6 dB). Missing stems default to 1.0.
+
+    AudioDjPrepRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+
+    AudioLoudnessCurveRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            hop_length:
+              type: integer
+              default: 512
+
+    AudioPitchCorrectRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            strength:
+              type: number
+              default: 1.0
+
+    AudioRepairRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            declip:
+              type: boolean
+              default: true
+            dehum:
+              type: boolean
+              default: false
+            hum_freq:
+              type: number
+              default: 50.0
+
+    AudioLoopPointRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - type: object
+          properties:
+            min_loop_bars:
+              type: integer
+              default: 4
+            num_candidates:
+              type: integer
+              default: 5
+
+    AudioChordsToMidiRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            tempo_bpm:
+              type: number
+              nullable: true
+            velocity:
+              type: integer
+              default: 80
+            octave:
+              type: integer
+              default: 4
+
+    AudioDeessRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            threshold_db:
+              type: number
+              default: -20.0
+            frequency_hz:
+              type: number
+              default: 6000.0
+            ratio:
+              type: number
+              default: 4.0
+
+    AudioStereoFieldRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+
+    AudioThumbnailRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            duration_sec:
+              type: number
+              default: 30.0
+
+    MidiHumanizeRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            timing_ms:
+              type: number
+              default: 10.0
+            velocity_pct:
+              type: number
+              default: 10.0
+            seed:
+              type: integer
+              nullable: true
+
+    # ── dedicated generate engines (manual) ──
+    StableAudioOpenRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseGenerateRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            num_inference_steps: { type: integer, minimum: 1, maximum: 500, default: 100 }
+            negative_prompt: { type: string, default: 'low quality, average quality' }
+
+    MusicGenRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseGenerateRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            lyrics:
+              type: string
+              nullable: true
+              description: Accepted for API uniformity; MusicGen is instrumental-only.
+
+    RiffusionRequest:
+      allOf:
+        - $ref: "#/components/schemas/BaseGenerateRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+
+    AudioLDM2Request:
+      allOf:
+        - $ref: "#/components/schemas/BaseGenerateRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
+        - type: object
+          properties:
+            num_inference_steps: { type: integer, minimum: 1, maximum: 500, default: 200 }
+            negative_prompt: { type: string, default: 'Low quality.' }
 
 paths:
   /healthz:
     get:
-      summary: Liveness check
-      description: Always unauthenticated. Used by k8s / Docker probes.
+      tags:
+        - "Health"
+      summary: Liveness check (always unauthenticated)
       operationId: healthz
       security: []
       responses:
@@ -248,37 +1183,2548 @@ paths:
           description: Service is up.
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/HealthResponse"
+              schema: { $ref: "#/components/schemas/HealthResponse" }
 
+  /v1/audio/separate:
+    post:
+      tags:
+        - "Audio Separation"
+      summary: separate
+      operationId: separate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSeparateRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/master:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: master
+      operationId: master
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioMasterRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/analyze:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: analyze
+      operationId: analyze
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioAnalyzeRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/transform:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: transform
+      operationId: transform
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioTransformRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/loudness:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: loudness
+      operationId: loudness
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioLoudnessRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/normalize:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: normalize
+      operationId: normalize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioNormalizeRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/NormalizeResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/fx:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: fx
+      operationId: fx
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioFxRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/midi/render:
+    post:
+      tags:
+        - "MIDI"
+      summary: midi_render
+      operationId: midiRender
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MidiRenderRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/beats:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: beats
+      operationId: beats
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioBeatsRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/onsets:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: onsets
+      operationId: onsets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioOnsetsRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/melody:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: melody
+      operationId: melody
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioMelodyRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/segments:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: segments
+      operationId: segments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSegmentsRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/silence:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: silence
+      operationId: silence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSilenceRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/visualize/image/spectrogram:
+    post:
+      tags:
+        - "Audio Visualization"
+      summary: visualize_spectrogram
+      operationId: visualizeSpectrogram
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioVisualizeImageSpectrogramRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/visualize/image/waveform:
+    post:
+      tags:
+        - "Audio Visualization"
+      summary: visualize_waveform
+      operationId: visualizeWaveform
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioVisualizeImageWaveformRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/visualize/video/{mode}:
+    post:
+      tags:
+        - "Audio Visualization"
+      summary: visualize_video
+      operationId: visualizeVideo
+      parameters:
+        - $ref: "#/components/parameters/ModePath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioVisualizeVideoRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/fingerprint:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: fingerprint
+      operationId: fingerprint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioFingerprintRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/restore/{engine}:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: restore
+      operationId: restore
+      parameters:
+        - $ref: "#/components/parameters/EnginePath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioRestoreRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/midi/inspect:
+    post:
+      tags:
+        - "MIDI"
+      summary: midi_inspect
+      operationId: midiInspect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MidiInspectRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/midi/transform:
+    post:
+      tags:
+        - "MIDI"
+      summary: midi_transform
+      operationId: midiTransform
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MidiTransformRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/to_midi/{engine}:
+    post:
+      tags:
+        - "MIDI"
+      summary: to_midi
+      operationId: toMidi
+      parameters:
+        - $ref: "#/components/parameters/EnginePath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioToMidiRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/enhance/{engine}:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: audio_enhance
+      operationId: audioEnhance
+      parameters:
+        - $ref: "#/components/parameters/EnginePath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioEnhanceRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/chords:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: chords
+      operationId: chords
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioChordsRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/vad:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: vad
+      operationId: vad
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioVadRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/diarize/{engine}:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: diarize
+      operationId: diarize
+      parameters:
+        - $ref: "#/components/parameters/EnginePath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioDiarizeRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/stretch:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: stretch
+      operationId: stretch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioStretchRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/tag:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: tag
+      operationId: tag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioTagRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/embed:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: embed
+      operationId: embed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioEmbedRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/separate/hpss:
+    post:
+      tags:
+        - "Audio Separation"
+      summary: hpss
+      operationId: hpss
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSeparateHpssRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/noise-reduce/{engine}:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: noise_reduce
+      operationId: noiseReduce
+      parameters:
+        - $ref: "#/components/parameters/EnginePath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioNoiseReduceRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/info:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: audio_info_endpoint
+      operationId: audioInfo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioInfoRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/trim:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: trim
+      operationId: trim
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioTrimRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/mix:
+    post:
+      tags:
+        - "Audio Mixing"
+      summary: mix
+      operationId: mix
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioMixRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/concat:
+    post:
+      tags:
+        - "Audio Mixing"
+      summary: concat
+      operationId: concat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioConcatRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/speed:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: speed
+      operationId: speed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSpeedRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/convert:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: convert
+      operationId: convert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioConvertRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/similar:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: similar
+      operationId: similar
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSimilarRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/midi/quantize:
+    post:
+      tags:
+        - "MIDI"
+      summary: midi_quantize
+      operationId: midiQuantize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MidiQuantizeRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/classify:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: classify
+      operationId: classify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioClassifyRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/fade:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: fade
+      operationId: fade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioFadeRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/reverse:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: reverse
+      operationId: reverse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioReverseRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/loop:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: loop
+      operationId: loop
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioLoopRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/bpm-match:
+    post:
+      tags:
+        - "Audio Mixing"
+      summary: bpm_match
+      operationId: bpmMatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioBpmMatchRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/stereo-width:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: stereo_width
+      operationId: stereoWidth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioStereoWidthRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/split:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: split
+      operationId: split
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSplitRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/pan:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: pan
+      operationId: pan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioPanRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/eq:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: eq
+      operationId: eq
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioEqRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/key-match:
+    post:
+      tags:
+        - "Audio Mixing"
+      summary: key_match
+      operationId: keyMatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioKeyMatchRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/sidechain-duck:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: sidechain_duck_endpoint
+      operationId: sidechainDuck
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioSidechainDuckRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/metadata:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: audio_metadata
+      operationId: audioMetadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioMetadataRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/clip-detect:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: clip_detect_endpoint
+      operationId: clipDetect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioClipDetectRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/mid-side:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: mid_side
+      operationId: midSide
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioMidSideRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/beat-slice:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: beat_slice_endpoint
+      operationId: beatSlice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioBeatSliceRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/conv-reverb:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: conv_reverb_endpoint
+      operationId: convReverb
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioConvReverbRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/transient:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: transient_endpoint
+      operationId: transient
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioTransientRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/multiband-compress:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: multiband_compress_endpoint
+      operationId: multibandCompress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioMultibandCompressRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/remix:
+    post:
+      tags:
+        - "Audio Mixing"
+      summary: remix
+      operationId: remix
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioRemixRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/dj-prep:
+    post:
+      tags:
+        - "Audio Mixing"
+      summary: dj_prep
+      operationId: djPrep
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioDjPrepRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/loudness/curve:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: loudness_curve_endpoint
+      operationId: loudnessCurve
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioLoudnessCurveRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/pitch-correct:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: pitch_correct_endpoint
+      operationId: pitchCorrect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioPitchCorrectRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/repair:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: repair_endpoint
+      operationId: repair
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioRepairRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/loop-point:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: loop_point_endpoint
+      operationId: loopPoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioLoopPointRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/chords-to-midi:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: chords_to_midi
+      operationId: chordsToMidi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioChordsToMidiRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/deess:
+    post:
+      tags:
+        - "Audio Restoration"
+      summary: deess_endpoint
+      operationId: deess
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioDeessRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/stereo-field:
+    post:
+      tags:
+        - "Audio Analysis"
+      summary: stereo_field_endpoint
+      operationId: stereoField
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioStereoFieldRequest" }
+      responses:
+        "200":
+          description: JSON result.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/thumbnail:
+    post:
+      tags:
+        - "Audio Transform"
+      summary: thumbnail_endpoint
+      operationId: thumbnail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AudioThumbnailRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/midi/humanize:
+    post:
+      tags:
+        - "MIDI"
+      summary: midi_humanize
+      operationId: midiHumanize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MidiHumanizeRequest" }
+      responses:
+        "200":
+          description: Audio produced.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/audio/generate/stable-audio-open:
+    post:
+      tags:
+        - "Audio Generation"
+      summary: Stability Stable Audio Open 1.0 — text-to-audio.
+      operationId: generateStableAudioOpen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StableAudioOpenRequest" }
+      responses:
+        "200":
+          description: Audio generated.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202": { description: Async job accepted., content: { application/json: { schema: { $ref: "#/components/schemas/JobAcceptedResponse" } } } }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+  /v1/audio/generate/musicgen-small:
+    post:
+      tags:
+        - "Audio Generation"
+      summary: Meta MusicGen 300M — CC-BY-NC, opt-in required.
+      operationId: generateMusicGenSmall
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/MusicGenRequest" } } } }
+      responses:
+        "200":
+          description: Audio generated.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+  /v1/audio/generate/musicgen-medium:
+    post:
+      tags:
+        - "Audio Generation"
+      summary: Meta MusicGen 1.5B — CC-BY-NC.
+      operationId: generateMusicGenMedium
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/MusicGenRequest" } } } }
+      responses:
+        "200":
+          description: Audio generated.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+  /v1/audio/generate/riffusion:
+    post:
+      tags:
+        - "Audio Generation"
+      summary: Riffusion v1 — spectrogram via Griffin-Lim.
+      operationId: generateRiffusion
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RiffusionRequest" } } } }
+      responses:
+        "200":
+          description: Audio generated.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+  /v1/audio/generate/audioldm2:
+    post:
+      tags:
+        - "Audio Generation"
+      summary: AudioLDM 2 — CC-BY 4.0, general SFX.
+      operationId: generateAudioLDM2
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AudioLDM2Request" } } } }
+      responses:
+        "200":
+          description: Audio generated.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+  # ── Workflow ─────────────────────────────────────────────────────────────
+  /v1/batch:
+    post:
+      tags: ["Audio Mixing"]
+      summary: Apply a single operation to many input files at once
+      operationId: batch
+      description: |
+        Run the same transform against a list of staged files (or URLs).
+        Body is a JSON array of independent per-file request objects (the
+        same shape the underlying operation takes). Server returns a JSON
+        list of per-file results.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Per-file result array.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "413": { $ref: "#/components/responses/413" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/pipeline:
+    post:
+      tags: ["Workflow"]
+      summary: Ad-hoc op chain across one input
+      operationId: runPipeline
+      description: |
+        Apply N transforms in order to one input. Body is `{file_path | file_url, steps: [{op, params}, ...], output_path | output_url}`.
+        Intermediates stay in memory between steps — no re-upload required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [steps]
+              properties:
+                file_path: { type: string, nullable: true }
+                file_url: { type: string, format: uri, nullable: true }
+                steps:
+                  type: array
+                  items:
+                    type: object
+                    required: [op]
+                    properties:
+                      op: { type: string }
+                      params: { type: object, additionalProperties: true }
+                output_path: { type: string, nullable: true }
+                output_url: { type: string, format: uri, nullable: true }
+                output_format: { $ref: "#/components/schemas/OutputFormat" }
+                async_job: { type: boolean, default: false }
+                webhook_url: { type: string, format: uri, nullable: true }
+      responses:
+        "200":
+          description: Pipeline executed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/presets:
+    get:
+      tags: ["Workflow"]
+      summary: List configured workflow presets
+      operationId: listPresets
+      responses:
+        "200":
+          description: Preset list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  presets:
+                    type: array
+                    items: { type: string }
+        "401": { $ref: "#/components/responses/401" }
+
+  /v1/presets/{name}:
+    get:
+      tags: ["Workflow"]
+      summary: Describe a single preset
+      operationId: describePreset
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Preset description.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+    post:
+      tags: ["Workflow"]
+      summary: Run a named preset
+      operationId: runPreset
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_path: { type: string, nullable: true }
+                file_url: { type: string, format: uri, nullable: true }
+                output_path: { type: string, nullable: true }
+                output_url: { type: string, format: uri, nullable: true }
+                output_format: { $ref: "#/components/schemas/OutputFormat" }
+                async_job: { type: boolean, default: false }
+                webhook_url: { type: string, format: uri, nullable: true }
+                params:
+                  type: object
+                  additionalProperties: true
+                  description: Override values for parameters the preset declares.
+      responses:
+        "200":
+          description: Preset executed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "202":
+          description: Async job accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "413": { $ref: "#/components/responses/413" }
+        "415": { $ref: "#/components/responses/415" }
+        "422": { $ref: "#/components/responses/422" }
+        "500": { $ref: "#/components/responses/500" }
+
+  # ── Engines / Catalog / Lifecycle ────────────────────────────────────────
   /v1/engines:
     get:
+      tags: ["Engines"]
       summary: List configured engines
-      description: Returns all engines defined in engines.json with their capabilities.
       operationId: listEngines
       responses:
         "200":
-          description: Engine list.
+          description: Engine inventory.
           content:
             application/json:
               schema:
                 type: object
                 required: [object, data]
                 properties:
-                  object:
-                    type: string
-                    enum: [list]
+                  object: { type: string, enum: [list] }
                   data:
                     type: array
-                    items:
-                      $ref: "#/components/schemas/EngineInfo"
-        "401":
-          $ref: "#/components/responses/401"
+                    items: { $ref: "#/components/schemas/EngineInfo" }
+        "401": { $ref: "#/components/responses/401" }
 
-  /api/ps:
+  /v1/catalog:
     get:
+      tags: ["Engines"]
+      summary: Machine-readable endpoint catalog
+      operationId: catalog
+      description: |
+        Returns the categorised endpoint list — same data the documentation
+        sidebar uses. Useful for LLM agents discovering what audiolla can do
+        without parsing the full OpenAPI spec.
+      responses:
+        "200":
+          description: Catalog.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/401" }
+
+  /v1/ops:
+    get:
+      tags: ["Engines"]
+      summary: List pipeline op slugs
+      operationId: listOps
+      description: Ops available to `/v1/pipeline` and `/v1/presets/{name}`.
+      responses:
+        "200":
+          description: Op list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ops:
+                    type: array
+                    items: { type: string }
+        "401": { $ref: "#/components/responses/401" }
+
+  /v1/ps:
+    get:
+      tags: ["Engines"]
       summary: List currently loaded engines
-      description: Returns engines that have model weights resident in memory.
       operationId: listLoaded
       responses:
         "200":
@@ -292,21 +3738,22 @@ paths:
                   engines:
                     type: array
                     items:
-                      $ref: "#/components/schemas/PsEntry"
-        "401":
-          $ref: "#/components/responses/401"
+                      type: object
+                      required: [slug, executor, loaded]
+                      properties:
+                        slug: { type: string }
+                        executor: { type: string }
+                        loaded: { type: boolean }
+                        idle_seconds: { type: number, nullable: true }
+        "401": { $ref: "#/components/responses/401" }
 
-  /api/ps/{engine}:
+  /v1/ps/{engine}:
     delete:
+      tags: ["Engines"]
       summary: Evict one engine from memory
       operationId: unloadOne
       parameters:
-        - in: path
-          name: engine
-          required: true
-          schema:
-            type: string
-          description: Engine slug (URL-encoded).
+        - $ref: "#/components/parameters/EnginePath"
       responses:
         "200":
           description: Engine evicted.
@@ -315,16 +3762,14 @@ paths:
               schema:
                 type: object
                 properties:
-                  unloaded:
-                    type: string
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
+                  unloaded: { type: string }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
 
-  /unload:
+  /v1/unload:
     post:
-      summary: Evict all loaded engines
+      tags: ["Engines"]
+      summary: Evict every loaded engine
       operationId: unloadAll
       responses:
         "200":
@@ -336,699 +3781,73 @@ paths:
                 properties:
                   unloaded:
                     type: array
-                    items:
-                      type: string
-        "401":
-          $ref: "#/components/responses/401"
+                    items: { type: string }
+        "401": { $ref: "#/components/responses/401" }
 
-  /v1/audio/separate:
-    post:
-      summary: Stem separation
-      description: |
-        Separate an audio file into individual stems using Demucs.
-
-        Input — exactly one of `file`, `file_path`, or `file_url` (zero or
-        more-than-one returns 400). `file_url` is subject to the
-        AUDIOLLA_FETCH_MODE allowlist/denylist policy.
-
-        Output — by default the response is raw bytes:
-          - single stem requested → audio bytes (Content-Disposition: attachment)
-          - multiple stems → ZIP archive
-
-        Pass `output_path` to write the bytes to FILES_DIR / path instead
-        (response becomes JSON), or `output_url` to PUT to a presigned URL.
-        Exactly one of `output_path` / `output_url` is allowed; supply
-        neither for the default inline response.
-      operationId: separate
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [engine]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: Audio file to separate (multipart upload). Mutually exclusive with file_path / file_url.
-                file_path:
-                  type: string
-                  description: Path under the staging area (`/v1/files/...`). Mutually exclusive with file / file_url.
-                file_url:
-                  type: string
-                  format: uri
-                  description: Remote URL — server fetches subject to AUDIOLLA_FETCH_MODE policy. Mutually exclusive with file / file_path.
-                output_path:
-                  type: string
-                  description: Optional. Write the output to FILES_DIR / path; response becomes JSON ({path, size, ...}). Mutually exclusive with output_url.
-                output_url:
-                  type: string
-                  format: uri
-                  description: Optional. PUT the output to a presigned URL; response becomes JSON ({url, size, ...}). Mutually exclusive with output_path.
-                engine:
-                  type: string
-                  description: Engine slug (must have executor=demucs).
-                stems:
-                  type: array
-                  items:
-                    type: string
-                  description: Stem names to include in output. Defaults to all stems for the variant.
-                output_format:
-                  type: string
-                  default: wav
-                  enum: [wav, mp3, flac, opus, aac, pcm]
+  # ── Jobs ─────────────────────────────────────────────────────────────────
+  /v1/jobs:
+    get:
+      tags: ["Jobs"]
+      summary: List async jobs
+      operationId: listJobs
       responses:
         "200":
-          description: |
-            Audio bytes (single stem), ZIP archive (multiple stems), or
-            JSON descriptor when output_path / output_url is set.
-          content:
-            audio/wav:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            audio/mpeg:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            audio/flac:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            application/zip:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-        "413":
-          $ref: "#/components/responses/413"
-        "415":
-          $ref: "#/components/responses/415"
-        "422":
-          $ref: "#/components/responses/422"
-        "500":
-          $ref: "#/components/responses/500"
-
-  /v1/audio/master:
-    post:
-      summary: Audio mastering
-      description: |
-        Master an audio file. Two modes:
-        - `reference`: match loudness, EQ, and dynamics to a reference track (matchering).
-        - `chain`: apply a named pedalboard preset (EQ → compress → limit → LUFS normalize).
-
-        Input — exactly one of `file`, `file_path`, or `file_url`. When
-        `mode=reference`, also provide exactly one of `reference`,
-        `reference_path`, or `reference_url`.
-
-        Output — same input/output mode rules as /v1/audio/separate.
-
-        `target_lufs` adjusts final integrated loudness in both modes. If omitted, matchering
-        targets the reference file's loudness; chain presets use their own built-in target.
-      operationId: master
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [mode]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: Audio file to master. Mutually exclusive with file_path / file_url.
-                file_path:
-                  type: string
-                  description: Path under the staging area. Mutually exclusive with file / file_url.
-                file_url:
-                  type: string
-                  format: uri
-                  description: Remote URL (subject to AUDIOLLA_FETCH_MODE policy). Mutually exclusive with file / file_path.
-                output_path:
-                  type: string
-                  description: Optional. Write the mastered audio to FILES_DIR / path; JSON response.
-                output_url:
-                  type: string
-                  format: uri
-                  description: Optional. PUT the mastered audio to a presigned URL; JSON response.
-                mode:
-                  type: string
-                  enum: [reference, chain]
-                reference:
-                  type: string
-                  format: binary
-                  description: "Reference audio file (multipart). When mode=reference, provide one of reference / reference_path / reference_url."
-                reference_path:
-                  type: string
-                  description: Reference file path under staging. Mode=reference only.
-                reference_url:
-                  type: string
-                  format: uri
-                  description: Reference file remote URL (fetch policy applies). Mode=reference only.
-                preset:
-                  type: string
-                  description: Pedalboard preset name. Required when mode=chain.
-                target_lufs:
-                  type: number
-                  description: Target integrated loudness in LUFS. Optional.
-                output_format:
-                  type: string
-                  default: wav
-                  enum: [wav, mp3, flac, opus, aac, pcm]
-      responses:
-        "200":
-          description: Mastered audio bytes (or JSON descriptor with output_path / output_url).
-          content:
-            audio/wav:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            audio/mpeg:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            audio/flac:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-        "413":
-          $ref: "#/components/responses/413"
-        "415":
-          $ref: "#/components/responses/415"
-        "422":
-          $ref: "#/components/responses/422"
-        "500":
-          $ref: "#/components/responses/500"
-
-  /v1/audio/analyze:
-    post:
-      summary: MIR analysis
-      description: |
-        Extract music information retrieval features from an audio file using librosa.
-        Specify `features` to limit which are computed; omit to compute all.
-
-        Input — exactly one of `file`, `file_path`, or `file_url`. Output
-        is always JSON (no output_path / output_url here — the body is
-        already structured data).
-      operationId: analyze
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
-                file_path:
-                  type: string
-                  description: Path under the staging area. Mutually exclusive with file / file_url.
-                file_url:
-                  type: string
-                  format: uri
-                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
-                features:
-                  type: array
-                  items:
-                    type: string
-                    enum: [bpm, key, loudness, duration, spectral_centroid, rms, zcr]
-                  description: Feature subset to compute. Defaults to all.
-      responses:
-        "200":
-          description: Analysis results.
+          description: Job list.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnalyzeResult"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "413":
-          $ref: "#/components/responses/413"
-        "422":
-          $ref: "#/components/responses/422"
-        "500":
-          $ref: "#/components/responses/500"
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/401" }
 
-  /v1/audio/transform:
-    post:
-      summary: DSP transform chain
-      description: |
-        Apply a sequence of SoX effects to an audio file.
-        `operations` is an ordered array of `{op, params}` objects; each op is a
-        SoX effect name and params are passed directly to pysox. The chain is applied
-        in order — output of each effect feeds the next.
-
-        Input/output mode rules same as /v1/audio/separate.
-      operationId: transform
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [operations]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
-                file_path:
-                  type: string
-                  description: Path under the staging area. Mutually exclusive with file / file_url.
-                file_url:
-                  type: string
-                  format: uri
-                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
-                output_path:
-                  type: string
-                  description: Optional. Write the transformed audio to FILES_DIR / path; JSON response.
-                output_url:
-                  type: string
-                  format: uri
-                  description: Optional. PUT the transformed audio to a presigned URL; JSON response.
-                operations:
-                  type: string
-                  description: JSON-encoded array of SoxOperation objects.
-                output_format:
-                  type: string
-                  default: wav
-                  enum: [wav, mp3, flac, opus, aac, pcm]
-      responses:
-        "200":
-          description: Transformed audio bytes (or JSON descriptor with output_path / output_url).
-          content:
-            audio/wav:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "413":
-          $ref: "#/components/responses/413"
-        "422":
-          $ref: "#/components/responses/422"
-        "500":
-          $ref: "#/components/responses/500"
-
-  /v1/audio/loudness:
-    post:
-      summary: Loudness measurement and normalization
-      description: |
-        Measure integrated loudness (LUFS) of an audio file.
-        If `target_lufs` is supplied, normalize the file to that target and return
-        audio bytes. If omitted, return a JSON analysis result only.
-
-        Input — exactly one of `file`, `file_path`, or `file_url`.
-        `output_path` / `output_url` apply only when target_lufs is set
-        (measurement-only is already JSON).
-      operationId: loudness
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
-                file_path:
-                  type: string
-                  description: Path under the staging area. Mutually exclusive with file / file_url.
-                file_url:
-                  type: string
-                  format: uri
-                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
-                output_path:
-                  type: string
-                  description: Optional. Write the normalized audio to FILES_DIR / path; JSON response. Ignored when target_lufs is omitted.
-                output_url:
-                  type: string
-                  format: uri
-                  description: Optional. PUT the normalized audio to a presigned URL; JSON response. Ignored when target_lufs is omitted.
-                target_lufs:
-                  type: number
-                  description: Target integrated loudness in LUFS. Omit to analyze only.
-                output_format:
-                  type: string
-                  default: wav
-                  enum: [wav, mp3, flac, opus, aac, pcm]
-                  description: Output format. Only used when target_lufs is supplied.
-      responses:
-        "200":
-          description: |
-            JSON loudness result (analyze-only or output_path / output_url
-            mode) or audio bytes (when target_lufs supplied without
-            output_path / output_url).
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/LoudnessResult"
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-            audio/wav:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "413":
-          $ref: "#/components/responses/413"
-        "422":
-          $ref: "#/components/responses/422"
-        "500":
-          $ref: "#/components/responses/500"
-
-  /v1/audio/fx:
-    post:
-      summary: Generic effects chain (full pedalboard catalog)
-      description: |
-        Apply an ordered chain of effects to an audio file. Each entry
-        in `effects` is a `{type, params}` object — `type` is a
-        pedalboard class name (Compressor, Limiter, Gain, Reverb,
-        Chorus, Delay, Phaser, Distortion, Bitcrush, PitchShift,
-        HighShelfFilter, LowShelfFilter, PeakFilter, HighpassFilter,
-        LowpassFilter, LadderFilter, IIRFilter, NoiseGate, Clipping,
-        Convolution, GSMFullRateCompressor, MP3Compressor, Resample,
-        Invert). Effect-loading classes (VST3Plugin, AudioUnitPlugin,
-        ExternalPlugin) are rejected — they load arbitrary native code.
-
-        Input/output mode rules same as /v1/audio/separate.
-      operationId: fx
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [effects]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: Audio file (multipart). Mutually exclusive with file_path / file_url.
-                file_path:
-                  type: string
-                  description: Path under the staging area. Mutually exclusive with file / file_url.
-                file_url:
-                  type: string
-                  format: uri
-                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
-                output_path:
-                  type: string
-                  description: Optional. Write the processed audio to FILES_DIR / path; JSON response.
-                output_url:
-                  type: string
-                  format: uri
-                  description: Optional. PUT the processed audio to a presigned URL; JSON response.
-                effects:
-                  type: string
-                  description: JSON-encoded array of {type, params} objects.
-                output_format:
-                  type: string
-                  default: wav
-                  enum: [wav, mp3, flac, opus, aac, pcm]
-      responses:
-        "200":
-          description: Processed audio bytes (or JSON descriptor with output_path / output_url).
-          content:
-            audio/wav:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-        "413":
-          $ref: "#/components/responses/413"
-        "415":
-          $ref: "#/components/responses/415"
-        "500":
-          $ref: "#/components/responses/500"
-
-  /v1/midi/compose:
-    post:
-      summary: JSON spec → MIDI bytes
-      description: |
-        Transcode a song spec to a Standard MIDI File. Body is
-        application/json with the shape:
-
-        ```
-        {
-          "tempo_bpm": 120,
-          "time_signature": [4, 4],
-          "key_signature": "C",
-          "ticks_per_beat": 480,
-          "tracks": [
-            {
-              "name": "Lead",
-              "program": 0,
-              "channel": 0,
-              "volume": 100,
-              "pan": 64,
-              "notes": [
-                {"pitch": 60, "start_beats": 0.0, "duration_beats": 0.5, "velocity": 100}
-              ]
-            }
-          ]
-        }
-        ```
-
-        Time is in beats; the engine converts to ticks. Channel 9 (zero-indexed) is the GM drum channel.
-
-        Pass `output_path` or `output_url` as query parameters to write
-        the MIDI to staging or PUT it to a presigned URL respectively.
-        Default returns raw MIDI bytes (Content-Type: audio/midi).
-      operationId: midiCompose
+  /v1/jobs/{job_id}:
+    get:
+      tags: ["Jobs"]
+      summary: Get job status / result
+      operationId: getJob
       parameters:
-        - in: query
-          name: output_path
-          schema:
-            type: string
-          required: false
-          description: Optional. Stage the resulting MIDI at this path under FILES_DIR; JSON response.
-        - in: query
-          name: output_url
-          schema:
-            type: string
-            format: uri
-          required: false
-          description: Optional. PUT the resulting MIDI to a presigned URL; JSON response.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              description: Song spec — see the description for the full shape.
+        - $ref: "#/components/parameters/JobIdPath"
       responses:
         "200":
-          description: |
-            Raw MIDI bytes (default), or JSON descriptor with output_path / output_url.
+          description: Job state.
           content:
-            audio/midi:
-              schema:
-                type: string
-                format: binary
             application/json:
               schema:
-                oneOf:
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-        "500":
-          $ref: "#/components/responses/500"
-
-  /v1/midi/render:
-    post:
-      summary: MIDI → audio via fluidsynth + SoundFont
-      description: |
-        Synthesise a MIDI file to audio. By default uses the prod image's
-        bundled FluidR3_GM SoundFont (MIT, ships via fluid-soundfont-gm).
-        Override per request with `soundfont_path` pointing at a staged
-        `.sf2` file, or globally via the `AUDIOLLA_SOUNDFONT` env var.
-
-        Input/output mode rules same as /v1/audio/separate.
-      operationId: midiRender
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: MIDI file (multipart). Mutually exclusive with file_path / file_url.
-                file_path:
-                  type: string
-                  description: Path under the staging area. Mutually exclusive with file / file_url.
-                file_url:
-                  type: string
-                  format: uri
-                  description: Remote URL (fetch policy applies). Mutually exclusive with file / file_path.
-                output_path:
-                  type: string
-                  description: Optional. Stage the rendered audio at this path.
-                output_url:
-                  type: string
-                  format: uri
-                  description: Optional. PUT the rendered audio to a presigned URL.
-                soundfont_path:
-                  type: string
-                  description: Optional. Path to a staged .sf2 SoundFont under FILES_DIR. Defaults to AUDIOLLA_SOUNDFONT.
-                gain:
-                  type: number
-                  default: 0.5
-                  description: fluidsynth output gain in [0.0, 5.0]. The default (0.5) is calibrated to not clip on percussive MIDI.
-                samplerate:
-                  type: integer
-                  default: 44100
-                  enum: [22050, 44100, 48000, 88200, 96000]
-                output_format:
-                  type: string
-                  default: wav
-                  enum: [wav, mp3, flac, opus, aac, pcm]
-      responses:
-        "200":
-          description: Rendered audio bytes (or JSON descriptor with output_path / output_url).
-          content:
-            audio/wav:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-        "413":
-          $ref: "#/components/responses/413"
-        "415":
-          $ref: "#/components/responses/415"
-        "500":
-          $ref: "#/components/responses/500"
-
-  /v1/midi/generate:
-    post:
-      summary: Compose + render — JSON spec → audio bytes in one call
-      description: |
-        Convenience wrapper around /v1/midi/compose + /v1/midi/render.
-        Body is the same song spec as /v1/midi/compose. Audio rendering
-        knobs are passed as query parameters.
-      operationId: midiGenerate
+                type: object
+                additionalProperties: true
+                properties:
+                  job_id: { type: string }
+                  status: { type: string, enum: [pending, running, completed, failed, cancelled] }
+                  result: { type: object, additionalProperties: true, nullable: true }
+                  error: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+    delete:
+      tags: ["Jobs"]
+      summary: Cancel a pending or running job
+      operationId: cancelJob
       parameters:
-        - in: query
-          name: output_format
-          schema:
-            type: string
-            default: wav
-            enum: [wav, mp3, flac, opus, aac, pcm]
-        - in: query
-          name: soundfont_path
-          schema:
-            type: string
-        - in: query
-          name: gain
-          schema:
-            type: number
-            default: 0.5
-        - in: query
-          name: samplerate
-          schema:
-            type: integer
-            default: 44100
-            enum: [22050, 44100, 48000, 88200, 96000]
-        - in: query
-          name: output_path
-          schema:
-            type: string
-        - in: query
-          name: output_url
-          schema:
-            type: string
-            format: uri
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              description: Song spec — same shape as /v1/midi/compose.
+        - $ref: "#/components/parameters/JobIdPath"
       responses:
         "200":
-          description: Generated audio bytes (or JSON descriptor).
+          description: Job cancelled.
           content:
-            audio/wav:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
             application/json:
               schema:
-                oneOf:
-                  - $ref: "#/components/schemas/StagedOutputResponse"
-                  - $ref: "#/components/schemas/UrlOutputResponse"
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-        "415":
-          $ref: "#/components/responses/415"
-        "500":
-          $ref: "#/components/responses/500"
+                type: object
+                properties:
+                  cancelled: { type: string }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
 
+  # ── Files ────────────────────────────────────────────────────────────────
   /v1/files:
     get:
+      tags: ["Files"]
       summary: List staged files
-      description: List all files currently in the server-side staging area.
       operationId: filesList
       responses:
         "200":
@@ -1043,34 +3862,27 @@ paths:
                     items:
                       type: object
                       properties:
-                        path:
-                          type: string
-                        size:
-                          type: integer
-                        modified:
-                          type: string
-                          format: date-time
-        "401":
-          $ref: "#/components/responses/401"
+                        path: { type: string }
+                        size: { type: integer }
+                        modified: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/401" }
 
   /v1/files/{path}:
     put:
-      summary: Stage a file
-      description: Upload a file to the server-side staging area at the given path.
+      tags: ["Files"]
+      summary: Stage a file (multipart octet-stream upload)
       operationId: filesPut
+      description: |
+        The ONLY endpoint that accepts raw bytes on the wire. All other
+        audio endpoints reference staged files via `file_path` or
+        external URLs via `file_url`.
       parameters:
-        - in: path
-          name: path
-          required: true
-          schema:
-            type: string
+        - $ref: "#/components/parameters/FilesPath"
       requestBody:
         required: true
         content:
           application/octet-stream:
-            schema:
-              type: string
-              format: binary
+            schema: { $ref: "#/components/schemas/AudioBlob" }
       responses:
         "201":
           description: File staged.
@@ -1079,47 +3891,31 @@ paths:
               schema:
                 type: object
                 properties:
-                  path:
-                    type: string
-                  size:
-                    type: integer
-        "400":
-          $ref: "#/components/responses/400"
-        "401":
-          $ref: "#/components/responses/401"
-        "413":
-          $ref: "#/components/responses/413"
-
+                  path: { type: string }
+                  size: { type: integer }
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "413": { $ref: "#/components/responses/413" }
     get:
-      summary: Retrieve a staged file
+      tags: ["Files"]
+      summary: Download a staged file
       operationId: filesGet
       parameters:
-        - in: path
-          name: path
-          required: true
-          schema:
-            type: string
+        - $ref: "#/components/parameters/FilesPath"
       responses:
         "200":
           description: File bytes.
           content:
             application/octet-stream:
-              schema:
-                $ref: "#/components/schemas/AudioBlob"
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-
+              schema: { $ref: "#/components/schemas/AudioBlob" }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
     delete:
+      tags: ["Files"]
       summary: Delete a staged file
       operationId: filesDelete
       parameters:
-        - in: path
-          name: path
-          required: true
-          schema:
-            type: string
+        - $ref: "#/components/parameters/FilesPath"
       responses:
         "200":
           description: File deleted.
@@ -1128,11 +3924,137 @@ paths:
               schema:
                 type: object
                 properties:
-                  deleted:
-                    type: string
-        "401":
-          $ref: "#/components/responses/401"
-        "404":
-          $ref: "#/components/responses/404"
-        "500":
-          $ref: "#/components/responses/500"
+                  deleted: { type: string }
+        "401": { $ref: "#/components/responses/401" }
+        "404": { $ref: "#/components/responses/404" }
+        "500": { $ref: "#/components/responses/500" }
+
+  # ── MIDI generation (JSON spec bodies) ───────────────────────────────────
+  /v1/midi/compose:
+    post:
+      tags: ["MIDI"]
+      summary: Compose a song spec to a Standard MIDI File
+      operationId: midiCompose
+      description: |
+        Body is the song spec (tempo_bpm, time_signature, key_signature,
+        ticks_per_beat, tracks). Server returns raw MIDI bytes by default,
+        or JSON descriptor when `output_path` / `output_url` are set as
+        query parameters.
+      parameters:
+        - in: query
+          name: output_path
+          schema: { type: string }
+          required: false
+        - in: query
+          name: output_url
+          schema: { type: string, format: uri }
+          required: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: MIDI bytes or staged-output JSON.
+          content:
+            audio/midi:
+              schema: { $ref: "#/components/schemas/AudioBlob" }
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/midi/drum:
+    post:
+      tags: ["MIDI"]
+      summary: Generate a drum-pattern MIDI clip
+      operationId: midiDrum
+      description: JSON spec body → MIDI bytes or staged-output JSON.
+      parameters:
+        - in: query
+          name: output_path
+          schema: { type: string }
+          required: false
+        - in: query
+          name: output_url
+          schema: { type: string, format: uri }
+          required: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: MIDI bytes or staged-output JSON.
+          content:
+            audio/midi:
+              schema: { $ref: "#/components/schemas/AudioBlob" }
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "500": { $ref: "#/components/responses/500" }
+
+  /v1/midi/generate:
+    post:
+      tags: ["MIDI"]
+      summary: Compose + render in one call
+      operationId: midiGenerate
+      description: |
+        Convenience wrapper: takes the same song spec body as
+        `/v1/midi/compose`, immediately runs `/v1/midi/render`. Returns
+        rendered audio bytes or a staged-output JSON descriptor.
+      parameters:
+        - in: query
+          name: output_format
+          schema: { $ref: "#/components/schemas/OutputFormat" }
+          required: false
+        - in: query
+          name: soundfont_path
+          schema: { type: string }
+          required: false
+        - in: query
+          name: gain
+          schema: { type: number, default: 0.5 }
+          required: false
+        - in: query
+          name: samplerate
+          schema: { type: integer, default: 44100 }
+          required: false
+        - in: query
+          name: output_path
+          schema: { type: string }
+          required: false
+        - in: query
+          name: output_url
+          schema: { type: string, format: uri }
+          required: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Audio bytes or staged-output JSON.
+          content:
+            audio/wav:
+              schema: { $ref: "#/components/schemas/AudioBlob" }
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/StagedOutputResponse"
+                  - $ref: "#/components/schemas/UrlOutputResponse"
+        "400": { $ref: "#/components/responses/400" }
+        "401": { $ref: "#/components/responses/401" }
+        "415": { $ref: "#/components/responses/415" }
+        "500": { $ref: "#/components/responses/500" }

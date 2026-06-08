@@ -28,21 +28,41 @@ class FilePathError(ValueError):
 
 
 def sanitize_path(raw: str) -> PurePosixPath:
+    """Coerce a user-provided path so it ONLY resolves under FILES_DIR.
+
+    Lenient about input form — callers can write any of these and get the
+    same result:
+        ``uploads/track.wav``
+        ``/uploads/track.wav``
+        ``/files/uploads/track.wav``
+        ``/v1/files/uploads/track.wav``
+
+    Rejects null bytes, backslashes, empty segments, ``.`` / ``..``
+    segments (no escaping FILES_DIR).
+    """
     if raw is None or raw == "":
         raise FilePathError("path is empty")
     if "\x00" in raw:
         raise FilePathError("path contains null byte")
     if "\\" in raw:
         raise FilePathError("path contains backslash")
-    stripped = raw.lstrip("/")
-    if stripped == "":
+    # Strip leading slashes — `/uploads/x.wav` works the same as `uploads/x.wav`
+    s = raw.lstrip("/")
+    # Strip the optional `/files/` or `/v1/files/` prefix the caller might
+    # include if they're thinking in URL terms
+    for prefix in ("v1/files/", "files/"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = s.lstrip("/")
+    if s == "":
         raise FilePathError("path is empty after stripping leading slashes")
-    for seg in stripped.split("/"):
+    for seg in s.split("/"):
         if seg == "":
             raise FilePathError("path contains empty segment (double slash)")
         if seg in (".", ".."):
             raise FilePathError(f"path contains forbidden segment {seg!r}")
-    p = PurePosixPath(stripped)
+    p = PurePosixPath(s)
     if p.is_absolute():
         raise FilePathError("path is absolute after normalisation")
     return p

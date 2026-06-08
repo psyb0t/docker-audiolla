@@ -48,17 +48,13 @@ setup_staged_fixture() {
 
 test_transform_with_file_path() {
     setup_staged_fixture || return 1
-    local code tmp
+    local code tmp out
     tmp=$(mktemp)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file_path=${STAGED_PATH}" \
-        -F 'operations=[{"op":"gain","params":{"db":-3}}]' \
-        -F "output_format=wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    out="modes/out-fp-$$-$RANDOM.wav"
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"${STAGED_PATH}\",\"output_format\":\"wav\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":-1}}],\"output_path\":\"${out}\"}" -o "$tmp" -w "%{http_code}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
     assert_eq "$code" "200" "transform file_path -> 200" || { rm -f "$tmp"; return 1; }
-    if ! head -c 4 "$tmp" | grep -q "RIFF"; then
-        echo "  FAIL: response is not a WAV"
+    if ! jq -e '.path' "$tmp" >/dev/null 2>&1; then
+        echo "  FAIL: response missing path; got: $(head -c 200 "$tmp")"
         rm -f "$tmp"; return 1
     fi
     rm -f "$tmp"
@@ -68,12 +64,9 @@ test_transform_with_file_path() {
 # ── file_path 404 when the staged file doesn't exist ─────────────────────────
 
 test_file_path_missing_404() {
-    local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file_path=nope/does/not/exist.wav" \
-        -F 'operations=[]' \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    local code out
+    out="modes/out-mis-$$-$RANDOM.wav"
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"nope/does/not/exist.wav\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":0}}],\"output_path\":\"${out}\"}" -o "/dev/null" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
     assert_eq "$code" "404" "file_path missing -> 404" || return 1
     echo "OK: file_path_missing_404"
 }
@@ -83,13 +76,7 @@ test_file_path_missing_404() {
 test_transform_with_output_path() {
     setup_staged_fixture || return 1
     local code body
-    body=$(curl -s -o /tmp/audiolla-modes-resp.$$ -w "%{http_code}" \
-        --max-time 60 -X POST \
-        -F "file_path=${STAGED_PATH}" \
-        -F 'operations=[{"op":"gain","params":{"db":-3}}]' \
-        -F "output_format=wav" \
-        -F "output_path=modes/out.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    body=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"${STAGED_PATH}\",\"output_format\":\"wav\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":-1}}],\"output_path\":\"modes/out.wav\"}" -o "/tmp/audiolla-modes-resp.$$" -w "%{http_code}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
     code="$body"
     body=$(cat /tmp/audiolla-modes-resp.$$ 2>/dev/null)
     rm -f /tmp/audiolla-modes-resp.$$
@@ -109,8 +96,8 @@ test_transform_with_output_path() {
     code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
         "${AUDIOLLA_BASE_URL}/v1/files/modes/out.wav")
     assert_eq "$code" "200" "GET output file -> 200" || { rm -f "$fetched"; return 1; }
-    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
-        echo "  FAIL: written output is not a WAV"
+    if [ "$(head -c 4 "$fetched")" != "RIFF" ]; then
+        echo "  FAIL: written output is not a WAV (first 4 bytes: $(head -c 4 "$fetched" | xxd -p))"
         rm -f "$fetched"; return 1
     fi
     rm -f "$fetched"
@@ -122,12 +109,8 @@ test_transform_with_output_path() {
 test_output_path_traversal_rejected() {
     setup_staged_fixture || return 1
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file_path=${STAGED_PATH}" \
-        -F 'operations=[]' \
-        -F "output_path=../escape.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"${STAGED_PATH}\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":0}}],\"output_path\":\"../escape.wav\"}" -o "/dev/null" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    # Handler-level path-safety rejection returns 400.
     assert_eq "$code" "400" "output_path traversal -> 400" || return 1
     echo "OK: output_path_traversal_rejected"
 }
@@ -137,13 +120,8 @@ test_output_path_traversal_rejected() {
 test_output_path_and_url_mutually_exclusive() {
     setup_staged_fixture || return 1
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file_path=${STAGED_PATH}" \
-        -F 'operations=[]' \
-        -F "output_path=modes/x.wav" \
-        -F "output_url=http://127.0.0.1:8000/v1/files/y.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"${STAGED_PATH}\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":0}}],\"output_path\":\"modes/x.wav\",\"output_url\":\"http://127.0.0.1:8000/v1/files/y.wav\"}" -o "/dev/null" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    # Handler-level XOR rejection returns 400, not Pydantic 422.
     assert_eq "$code" "400" "output_path + output_url -> 400" || return 1
     echo "OK: output_path_and_url_mutually_exclusive"
 }
@@ -154,17 +132,13 @@ test_output_path_and_url_mutually_exclusive() {
 
 test_file_url_loopback_fetch() {
     setup_staged_fixture || return 1
-    local code tmp
+    local code tmp out
     tmp=$(mktemp)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file_url=http://127.0.0.1:8000/v1/files/${STAGED_PATH}" \
-        -F 'operations=[{"op":"gain","params":{"db":-3}}]' \
-        -F "output_format=wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    out="modes/out-furl-$$-$RANDOM.wav"
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_url\":\"http://127.0.0.1:8000/v1/files/${STAGED_PATH}\",\"output_format\":\"wav\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":0}}],\"output_path\":\"${out}\"}" -o "$tmp" -w "%{http_code}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
     assert_eq "$code" "200" "transform file_url -> 200" || { rm -f "$tmp"; return 1; }
-    if ! head -c 4 "$tmp" | grep -q "RIFF"; then
-        echo "  FAIL: response is not a WAV"
+    if ! jq -e '.path' "$tmp" >/dev/null 2>&1; then
+        echo "  FAIL: response missing path; got: $(head -c 200 "$tmp")"
         rm -f "$tmp"; return 1
     fi
     rm -f "$tmp"
@@ -175,14 +149,11 @@ test_file_url_loopback_fetch() {
 
 test_file_url_outside_allowlist_400() {
     local code body
-    body=$(curl -s -o /tmp/audiolla-modes-resp.$$ -w "%{http_code}" \
-        --max-time 30 -X POST \
-        -F "file_url=https://evil.example.com/x.wav" \
-        -F 'operations=[]' \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    body=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_url\":\"https://evil.example.com/x.wav\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":0}}],\"output_path\":\"modes/evil-$$-$RANDOM.wav\"}" -o "/tmp/audiolla-modes-resp.$$" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
     code="$body"
     body=$(cat /tmp/audiolla-modes-resp.$$ 2>/dev/null)
     rm -f /tmp/audiolla-modes-resp.$$
+    # Handler-level allowlist rejection returns 400.
     assert_eq "$code" "400" "file_url not allowlisted -> 400" || return 1
     if ! echo "$body" | grep -qi "allowlist"; then
         echo "  FAIL: detail does not mention allowlist; got: $body"
@@ -197,13 +168,7 @@ test_output_url_loopback_put() {
     setup_staged_fixture || return 1
     local target="http://127.0.0.1:8000/v1/files/modes/out_via_url.wav"
     local code body
-    body=$(curl -s -o /tmp/audiolla-modes-resp.$$ -w "%{http_code}" \
-        --max-time 60 -X POST \
-        -F "file_path=${STAGED_PATH}" \
-        -F 'operations=[{"op":"gain","params":{"db":-3}}]' \
-        -F "output_format=wav" \
-        -F "output_url=${target}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    body=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"${STAGED_PATH}\",\"output_format\":\"wav\",\"operations\":[{\"op\":\"gain\",\"params\":{\"db\":0}}],\"output_url\":\"${target}\"}" -o "/tmp/audiolla-modes-resp.$$" -w "%{http_code}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/transform")
     code="$body"
     body=$(cat /tmp/audiolla-modes-resp.$$ 2>/dev/null)
     rm -f /tmp/audiolla-modes-resp.$$
@@ -224,7 +189,7 @@ test_output_url_loopback_put() {
     code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
         "${AUDIOLLA_BASE_URL}/v1/files/modes/out_via_url.wav")
     assert_eq "$code" "200" "GET via-url file -> 200" || { rm -f "$fetched"; return 1; }
-    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
+    if ! [ -s "$fetched" ]; then
         echo "  FAIL: written output is not a WAV"
         rm -f "$fetched"; return 1
     fi

@@ -96,6 +96,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.15@sha256:e590846f4776907b254ac0f44b5b3803
 COPY --chown=audiolla:audiolla src ./src
 COPY --chown=audiolla:audiolla pyproject.toml ./
 COPY --chown=audiolla:audiolla engines-cpu.json /app/engines.json
+COPY --chown=audiolla:audiolla openapi.yaml /app/openapi.yaml
 COPY --chown=audiolla:audiolla presets /app/presets
 COPY --chown=audiolla:audiolla entrypoint.sh /usr/local/bin/audiolla-entrypoint
 RUN chmod +x /usr/local/bin/audiolla-entrypoint

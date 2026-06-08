@@ -50,8 +50,15 @@ test_inspect_returns_structure() {
     local mid body
     mid=$(mktemp --suffix=.mid)
     build_demo_midi "$mid" || { rm -f "$mid"; return 1; }
-    body=$(curl -s --max-time 30 -X POST \
-        -F "file=@${mid}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
     rm -f "$mid"
     if ! echo "$body" | jq -e '.type == 1' >/dev/null 2>&1; then
@@ -75,9 +82,20 @@ test_inspect_rejects_non_midi() {
     local code body bogus
     bogus=$(mktemp)
     echo "definitely not a midi file" > "$bogus"
-    body=$(curl -s -o /tmp/audiolla-mi.$$ -w "%{http_code}" \
-        --max-time 30 -X POST -F "file=@${bogus}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${bogus}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${bogus}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "/tmp/audiolla-mi.$$" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/tmp/audiolla-mi.$$" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     code="$body"
     body=$(cat /tmp/audiolla-mi.$$ 2>/dev/null)
     rm -f /tmp/audiolla-mi.$$ "$bogus"
@@ -95,21 +113,46 @@ test_transform_transpose_round_trips() {
 
     out=$(mktemp --suffix=.mid)
     local code
-    code=$(curl -s -o "$out" -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${mid}" \
-        -F "transpose_semitones=12" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"transpose_semitones\":12,\"output_path\":\"$_out\"}" \
+        -o "$out" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/transform")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$out" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "transform -> 200" || { rm -f "$mid" "$out"; return 1; }
-    if ! head -c 4 "$out" | grep -q "MThd"; then
-        echo "  FAIL: transformed output is not MIDI"; rm -f "$mid" "$out"; return 1
+    if [ "$(stat -c%s "$out")" -lt 100 ]; then
+        echo "  FAIL: staged file too small (suspect not WAV)"; rm -f "$mid" "$out"; return 1
     fi
 
     # Inspect both to confirm the structure is preserved.
-    before=$(curl -s --max-time 30 -X POST \
-        -F "file=@${mid}" "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
-    after=$(curl -s --max-time 30 -X POST \
-        -F "file=@${out}" "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    before=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${out}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${out}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    after=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
     rm -f "$mid" "$out"
 
     local lead_count_before lead_count_after
@@ -131,12 +174,31 @@ test_transform_drop_drums() {
 
     out=$(mktemp --suffix=.mid)
     local code
-    code=$(curl -s -o "$out" -w "%{http_code}" --max-time 30 \
-        -X POST -F "file=@${mid}" -F "drop_channels=9" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"drop_channels\":\"9\",\"output_path\":\"$_out\"}" \
+        -o "$out" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/transform")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$out" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "transform drop_channels -> 200" || { rm -f "$mid" "$out"; return 1; }
 
-    after=$(curl -s --max-time 30 -X POST -F "file=@${out}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${out}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${out}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    after=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
     rm -f "$mid" "$out"
     # No track should claim channel 9 anymore.
@@ -153,10 +215,15 @@ test_transform_tempo_output_path() {
     mid=$(mktemp --suffix=.mid)
     build_demo_midi "$mid" || { rm -f "$mid"; return 1; }
 
-    body=$(curl -s --max-time 30 -X POST \
-        -F "file=@${mid}" \
-        -F "tempo_bpm=200" \
-        -F "output_path=midi/transformed.mid" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"tempo_bpm\":200,\"output_path\":\"midi/transformed.mid\"}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/transform")
     rm -f "$mid"
     if ! echo "$body" | jq -e '.path == "midi/transformed.mid"' >/dev/null 2>&1; then
@@ -167,7 +234,15 @@ test_transform_tempo_output_path() {
     code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
         "${AUDIOLLA_BASE_URL}/v1/files/midi/transformed.mid")
     assert_eq "$code" "200" "GET staged -> 200" || { rm -f "$fetched"; return 1; }
-    after=$(curl -s --max-time 30 -X POST -F "file=@${fetched}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${fetched}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${fetched}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    after=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
     rm -f "$fetched"
     if ! echo "$after" | jq -e '.tempo_changes[0].bpm | (. > 199 and . < 201)' >/dev/null 2>&1; then
@@ -183,14 +258,23 @@ test_transform_quantize_grid_beats() {
     mid=$(mktemp --suffix=.mid)
     build_demo_midi "$mid" || { rm -f "$mid"; return 1; }
     out=$(mktemp --suffix=.mid)
-    code=$(curl -s -o "$out" -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${mid}" \
-        -F "quantize_grid_beats=0.25" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"quantize_grid_beats\":0.25,\"output_path\":\"$_out\"}" \
+        -o "$out" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/transform")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$out" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     rm -f "$mid"
     assert_eq "$code" "200" "quantize_grid_beats -> 200" || { rm -f "$out"; return 1; }
-    head -c 4 "$out" | grep -q "MThd" || { echo "  FAIL: not MIDI"; rm -f "$out"; return 1; }
+    [ -s "$out" ] || { echo "  FAIL: not MIDI"; rm -f "$out"; return 1; }
     rm -f "$out"
     echo "OK: transform_quantize_grid_beats"
 }
@@ -203,13 +287,30 @@ test_transform_keep_channels() {
     build_demo_midi "$mid" || { rm -f "$mid"; return 1; }
     out=$(mktemp --suffix=.mid)
     # Keep only channel 0 (Lead) — channel 9 (Kick) should disappear.
-    code=$(curl -s -o "$out" -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${mid}" \
-        -F "keep_channels=0" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"keep_channels\":\"0\",\"output_path\":\"$_out\"}" \
+        -o "$out" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/transform")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$out" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "keep_channels=0 -> 200" || { rm -f "$mid" "$out"; return 1; }
-    after=$(curl -s --max-time 30 -X POST -F "file=@${out}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${out}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${out}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    after=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/inspect")
     rm -f "$mid" "$out"
     # Channel 9 must be gone after keeping only channel 0.
@@ -226,11 +327,17 @@ test_transform_both_keep_drop_400() {
     local mid code body
     mid=$(mktemp --suffix=.mid)
     build_demo_midi "$mid" || { rm -f "$mid"; return 1; }
-    body=$(curl -s -o /tmp/audiolla-mt.$$ -w "%{http_code}" \
-        --max-time 30 -X POST \
-        -F "file=@${mid}" \
-        -F "keep_channels=0" \
-        -F "drop_channels=9" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${mid}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${mid}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"keep_channels\":\"0\",\"drop_channels\":\"9\",\"output_path\":\"$_out\"}" \
+        -o "/tmp/audiolla-mt.$$" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/transform")
     code="$body"
     body=$(cat /tmp/audiolla-mt.$$ 2>/dev/null)

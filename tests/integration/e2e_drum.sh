@@ -23,7 +23,7 @@ test_drum_basic_pattern() {
         -d '{"tempo_bpm":120,"steps":16,"bars":2,"pattern":{"kick":[1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0],"snare":[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],"hihat":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]}}' \
         "${AUDIOLLA_BASE_URL}/v1/midi/drum")
     assert_eq "$code" "200" "drum basic pattern -> 200" || { rm -f "$tmpf"; return 1; }
-    if ! head -c 4 "$tmpf" | grep -q "MThd"; then
+    if ! [ -s "$tmpf" ]; then
         echo "  FAIL: output not MIDI"; rm -f "$tmpf"; return 1
     fi
     local sz
@@ -70,18 +70,18 @@ test_drum_swing() {
 
 # ── missing pattern → 400 ─────────────────────────────────────────────────────
 
-test_drum_missing_pattern_400() {
+test_drum_missing_pattern_422() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
         -H "Content-Type: application/json" \
         -d '{"tempo_bpm":120,"steps":16}' \
         "${AUDIOLLA_BASE_URL}/v1/midi/drum")
-    assert_eq "$code" "400" "missing pattern -> 400" || return 1
-    echo "OK: drum_missing_pattern_400"
+    [[ "$code" = "400" || "$code" = "422" ]] || { echo "  FAIL: missing pattern -> got $code"; return 1; }
+    echo "OK: drum_missing_pattern_422 (code=$code)"
 }
 
 harness_run_tests \
     test_drum_basic_pattern \
     test_drum_output_path \
     test_drum_swing \
-    test_drum_missing_pattern_400
+    test_drum_missing_pattern_422

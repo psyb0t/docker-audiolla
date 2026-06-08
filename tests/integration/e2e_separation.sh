@@ -62,13 +62,20 @@ test_separate_single_stem_audio() {
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" RETURN
 
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 300 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=htdemucs" \
-        -F "stems=vocals" \
-        -F "output_format=wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"htdemucs\",\"stems\":\"vocals\",\"output_format\":\"wav\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/separate")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "separate single stem -> 200" || return 1
     local head4
     head4=$(head -c 4 "$tmp" | od -An -c | tr -d ' \n')
@@ -90,13 +97,20 @@ test_separate_multi_stem_zip() {
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" RETURN
 
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 300 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=htdemucs" \
-        -F "stems=vocals" -F "stems=drums" -F "stems=bass" -F "stems=other" \
-        -F "output_format=wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"htdemucs\",\"stems\":\"vocals\",\"stems\":\"drums\",\"stems\":\"bass\",\"stems\":\"other\",\"output_format\":\"wav\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/separate")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "separate 4 stems -> 200" || return 1
     local head2
     head2=$(head -c 2 "$tmp" | od -An -c | tr -d ' \n')
@@ -117,12 +131,20 @@ test_separate_multi_stem_zip() {
 test_separate_unknown_engine_404() {
     _skip_if_no_fixture && return 0
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=this-does-not-exist" \
-        -F "stems=vocals" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"this-does-not-exist\",\"stems\":\"vocals\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/separate")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "404" "unknown engine -> 404" || return 1
     echo "OK: separate_unknown_engine_404"
 }
@@ -132,13 +154,21 @@ test_separate_unknown_engine_404() {
 test_separate_unknown_stem_400() {
     _skip_if_no_fixture && return 0
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=htdemucs" \
-        -F "stems=not-a-real-stem" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"htdemucs\",\"stems\":\"not-a-real-stem\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/separate")
-    assert_eq "$code" "400" "unknown stem -> 400" || return 1
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    assert_eq "$code" "422" "unknown stem -> 422" || return 1
     echo "OK: separate_unknown_stem_400"
 }
 
@@ -175,7 +205,7 @@ test_separate_cuda_only_on_cpu_400() {
         -F "engine=htdemucs_ft" \
         -F "stems=vocals" \
         "http://127.0.0.1:${port}/v1/audio/separate")
-    assert_eq "$code" "400" "htdemucs_ft on cpu device -> 400" || return 1
+    assert_eq "$code" "422" "htdemucs_ft on cpu device -> 422" || return 1
     echo "OK: separate_cuda_only_on_cpu_400"
 }
 

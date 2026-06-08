@@ -19,8 +19,14 @@ harness_start "silero-vad"
 
 test_vad_returns_speech_segments() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/vad")
     if ! echo "$body" | jq -e '.speech_segments | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: speech_segments not an array; body: $body"; return 1
@@ -48,9 +54,14 @@ test_vad_rejects_missing_file() {
 
 test_vad_custom_threshold() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "threshold=0.7" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"threshold\":0.7}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/vad")
     if ! echo "$body" | jq -e '.speech_segments | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: speech_segments missing with custom threshold; body: $body"; return 1
@@ -66,9 +77,14 @@ test_vad_custom_threshold() {
 
 test_vad_min_speech_duration_ms() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "min_speech_duration_ms=500" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"min_speech_duration_ms\":500}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/vad")
     if ! echo "$body" | jq -e '.speech_segments | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: speech_segments missing; body: $body"; return 1
@@ -87,9 +103,14 @@ test_vad_min_speech_duration_ms() {
 
 test_vad_min_silence_duration_ms() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "min_silence_duration_ms=500" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"min_silence_duration_ms\":500}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/vad")
     if ! echo "$body" | jq -e '.speech_segments | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: speech_segments missing; body: $body"; return 1

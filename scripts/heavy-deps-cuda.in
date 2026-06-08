@@ -1,6 +1,10 @@
 # Heavy ML/DSP deps for the CUDA prod image. Hand-edited spec.
 # Compile to requirements-heavy-cuda.txt via scripts/compile_heavy_deps.sh.
 # Versions duplicated in Dockerfile.cuda comments must match this file.
+# resampy (transitive of matchering) does `import pkg_resources` which only
+# exists if setuptools is installed. Modern uv/pip envs don't include it by
+# default. Without it, /v1/audio/master mode=reference returns 500.
+setuptools==75.6.0
 torch==2.5.1
 torchaudio==2.5.1
 demucs==4.0.1
@@ -11,7 +15,7 @@ librosa==0.10.2
 sox==1.4.1
 numpy==2.1.3
 soundfile==0.12.1
-huggingface-hub==0.30.2
+huggingface-hub==0.34.6
 audio-separator[gpu]==0.44.2
 basic-pitch[onnx]==0.4.0
 deepfilternet==0.5.6
@@ -20,3 +24,14 @@ pyannote.audio==3.3.2
 transformers==4.51.3
 accelerate==1.6.0
 noisereduce==3.0.3
+# ── text-to-music generation (Stable Audio Open + MusicGen + Riffusion) ──
+# See heavy-deps-cpu.in for rationale + deferred ACE-Step / DiffRhythm
+# notes. CUDA variant — same pins.
+# - diffusers carries StableAudioPipeline + StableDiffusionPipeline (for
+#   Riffusion). Pinned to 0.32.2 (last version that doesn't require
+#   pre-release safetensors).
+# - torchsde is a transitive dep of Stable Audio Open's
+#   CosineDPMSolverMultistepScheduler — diffusers doesn't pull it in as a
+#   hard dep, so it has to be listed explicitly.
+diffusers==0.32.2
+torchsde==0.2.6

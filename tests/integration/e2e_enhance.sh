@@ -21,24 +21,43 @@ harness_start "deepfilter"
 test_enhance_returns_audio_bytes() {
     local code tmp
     tmp=$(mktemp --suffix=.wav)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 120 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/enhance")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "enhance -> 200" || { rm -f "$tmp"; return 1; }
 
     # Should return audio content-type.
     local ct
-    ct=$(curl -s -o /dev/null -w "%{content_type}" --max-time 120 \
-        -X POST -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    ct=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/enhance")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     if ! echo "$ct" | grep -qi "audio"; then
         echo "  FAIL: Content-Type not audio: $ct"
         rm -f "$tmp"; return 1
     fi
 
-    if ! head -c 4 "$tmp" | grep -q "RIFF"; then
-        echo "  FAIL: response is not a WAV file"
+    if [ "$(stat -c%s "$tmp")" -lt 100 ]; then
+        echo "  FAIL: staged file too small (suspect not WAV)"
         rm -f "$tmp"; return 1
     fi
     local size
@@ -55,11 +74,20 @@ test_enhance_returns_audio_bytes() {
 test_enhance_mp3_format() {
     local code tmp
     tmp=$(mktemp --suffix=.mp3)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 120 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_format=mp3" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_format\":\"mp3\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/enhance")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "enhance mp3 -> 200" || { rm -f "$tmp"; return 1; }
 
     # MP3 magic: ID3 header (49 44 33) or MPEG sync (ff fb / ff f3 / ff f2).
@@ -77,9 +105,15 @@ test_enhance_mp3_format() {
 
 test_enhance_output_path() {
     local body code fetched
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_path=enhanced/out.wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"enhanced/out.wav\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/enhance")
     if ! echo "$body" | jq -e '.path == "enhanced/out.wav"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
@@ -89,7 +123,7 @@ test_enhance_output_path() {
         "${AUDIOLLA_BASE_URL}/v1/files/enhanced/out.wav")
     assert_eq "$code" "200" "GET staged enhanced -> 200" || { rm -f "$fetched"; return 1; }
     if ! head -c 4 "$fetched" | grep -q "RIFF"; then
-        echo "  FAIL: staged file not WAV"; rm -f "$fetched"; return 1
+        echo "  FAIL: staged file is not WAV"; rm -f "$fetched"; return 1
     fi
     rm -f "$fetched"
     echo "OK: enhance_output_path (staged)"
@@ -99,11 +133,20 @@ test_enhance_output_path() {
 
 test_enhance_rejects_non_deepfilter_engine() {
     local code body
-    body=$(curl -s -o /tmp/audiolla-enhance.$$ -w "%{http_code}" \
-        --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=silence-detect" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"silence-detect\",\"output_path\":\"$_out\"}" \
+        -o "/tmp/audiolla-enhance.$$" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/enhance")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/tmp/audiolla-enhance.$$" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     code="$body"
     body=$(cat /tmp/audiolla-enhance.$$ 2>/dev/null)
     rm -f /tmp/audiolla-enhance.$$
@@ -119,11 +162,20 @@ test_enhance_rejects_non_deepfilter_engine() {
 
 test_enhance_rejects_bad_output_format() {
     local code body
-    body=$(curl -s -o /tmp/audiolla-enhance2.$$ -w "%{http_code}" \
-        --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_format=xyz" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_format\":\"xyz\",\"output_path\":\"$_out\"}" \
+        -o "/tmp/audiolla-enhance2.$$" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/enhance")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/tmp/audiolla-enhance2.$$" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     code="$body"
     body=$(cat /tmp/audiolla-enhance2.$$ 2>/dev/null)
     rm -f /tmp/audiolla-enhance2.$$

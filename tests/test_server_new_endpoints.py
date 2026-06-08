@@ -124,14 +124,16 @@ def test_spectrogram_200_returns_png():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"ffmpeg-render": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/image/spectrogram",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
-    assert r.headers["content-type"] == "image/png"
+    assert r.json().get("path") == "out/result.wav"
     eng.spectrogram.assert_awaited_once()
 
 
@@ -143,10 +145,12 @@ def test_spectrogram_404_when_no_engine_configured():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/image/spectrogram",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -168,10 +172,12 @@ def test_spectrogram_404_when_engine_lacks_spectrogram_method():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"ffmpeg-render": bad_eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/image/spectrogram",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -186,11 +192,12 @@ def test_spectrogram_output_path_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"ffmpeg-render": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/image/spectrogram",
-                data={"output_path": "viz/spec.png"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "viz/spec.png"}
             )
 
     assert r.status_code == 200
@@ -210,14 +217,16 @@ def test_waveform_200_returns_png():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"ffmpeg-render": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/image/waveform",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
-    assert "png" in r.headers["content-type"].lower()
+    assert "path" in r.json()
     eng.waveform.assert_awaited_once()
 
 
@@ -229,10 +238,12 @@ def test_waveform_404_when_no_engine_configured():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/image/waveform",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -250,15 +261,16 @@ def test_visualize_200_returns_video():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"ffmpeg-render": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/video/spectrum",
-                data={"container": "mp4"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "container": "mp4", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
-    assert "video" in r.headers["content-type"].lower()
+    assert "path" in r.json()
     eng.visualize.assert_awaited_once()
 
 
@@ -271,10 +283,12 @@ def test_visualize_400_for_unknown_mode():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"ffmpeg-render": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/video/notamode",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 400
@@ -290,15 +304,16 @@ def test_visualize_webm_container():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"ffmpeg-render": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"ffmpeg-render": {"executor": "ffmpeg_render"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/visualize/video/waves",
-                data={"container": "webm"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "container": "webm", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
-    assert "webm" in r.headers["content-type"].lower()
+    assert "path" in r.json()
 
 
 # ── /v1/audio/fingerprint ─────────────────────────────────────────────────────
@@ -313,10 +328,12 @@ def test_fingerprint_200_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"audio-fingerprint": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"audio-fingerprint": {"executor": "audio_fingerprint"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/fingerprint",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 200
@@ -334,10 +351,12 @@ def test_fingerprint_404_when_no_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/fingerprint",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 404
@@ -359,10 +378,12 @@ def test_fingerprint_404_when_engine_lacks_compute():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"audio-fingerprint": bad_eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"audio-fingerprint": {"executor": "audio_fingerprint"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/fingerprint",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 404
@@ -380,10 +401,12 @@ def test_silence_200_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"silence-detect": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"silence-detect": {"executor": "silence_detect"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/silence",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 200
@@ -402,14 +425,15 @@ def test_silence_415_for_unsupported_output_format():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"silence-detect": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"silence-detect": {"executor": "silence_detect"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/silence",
-                data={"output_format": "xyz"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_format": "xyz"}
             )
 
-    assert r.status_code == 415
+    assert r.status_code == 422
 
 
 def test_silence_404_when_no_engine():
@@ -420,10 +444,12 @@ def test_silence_404_when_no_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/silence",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 404
@@ -454,11 +480,12 @@ def test_silence_output_path_when_trim_mode_set():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"silence-detect": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"silence-detect": {"executor": "silence_detect"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/silence",
-                data={"trim_mode": "edges", "output_path": "silence/trimmed.wav"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "trim_mode": "edges", "output_path": "silence/trimmed.wav"}
             )
 
     assert r.status_code == 200
@@ -478,14 +505,16 @@ def test_dereverb_200_returns_audio():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"uvr-dereverb": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/uvr-dereverb",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith("audio/")
+    assert "path" in r.json()
     eng.restore.assert_awaited_once()
 
 
@@ -497,10 +526,12 @@ def test_dereverb_404_for_unknown_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/nonexistent",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -520,10 +551,12 @@ def test_dereverb_400_for_wrong_engine_type():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"uvr-dereverb": wrong_eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/uvr-dereverb",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 400
@@ -539,14 +572,15 @@ def test_dereverb_415_for_unsupported_output_format():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"uvr-dereverb": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/uvr-dereverb",
-                data={"output_format": "xyz"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_format": "xyz", "output_path": "out/result.wav"}
             )
 
-    assert r.status_code == 415
+    assert r.status_code == 422
 
 
 def test_dereverb_output_path_returns_json():
@@ -558,11 +592,12 @@ def test_dereverb_output_path_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"uvr-dereverb": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"uvr-dereverb": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/uvr-dereverb",
-                data={"output_path": "dereverb/out.wav"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "dereverb/out.wav"}
             )
 
     assert r.status_code == 200
@@ -581,10 +616,12 @@ def test_deecho_200_returns_audio():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"uvr-deecho": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"uvr-deecho": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/uvr-deecho",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
@@ -599,10 +636,12 @@ def test_deecho_404_for_unknown_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/nope",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -619,10 +658,12 @@ def test_deecho_400_for_wrong_engine_type():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"uvr-deecho": wrong_eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"uvr-deecho": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/uvr-deecho",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 400
@@ -640,10 +681,12 @@ def test_denoise_200_returns_audio():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"uvr-denoise": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"uvr-denoise": {"executor": "uvr_separator", "model": "x.ckpt"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/uvr-denoise",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
@@ -658,10 +701,12 @@ def test_denoise_404_for_unknown_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/restore/nope",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -679,14 +724,16 @@ def test_to_midi_200_returns_midi():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"basic-pitch": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/to_midi/basic-pitch",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
-    assert "midi" in r.headers["content-type"].lower()
+    assert "path" in r.json()
     eng.to_midi.assert_awaited_once()
 
 
@@ -698,10 +745,12 @@ def test_to_midi_404_for_unknown_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/to_midi/nonexistent",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -718,10 +767,12 @@ def test_to_midi_400_for_wrong_engine_type():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"basic-pitch": wrong_eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/to_midi/basic-pitch",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 400
@@ -737,11 +788,12 @@ def test_to_midi_output_path_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"basic-pitch": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/to_midi/basic-pitch",
-                data={"output_path": "midi/out.mid"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "midi/out.mid"}
             )
 
     assert r.status_code == 200
@@ -757,11 +809,12 @@ def test_to_midi_custom_thresholds_passed_to_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"basic-pitch": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"basic-pitch": {"executor": "basic_pitch"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/to_midi/basic-pitch",
-                data={"onset_threshold": "0.8"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "onset_threshold": "0.8", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
@@ -781,14 +834,16 @@ def test_enhance_200_returns_audio():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"deepfilter": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/enhance/deepfilter",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith("audio/")
+    assert "path" in r.json()
     eng.enhance.assert_awaited_once()
 
 
@@ -800,10 +855,12 @@ def test_enhance_404_for_unknown_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/enhance/nonexistent",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 404
@@ -824,10 +881,12 @@ def test_enhance_400_for_wrong_engine_type():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"deepfilter": wrong_eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/enhance/deepfilter",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "out/result.wav"}
             )
 
     assert r.status_code == 400
@@ -843,14 +902,15 @@ def test_enhance_415_for_unsupported_output_format():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"deepfilter": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/enhance/deepfilter",
-                data={"output_format": "xyz"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_format": "xyz", "output_path": "out/result.wav"}
             )
 
-    assert r.status_code == 415
+    assert r.status_code == 422
 
 
 def test_enhance_output_path_returns_json():
@@ -862,11 +922,12 @@ def test_enhance_output_path_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"deepfilter": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"deepfilter": {"executor": "deepfilter"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/enhance/deepfilter",
-                data={"output_path": "enhanced/out.wav"},
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav", "output_path": "enhanced/out.wav"}
             )
 
     assert r.status_code == 200
@@ -898,10 +959,12 @@ def test_chords_200_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"chord-detect": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"chord-detect": {"executor": "chord_detect"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/chords",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 200
@@ -919,10 +982,12 @@ def test_chords_404_when_no_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/chords",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 404
@@ -954,10 +1019,12 @@ def test_vad_200_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"silero-vad": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"silero-vad": {"executor": "vad"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/vad",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 200
@@ -974,10 +1041,12 @@ def test_vad_404_when_no_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/vad",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 404
@@ -1011,10 +1080,12 @@ def test_diarize_200_returns_json():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"pyannote": eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"pyannote": {"executor": "diarize_pyannote"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/diarize/pyannote",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 200
@@ -1032,10 +1103,12 @@ def test_diarize_404_for_unknown_engine():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/diarize/nonexistent",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 404
@@ -1052,10 +1125,12 @@ def test_diarize_400_for_wrong_engine_type():
          patch("audiolla.server.MCP_SERVER", _noop_mcp()), \
          patch.dict("audiolla.server.ENGINES", {"pyannote": wrong_eng}, clear=True), \
          patch.dict("audiolla.server.REGISTRY", {"pyannote": {"executor": "diarize_pyannote"}}, clear=True):
+        (files_dir / "uploads").mkdir(parents=True, exist_ok=True)
+        (files_dir / "uploads" / "a.wav").write_bytes(b"RIFF" + b"\x00" * 100)
         with TestClient(_server_mod.app) as c:
             r = c.post(
                 "/v1/audio/diarize/pyannote",
-                files={"file": ("a.wav", b"RIFF" + b"\x00" * 50, "audio/wav")},
+                json={"file_path": "uploads/a.wav"}
             )
 
     assert r.status_code == 400

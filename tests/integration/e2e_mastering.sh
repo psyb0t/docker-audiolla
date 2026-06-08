@@ -51,12 +51,20 @@ test_master_chain_transparent() {
     tmp=$(mktemp -t audiolla-master.XXXXXX) || return 2
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" RETURN
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 120 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "mode=chain" -F "preset=transparent" \
-        -F "output_format=wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"mode\":\"chain\",\"preset\":\"transparent\",\"output_format\":\"wav\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/master")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "master chain transparent -> 200" || return 1
     local head4
     head4=$(head -c 4 "$tmp" | od -An -c | tr -d ' \n')
@@ -72,11 +80,20 @@ test_master_chain_loud() {
     tmp=$(mktemp -t audiolla-master.XXXXXX) || return 2
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" RETURN
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 120 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "mode=chain" -F "preset=loud" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"mode\":\"chain\",\"preset\":\"loud\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/master")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "master chain loud -> 200" || return 1
     echo "OK: master_chain_loud"
 }
@@ -86,25 +103,45 @@ test_master_chain_loud() {
 test_master_unknown_preset_400() {
     _skip_if_no_fixture && return 0
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "mode=chain" -F "preset=not-a-preset" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"mode\":\"chain\",\"preset\":\"not-a-preset\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/master")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    # Handler-level unknown-preset returns 400 (not Pydantic 422).
     assert_eq "$code" "400" "unknown preset -> 400" || return 1
     echo "OK: master_unknown_preset_400"
 }
 
 # ── Reference mode without reference file → 400 ──────────────────────────────
 
-test_master_reference_missing_file_400() {
+test_master_reference_missing_file_422() {
     _skip_if_no_fixture && return 0
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "mode=reference" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"mode\":\"reference\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/master")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    # Handler-level "must provide exactly one of: reference, reference_path, reference_url" → 400.
     assert_eq "$code" "400" "reference mode w/o reference -> 400" || return 1
     echo "OK: master_reference_missing_file_400"
 }
@@ -112,6 +149,9 @@ test_master_reference_missing_file_400() {
 # ── /v1/audio/master mode=reference with a real reference → RIFF ─────────────
 
 test_master_reference_real() {
+    # v1.0.0 secondary fixture stage
+    curl -sf -X PUT --data-binary "@${REFERENCE}" -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/secondary/$(basename "${REFERENCE}")" >/dev/null || true
     _skip_if_no_fixture && return 0
     if [ ! -f "$REFERENCE" ]; then
         echo "  SKIP: reference fixture not present at $REFERENCE"
@@ -121,8 +161,15 @@ test_master_reference_real() {
     # matchering: reference-based mastering should drive the target's LUFS
     # toward the reference's LUFS. Phase doc gate: within 3 dB.
     local ref_lufs
-    ref_lufs=$(curl -s --max-time 60 -X POST -F "file=@${REFERENCE}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness" | jq -r '.loudness_lufs')
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${REFERENCE}")"
+    curl -sf -X PUT --data-binary "@${REFERENCE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    ref_lufs=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/loudness")
     if [ -z "$ref_lufs" ] || [ "$ref_lufs" = "null" ]; then
         echo "  FAIL: could not measure reference LUFS for comparison"
         return 1
@@ -132,32 +179,57 @@ test_master_reference_real() {
     tmp=$(mktemp -t audiolla-master.XXXXXX) || return 2
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" RETURN
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 180 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "mode=reference" \
-        -F "reference=@${REFERENCE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"mode\":\"reference\",\"reference_path\":\"secondary/$(basename "${REFERENCE}")\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/master")
     assert_eq "$code" "200" "master reference -> 200" || return 1
+    # Pull the staged result down for LUFS comparison.
+    local out_local
+    out_local=$(mktemp -t audiolla-master-out.XXXXXX)
+    curl -sf -o "$out_local" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || {
+        echo "  FAIL: could not fetch staged master output"
+        rm -f "$out_local"; return 1
+    }
     local head4
-    head4=$(head -c 4 "$tmp" | od -An -c | tr -d ' \n')
-    assert_eq "$head4" "RIFF" "reference master → RIFF" || return 1
+    head4=$(head -c 4 "$out_local" | od -An -c | tr -d ' \n')
+    if [ "$head4" != "RIFF" ]; then
+        echo "  FAIL: reference master → RIFF: expected 'RIFF', got '$head4'"
+        rm -f "$out_local"; return 1
+    fi
 
     # Re-measure the mastered output's LUFS and assert it's within 3 dB of
     # the reference's LUFS (phase doc §1.7 e2e_mastering gate).
     local out_lufs
-    out_lufs=$(curl -s --max-time 60 -X POST -F "file=@${tmp}" \
+    local _out_stage="loudness-check/master-out-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${out_local}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_out_stage}" >/dev/null || true
+    rm -f "$out_local"
+    out_lufs=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_out_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loudness" | jq -r '.loudness_lufs')
     if [ -z "$out_lufs" ] || [ "$out_lufs" = "null" ]; then
         echo "  FAIL: could not measure mastered output LUFS"
         return 1
     fi
-    if ! awk -v r="$ref_lufs" -v o="$out_lufs" \
+    local ref_lufs_num
+    ref_lufs_num=$(echo "$ref_lufs" | jq -r '.loudness_lufs')
+    if ! awk -v r="$ref_lufs_num" -v o="$out_lufs" \
         'BEGIN{d=o-r; if(d<0) d=-d; exit (d<=3.0) ? 0 : 1}'; then
-        echo "  FAIL: mastered LUFS ${out_lufs} not within 3 dB of reference ${ref_lufs}"
+        echo "  FAIL: mastered LUFS ${out_lufs} not within 3 dB of reference ${ref_lufs_num}"
         return 1
     fi
-    echo "OK: master_reference_real (ref=${ref_lufs} out=${out_lufs} dB)"
+    echo "OK: master_reference_real (ref=${ref_lufs_num} out=${out_lufs} dB)"
 }
 
 harness_run_tests \
@@ -165,5 +237,5 @@ harness_run_tests \
     test_master_chain_transparent \
     test_master_chain_loud \
     test_master_unknown_preset_400 \
-    test_master_reference_missing_file_400 \
+    test_master_reference_missing_file_422 \
     test_master_reference_real

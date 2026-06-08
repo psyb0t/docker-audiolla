@@ -1,8 +1,82 @@
 # Changelog
 
-All notable changes per release. Versions follow [semver](https://semver.org)
-pre-1.0 conventions: minor bumps may include breaking REST changes (called
-out explicitly), patch bumps are docs / build / fixes only.
+All notable changes per release. Versions follow [semver](https://semver.org).
+From v1.0.0 onward the REST API is stable — breaking changes will be major
+bumps and called out explicitly; minor bumps are additive, patch bumps are
+docs / build / fixes only.
+
+## v1.0.0 — 2026-06-07
+
+**Stable API milestone.** The REST contract is now spec-first
+(`openapi.yaml` is the source of truth), JSON-everywhere across all 90
+endpoints except `PUT /v1/files`, and locked under semver going forward.
+This release jumps directly from v0.23.1 to v1.0.0 — there is no v0.24.x
+line; the breaking refactor and the 1.0 stability commitment ship in the
+same tag. **Every existing v0.23.x client breaks** — see the migration
+notes below. Five new text-to-audio engines also land in this release.
+
+### BREAKING — API surface refactor
+
+- **Spec-first.** `openapi.yaml` is now the contract. Pydantic models are regenerated from it via `make generate`; handler signatures are `async def X(req: SomeRequest)` instead of long `Form(...)`/`File(...)` lists. Never hand-edit `src/audiolla/schema/_generated.py` — edit the YAML and regenerate.
+- **Multipart upload dropped everywhere except `PUT /v1/files/{path}`.** Every audio-processing endpoint now takes a JSON body. Pre-stage your file via `PUT /v1/files/{path}` then reference it by `{"file_path": "..."}` (or `{"file_url": "https://..."}` for server-side fetch).
+- **Raw audio responses dropped.** Every audio-producing endpoint requires `output_path` xor `output_url` and returns JSON `{path, size, ...}` or `{url, size, ...}`. Use `async_job=true` to auto-stage to `jobs/{id}.{ext}`.
+- **MCP audio-producing tools require an output destination.** The `audio_base64` / `midi_base64` / `image_base64` / `video_base64` / `content_base64` response modes were removed — LLMs can't consume audio bytes anyway, and large base64 payloads choke the context window (10 MB WAV ≈ 13 MB base64 ≈ 3 M tokens). Pass `output_path` (stage to FILES_DIR, response is `{path, size}`) or `output_url` (PUT to presigned URL, response is `{url, size}`).
+
+### Migration cheatsheet
+
+```diff
+- curl -X POST http://localhost:8000/v1/audio/normalize \
+-     -F "file=@track.wav" -F "target_lufs=-14" -o normalized.wav
++ # 1) stage the file (multipart only lives here now)
++ curl -X PUT --data-binary @track.wav \
++     -H 'Content-Type: application/octet-stream' \
++     http://localhost:8000/v1/files/uploads/track.wav
++ # 2) process via JSON body
++ curl -X POST http://localhost:8000/v1/audio/normalize \
++     -H 'Content-Type: application/json' \
++     -d '{"file_path":"uploads/track.wav","target_lufs":-14,"output_path":"out/normalized.wav"}'
++ # 3) retrieve the result
++ curl -o normalized.wav http://localhost:8000/v1/files/out/normalized.wav
+```
+
+`output_url` (presigned PUT) and `async_job=true` (auto-stage to `jobs/{id}.{ext}`) work the same way as before.
+
+### NEW — text-to-audio generation (5 engines)
+
+- New: `POST /v1/audio/generate/{engine}` — text → audio in one call. Per-engine routes with engine-specific Pydantic schemas in `openapi.yaml` (each engine's `num_inference_steps`, `negative_prompt` etc. are part of its own request schema).
+- New engines (all CUDA-only):
+  - **`stable-audio-open`** — Stability Stable Audio Open 1.0. **Stability Community Licence** (commercial use OK below the licence's revenue threshold). 47-second hard cap, 44.1 kHz stereo, no vocals — best for loops, riffs, ambient textures, SFX, drum beats. ~12 GB VRAM at fp16.
+  - **`musicgen-small`** — Meta MusicGen 300M. **CC-BY-NC 4.0** (non-commercial only). 30 s hard cap, 32 kHz mono, instrumental. ~3 GB VRAM at fp16.
+  - **`musicgen-medium`** — Meta MusicGen 1.5B. **CC-BY-NC 4.0** (same gate). 30 s hard cap, 32 kHz mono, instrumental. Higher quality than -small. ~6-8 GB VRAM at fp16.
+  - **`riffusion`** — Riffusion-v1 (Stable Diffusion fine-tune that generates spectrograms, reconstructed to audio via Griffin-Lim). **CreativeML OpenRAIL-M** (commercial OK with the licence's usage restrictions). ~5 s per pass, 22.05 kHz mono, lo-fi character. ~3 GB VRAM at fp16.
+  - **`audioldm2`** — AudioLDM 2 (cvssp/audioldm2). **CC-BY 4.0** — the only commercial-safe generator in this set, NO opt-in gate required. General-purpose SFX: environmental ambience, animal sounds, foley, mechanical / impact sounds. 16 kHz mono, up to 30 s. Slow at default 200-step DDIM — pass `num_inference_steps=50` for ~4x speedup. ~8-10 GB VRAM at fp16 with CPU offload.
+- **Licence opt-in for MusicGen.** Both MusicGen engines refuse to load unless the operator sets `AUDIOLLA_ENABLE_NONCOMMERCIAL=1` in the server environment — same pattern as matchering's GPL v3 gate. Read [the MusicGen weights licence](https://github.com/facebookresearch/audiocraft/blob/main/LICENSE_weights) before opting in.
+- New MCP tool: **`generate_music`** — same engine/prompt/lyrics/seed contract; requires `output_path` xor `output_url`. Tool count 85 → 86.
+
+### Infrastructure
+
+- New: `POST /v1/audio/generate/{engine}` — text → audio in one call. Form params: `prompt` (required), `duration_sec`, optional `lyrics`, `seed`, `num_inference_steps` (for engines that expose it), plus the standard `output_format` / `output_path` / `output_url` / `async_job` / `webhook_url`. URL-path engine slug so future generators slot in without endpoint changes.
+- New engines (all CUDA-only):
+  - **`stable-audio-open`** — Stability Stable Audio Open 1.0. **Stability Community Licence** (commercial use OK below the licence's revenue threshold). 47-second hard cap, 44.1 kHz stereo, no vocals — best for loops, riffs, ambient textures, SFX, drum beats. ~12 GB VRAM at fp16.
+  - **`musicgen-small`** — Meta MusicGen 300M. **CC-BY-NC 4.0** (non-commercial only). 30 s hard cap, 32 kHz mono, instrumental. ~3 GB VRAM at fp16.
+  - **`musicgen-medium`** — Meta MusicGen 1.5B. **CC-BY-NC 4.0** (same gate). 30 s hard cap, 32 kHz mono, instrumental. Higher quality than -small. ~6-8 GB VRAM at fp16.
+  - **`riffusion`** — Riffusion-v1 (Stable Diffusion fine-tune that generates spectrograms, reconstructed to audio via Griffin-Lim). **CreativeML OpenRAIL-M** (commercial OK with the licence's usage restrictions). ~5 s per pass, 22.05 kHz mono, lo-fi character. ~3 GB VRAM at fp16.
+  - **`audioldm2`** — AudioLDM 2 (cvssp/audioldm2). **CC-BY 4.0** — the only commercial-safe generator in this set, NO opt-in gate required. General-purpose SFX: environmental ambience, animal sounds, foley, mechanical / impact sounds. 16 kHz mono, up to 30 s. Slow at default 200-step DDIM — pass `num_inference_steps=50` for ~4x speedup. ~8-10 GB VRAM at fp16 with CPU offload.
+- **Licence opt-in for MusicGen.** Both MusicGen engines refuse to load unless the operator sets `AUDIOLLA_ENABLE_NONCOMMERCIAL=1` in the server environment — same pattern as matchering's GPL v3 gate. Read [the MusicGen weights licence](https://github.com/facebookresearch/audiocraft/blob/main/LICENSE_weights) before opting in.
+- New MCP tool: **`generate_music`** — text-to-music dispatch with the same engine/prompt/lyrics/seed contract; takes `output_path` / `output_url` for FILES_DIR staging or presigned PUT. Tool count 85 → 86.
+- Heavy-deps spec adds `diffusers==0.32.2` + `torchsde==0.2.6` + bumps `huggingface-hub` 0.30.2 → 0.34.6 in both CPU and CUDA variants. `torchsde` is a transitive dep of Stable Audio Open's `CosineDPMSolverMultistepScheduler` that diffusers doesn't pull in as a hard requirement. `requirements-heavy-{cpu,cuda}.txt` regenerated + hash-locked in this release — no separate operator step required.
+- Catalog endpoint gains a "generate" category with all four engines.
+- "What's not in here" updated to track music-gen + SFX-gen options. Deferred-but-researched engines (see README "Generate music + SFX" section):
+  - **ACE-Step v1 3.5B** (Apache 2.0, full songs with vocals) — requires diffusers 0.38+ which itself requires a pre-release `safetensors`. Doesn't pass the hash-locked supply-chain gate. Revisit when `safetensors 0.8.x` ships stable, or vendor ACE-Step's pipeline directly.
+  - **DiffRhythm full v1.2** (Apache 2.0) — unpackaged research repo, no `setup.py` / PyPI release. Revisit on upstream packaging or vendored `thirdparty/` integration.
+  - **Stable Audio Open Small** (Stability Community Licence, 11 s SFX-specialist) — only loadable via `stable-audio-tools`, which pins `python >=3.10, <3.11`; audiolla is on Python 3.12 = hard incompatibility. Revisit when the library widens its Python range or diffusers grows a pipeline for it.
+  - **TangoFlux** (ICLR 2026, 44.1 kHz stereo, fast Flow Matching) — git-only install, no PyPI package. Workable via SHA-pin but deferred to keep heavy-deps PyPI-only.
+  - **AudioGen** (Meta, CC-BY-NC, SFX-specialist) — `audiocraft==1.3.0` pins `transformers<=4.31.0`, hard conflict with our 4.51.3. Would need an isolated subprocess / sidecar container.
+  - **YuE 7B** (Apache 2.0, full songs with vocals) — 16-24 GB VRAM at fp16, doesn't fit on a 12 GB GPU without int4 quant tooling.
+- Tests:
+  - Unit: contract tests across the 5 engines (duck-type predicate, per-engine constants, duration-cap boundaries, bad-prompt + over-cap rejections per engine, licence-gate truthy/falsy values + licence-link assertion, and a positive-path assertion that AudioLDM2's `_load_sync` does NOT invoke the licence gate). Plus 7 server-level REST contract tests (200 / 404 / 400 / 415 / 422 / output_path / lyrics+seed forwarding). Total: 354/354 ✓.
+  - Real e2e (CUDA-only): new `tests/integration/e2e_generate.sh` — generates a drum loop with each engine, validates the WAV decodes + is above the silence floor + is at least 1 s long, then **POSTs the generated audio back through `/v1/audio/beats` and asserts a positive tempo + at least 6-8 beats are detected**. This closes the loop: if generation silently emitted zeros, beats would find nothing. Also asserts seed reproducibility (same seed → byte-identical sha256) and the licence-gate refusal on a sibling container without the opt-in. AudioLDM2's SFX path is validated by generating "heavy rain on a metal roof" and confirming the WAV decodes — no beats check (it's an SFX prompt, not rhythmic).
+- `harness.sh` improvement: now forwards `HF_*` / `HUGGINGFACE_*` env vars into the test container (was only `AUDIOLLA_*`). Enables `HUGGINGFACE_TOKEN` / `HF_HUB_OFFLINE` overrides without harness changes.
 
 ## v0.23.1 — 2026-06-07
 

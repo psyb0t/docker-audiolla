@@ -187,35 +187,81 @@ Demucs weights prefetch at container startup (for whichever variants are enabled
 
 ---
 
+## Migration from v0.23.x → v1.0.0
+
+**v1.0.0 is a breaking API release.** Every existing client breaks. The new shape:
+
+- Every audio endpoint takes a **JSON body** (no more `multipart/form-data` except at `/v1/files`)
+- Input is **`file_path`** (FILES_DIR-relative) xor **`file_url`** (server-side fetch). Pre-stage the file via `PUT /v1/files/{path}` first.
+- Output requires **`output_path`** xor **`output_url`**. No more raw audio bytes in responses.
+- Async path: `async_job=true` auto-stages to `jobs/{id}.{ext}` if neither output is given.
+- MCP audio-producing tools dropped `audio_base64` (and `midi_base64` / `image_base64` / `video_base64`). Same `output_path` xor `output_url` requirement.
+- `openapi.yaml` is now the contract — Pydantic models regenerate from it via `make generate`. Never hand-edit `src/audiolla/schema/_generated.py`.
+
+```diff
+- curl -X POST http://localhost:8000/v1/audio/normalize \
+-     -F "file=@track.wav" -F "target_lufs=-14" -o normalized.wav
+
++ # 1) stage the file (multipart only lives here now)
++ curl -X PUT --data-binary @track.wav \
++     -H 'Content-Type: application/octet-stream' \
++     http://localhost:8000/v1/files/uploads/track.wav
+
++ # 2) process via JSON body — response is JSON, not bytes
++ curl -X POST http://localhost:8000/v1/audio/normalize \
++     -H 'Content-Type: application/json' \
++     -d '{"file_path":"uploads/track.wav","target_lufs":-14,"output_path":"out/normalized.wav"}'
+
++ # 3) retrieve the result
++ curl -o normalized.wav http://localhost:8000/v1/files/out/normalized.wav
+```
+
+Why? See the [v1.0.0 CHANGELOG entry](CHANGELOG.md) for the full rationale.
+
 ## Quick start
 
-Once the container is up, this is a complete audio pipeline in six curl commands:
+Once the container is up, this is a complete audio pipeline in six commands (every audio endpoint is JSON-body now; stage your input file at `/v1/files/...` first):
 
 ```bash
+# stage your input file
+curl -X PUT --data-binary @song.wav \
+  -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/uploads/song.wav
+
 # rip the vocals out of a track
 curl -X POST http://localhost:8000/v1/audio/separate \
-  -F "file=@song.wav" -F "engine=htdemucs" -F "stems=vocals" \
-  -o vocals.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/song.wav","engine":"htdemucs","stems":["vocals"],"output_path":"out/vocals.wav"}'
+# → {"path":"out/vocals.wav","size":...,"output_format":"wav"}
+curl -o vocals.wav http://localhost:8000/v1/files/out/vocals.wav
 
 # what key is it in? what are the chords?
-curl -X POST http://localhost:8000/v1/audio/chords -F "file=@song.wav"
+curl -X POST http://localhost:8000/v1/audio/chords \
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/song.wav"}'
 # → {"key":"F# minor","key_confidence":0.91,"chords":[{"chord":"F#m","start_sec":0.0,...},...]}
 
 # transcribe that vocal melody to MIDI
+curl -X PUT --data-binary @out/vocals.wav -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/uploads/vocals.wav  # only if not already staged
 curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
-  -F "file=@vocals.wav" -o melody.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocals.wav","output_path":"out/melody.mid"}'
 
 # render the MIDI back to audio through a SoundFont
 curl -X POST http://localhost:8000/v1/midi/render \
-  -F "file=@melody.mid" -o rendered.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"out/melody.mid","output_path":"out/rendered.wav"}'
 
 # strip background noise from a voice recording
 curl -X POST http://localhost:8000/v1/audio/noise-reduce/uvr-denoise \
-  -F "file=@interview.wav" -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/interview.wav","output_path":"out/clean.wav"}'
 
 # who's speaking and when?
 curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
-  -F "file=@interview.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/interview.wav"}'
 # → {"num_speakers":2,"segments":[{"speaker":"SPEAKER_00","start_sec":0.5,"end_sec":8.2},...]}
 ```
 
@@ -225,65 +271,73 @@ Audio in. MIDI out. Chords detected. Speakers identified. De-noised. Re-synthesi
 
 ## What it can do
 
-Output defaults to `wav`. Pass `-F "output_format=mp3"` to get mp3 instead (`flac`, `opus`, `aac`, `pcm` also work).
+Output defaults to `wav`. Add `"output_format":"mp3"` to the JSON body to get mp3 instead (`flac`, `opus`, `aac`, `pcm` also work).
 
-**Input** — every audio endpoint accepts exactly one of:
+Every audio endpoint takes an `application/json` body. The only place multipart still lives is `PUT /v1/files/{path}` (raw bytes for staging an input file).
 
-- `file` — multipart upload (the default in the examples below)
-- `file_path` — path inside the `/v1/files` staging area
+**Input** — every audio endpoint requires exactly one of:
+
+- `file_path` — path inside the `/v1/files` staging area (stage with `PUT /v1/files/{path}` first)
 - `file_url` — remote URL the server fetches (disabled by default — see [Remote URLs](#remote-urls))
 
-**Output** — audio-producing endpoints also accept:
+**Output** — audio-producing endpoints require exactly one of:
 
-- `output_path` — server writes to `/v1/files/<path>`, returns JSON
-- `output_url` — server PUTs to a presigned URL, returns JSON
-- neither → raw audio bytes (the default)
+- `output_path` — server writes to `/v1/files/<path>`, returns JSON `{"path":..., "size":..., ...}`
+- `output_url` — server PUTs to a presigned URL, returns JSON `{"url":..., "size":..., ...}`
+
+Analysis-only endpoints (those that return JSON data, e.g. `/v1/audio/analyze`, `/v1/audio/loudness`, `/v1/audio/info`) don't need `output_path` / `output_url` — the response is the result.
 
 ### Split stems
 
 ```bash
+# stage input
+curl -X PUT --data-binary @track.wav \
+  -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/uploads/track.wav
+
 # vocals only
 curl -X POST http://localhost:8000/v1/audio/separate \
-  -F "file=@track.wav" \
-  -F "engine=htdemucs" \
-  -F "stems=vocals" \
-  -o vocals.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","engine":"htdemucs","stems":["vocals"],"output_path":"out/vocals.wav"}'
+curl -o vocals.wav http://localhost:8000/v1/files/out/vocals.wav
 
 # all 4 stems as a ZIP
 curl -X POST http://localhost:8000/v1/audio/separate \
-  -F "file=@track.wav" \
-  -F "engine=htdemucs" \
-  -o stems.zip
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","engine":"htdemucs","output_path":"out/stems.zip"}'
+curl -o stems.zip http://localhost:8000/v1/files/out/stems.zip
 ```
 
 ### Master
 
 ```bash
+# stage track + reference
+curl -X PUT --data-binary @track.wav -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/uploads/track.wav
+curl -X PUT --data-binary @ref.wav -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/uploads/ref.wav
+
 # match EQ + loudness to a reference track
 curl -X POST http://localhost:8000/v1/audio/master \
-  -F "file=@track.wav" \
-  -F "mode=reference" \
-  -F "reference=@ref.wav" \
-  -o mastered.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","mode":"reference","reference_path":"uploads/ref.wav","output_path":"out/mastered.wav"}'
+curl -o mastered.wav http://localhost:8000/v1/files/out/mastered.wav
 
 # run a built-in pedalboard chain (presets: transparent, loud)
 curl -X POST http://localhost:8000/v1/audio/master \
-  -F "file=@track.wav" \
-  -F "mode=chain" \
-  -F "preset=loud" \
-  -o mastered.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","mode":"chain","preset":"loud","output_path":"out/mastered.wav"}'
+curl -o mastered.wav http://localhost:8000/v1/files/out/mastered.wav
 ```
 
 ### Analyze
 
 ```bash
 # returns JSON. features: bpm, key, loudness, duration,
-# spectral_centroid, rms, zcr. Omit features= to get them all.
+# spectral_centroid, rms, zcr. Omit features to get them all.
 curl -X POST http://localhost:8000/v1/audio/analyze \
-  -F "file=@track.wav" \
-  -F "features=bpm" \
-  -F "features=key" \
-  -F "features=loudness"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","features":["bpm","key","loudness"]}'
 ```
 
 ### Beats, onsets, melody, segments
@@ -291,51 +345,48 @@ curl -X POST http://localhost:8000/v1/audio/analyze \
 ```bash
 # beat grid — returns bpm + beat timestamps
 curl -X POST http://localhost:8000/v1/audio/beats \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 
 # onset timestamps — note attacks, transients
 curl -X POST http://localhost:8000/v1/audio/onsets \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 
 # dominant melody contour — pitch in Hz per frame
 curl -X POST http://localhost:8000/v1/audio/melody \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 
 # structural segmentation — labels recurring sections A, B, C...
 curl -X POST http://localhost:8000/v1/audio/segments \
-  -F "file=@track.wav" \
-  -F "num_segments=4"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","num_segments":4}'
 ```
 
-Beat detection also generates a click-track file when `click_track=true` — handy for aligning a mix to a grid. Pass `start_bpm=140` to seed the tracker when you already know the rough tempo (faster, more accurate). Melody can be exported as a single-track MIDI file via `as_midi=true`.
+Beat detection also generates a click-track file when `click_track=true` (set `output_path` to receive it) — handy for aligning a mix to a grid. Pass `start_bpm=140` to seed the tracker when you already know the rough tempo (faster, more accurate). Melody can be exported as a single-track MIDI file via `as_midi=true` + `output_path`.
 
 ### Silence detection and trimming
 
 ```bash
-# find silent gaps in a recording
+# find silent gaps in a recording (no trim_mode → JSON only)
 curl -X POST http://localhost:8000/v1/audio/silence \
-  -F "file=@track.wav" \
-  -F "threshold_db=-30" \
-  -F "min_duration_sec=1.0"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","threshold_db":-30,"min_duration_sec":1.0}'
 
-# trim all silence and get a shorter file back
+# trim all silence and stage the result
 curl -X POST http://localhost:8000/v1/audio/silence \
-  -F "file=@track.wav" \
-  -F "threshold_db=-30" \
-  -F "min_duration_sec=0.5" \
-  -F "trim_mode=all" \
-  -o trimmed.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","threshold_db":-30,"min_duration_sec":0.5,"trim_mode":"all","output_path":"out/trimmed.wav"}'
+curl -o trimmed.wav http://localhost:8000/v1/files/out/trimmed.wav
 
-# trim only leading/trailing silence, write to staging
+# trim only leading/trailing silence
 curl -X POST http://localhost:8000/v1/audio/silence \
-  -F "file=@track.wav" \
-  -F "threshold_db=-40" \
-  -F "min_duration_sec=0.3" \
-  -F "trim_mode=edges" \
-  -F "output_path=processed/trimmed.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","threshold_db":-40,"min_duration_sec":0.3,"trim_mode":"edges","output_path":"processed/trimmed.wav"}'
 ```
 
-`trim_mode=edges` — chop leading + trailing silence only. `trim_mode=all` — remove every detected gap (compress a talk recording, tighten a loop). Without `trim_mode`, the response is JSON only: `silent_ranges`, `non_silent_ranges`, `duration`.
+`trim_mode=edges` — chop leading + trailing silence only. `trim_mode=all` — remove every detected gap (compress a talk recording, tighten a loop). Without `trim_mode`, the response is JSON only: `silent_ranges`, `non_silent_ranges`, `duration` — and `output_path` / `output_url` is not required.
 
 ### Visualize (spectrogram, waveform, video)
 
@@ -344,31 +395,26 @@ Visual output splits into two sub-namespaces by output type:
 ```bash
 # Static PNG spectrogram (color + scale params)
 curl -X POST http://localhost:8000/v1/audio/visualize/image/spectrogram \
-  -F "file=@track.wav" \
-  -F "width=1280" \
-  -F "height=720" \
-  -o spec.png
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","width":1280,"height":720,"output_path":"out/spec.png"}'
+curl -o spec.png http://localhost:8000/v1/files/out/spec.png
 
 # Static PNG waveform (color param)
 curl -X POST http://localhost:8000/v1/audio/visualize/image/waveform \
-  -F "file=@track.wav" \
-  -F "width=1280" \
-  -F "height=240" \
-  -o wave.png
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","width":1280,"height":240,"output_path":"out/wave.png"}'
+curl -o wave.png http://localhost:8000/v1/files/out/wave.png
 
 # Animated MP4 spectrum analyser (fps + container params)
 curl -X POST http://localhost:8000/v1/audio/visualize/video/spectrum \
-  -F "file=@track.wav" \
-  -F "width=1280" \
-  -F "height=720" \
-  -F "fps=30" \
-  -F "container=mp4" \
-  -o viz.mp4
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","width":1280,"height":720,"fps":30,"container":"mp4","output_path":"out/viz.mp4"}'
+curl -o viz.mp4 http://localhost:8000/v1/files/out/viz.mp4
 ```
 
-**`/image/spectrogram`**: returns `image/png`. Params: `width`, `height`, `color` (default `intensity`), `scale` (`log`/`lin`).
+**`/image/spectrogram`**: produces a PNG (staged via `output_path` or PUT to `output_url`). Params: `width`, `height`, `color` (default `intensity`), `scale` (`log`/`lin`).
 
-**`/image/waveform`**: returns `image/png`. Params: `width`, `height`, `color` (default `lime`).
+**`/image/waveform`**: produces a PNG. Params: `width`, `height`, `color` (default `lime`).
 
 **`/video/{mode}`**: `spectrum` (scrolling FFT), `waves` (oscilloscope), `cqt` (constant-Q transform), `freqs` (bar-graph analyzer), `volume` (VU meter), `vectorscope` (stereo X/Y scope), `phasemeter`, `histogram`. Params: `width`, `height`, `fps`, `container` (`mp4` default, `webm`).
 
@@ -377,13 +423,14 @@ curl -X POST http://localhost:8000/v1/audio/visualize/video/spectrum \
 ```bash
 # Chromaprint fingerprint — identifies a recording regardless of encoding
 curl -X POST http://localhost:8000/v1/audio/fingerprint \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 # → {"duration": 215.34, "fingerprint": "AQADtEqRRIuQ..."}
 
 # include the raw integer array (for custom similarity scoring)
 curl -X POST http://localhost:8000/v1/audio/fingerprint \
-  -F "file=@track.wav" \
-  -F "return_raw=true"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","return_raw":true}'
 ```
 
 The base64 fingerprint string is compatible with the [AcoustID](https://acoustid.org) lookup service.
@@ -395,23 +442,23 @@ AI audio restoration via UVR ecosystem models — BS-Roformer and MelBand Roform
 ```bash
 # Remove room reverb (BS-Roformer, SDR 19+)
 curl -X POST http://localhost:8000/v1/audio/restore/uvr-dereverb \
-  -F "file=@track.wav" \
-  -o dry.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","output_path":"out/dry.wav"}'
 
 # Remove echo — normal mode
 curl -X POST http://localhost:8000/v1/audio/restore/uvr-deecho \
-  -F "file=@track.wav" -o noecho.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","output_path":"out/noecho.wav"}'
 
 # Remove echo — aggressive mode (same engine, harder suppression)
 curl -X POST http://localhost:8000/v1/audio/restore/uvr-deecho \
-  -F "file=@track.wav" \
-  -F "aggressive=true" \
-  -o noecho.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","aggressive":true,"output_path":"out/noecho.wav"}'
 
 # Remove broadband background noise — ML (MelBand Roformer, SDR 28)
 curl -X POST http://localhost:8000/v1/audio/restore/uvr-denoise \
-  -F "file=@track.wav" \
-  -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","output_path":"out/clean.wav"}'
 ```
 
 All support `output_format`, `output_path`, `output_url`. For DSP-based noise reduction (no GPU) use `noise-reduce/noise-reduce`.
@@ -423,23 +470,21 @@ UVR engines also work through `/v1/audio/separate` — `uvr-vocal-bsr` (BS-Rofor
 Polyphonic audio-to-MIDI via Spotify's basic-pitch (ONNX backend, no TensorFlow). Play guitar, hum a melody, record a piano riff — get a MIDI file back with all the notes.
 
 ```bash
-# Any audio → MIDI bytes
+# Any audio → MIDI file (staged)
 curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
-  -F "file=@guitar_riff.wav" \
-  -o riff.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/guitar_riff.wav","output_path":"out/riff.mid"}'
+curl -o riff.mid http://localhost:8000/v1/files/out/riff.mid
 
 # Tune the detection thresholds
 curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
-  -F "file=@piano.wav" \
-  -F "onset_threshold=0.6" \
-  -F "frame_threshold=0.3" \
-  -F "minimum_note_length_ms=80" \
-  -o piano.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/piano.wav","onset_threshold":0.6,"frame_threshold":0.3,"minimum_note_length_ms":80,"output_path":"out/piano.mid"}'
 
-# Write directly to staging
+# Write directly to a different staging path
 curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
-  -F "file_path=recordings/bass.wav" \
-  -F "output_path=midi/bass_notes.mid"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"recordings/bass.wav","output_path":"midi/bass_notes.mid"}'
 # → {"path":"midi/bass_notes.mid","size":...,"engine":"basic-pitch","output_format":"mid"}
 ```
 
@@ -454,17 +499,67 @@ DeepFilterNet DF3 — deep learning noise suppression trained on speech. Better 
 ```bash
 # Enhance a vocal recording
 curl -X POST http://localhost:8000/v1/audio/enhance/deepfilter \
-  -F "file=@vocal_recording.wav" \
-  -o enhanced.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal_recording.wav","output_path":"out/enhanced.wav"}'
+curl -o enhanced.wav http://localhost:8000/v1/files/out/enhanced.wav
 
-# Stage the output, mp3
+# Stage the output as mp3
 curl -X POST http://localhost:8000/v1/audio/enhance/deepfilter \
-  -F "file_path=vocals/raw.wav" \
-  -F "output_format=mp3" \
-  -F "output_path=vocals/enhanced.mp3"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"vocals/raw.wav","output_format":"mp3","output_path":"vocals/enhanced.mp3"}'
 ```
 
 Supports `output_format`, `output_path`, `output_url`.
+
+### Generate music + SFX
+
+Text-to-audio generation under `POST /v1/audio/generate/{engine}`. v1.0.0 ships **five engines** spanning music + sound effects, with different licence / VRAM / sound profiles — all CUDA-only.
+
+```bash
+# Stable Audio Open 1.0 — 47s cap, no vocals, great for loops + SFX
+curl -X POST http://localhost:8000/v1/audio/generate/stable-audio-open \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"130 bpm tech house drum loop, punchy kick, crisp hats, no vocals","duration_sec":10,"seed":42,"output_path":"out/loop.wav"}'
+curl -o loop.wav http://localhost:8000/v1/files/out/loop.wav
+
+# MusicGen 300M — 30s cap, instrumental, CC-BY-NC (opt-in required)
+curl -X POST http://localhost:8000/v1/audio/generate/musicgen-small \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"lo-fi hip-hop beat with vinyl crackle, 90 bpm","duration_sec":15,"output_path":"out/beat.wav"}'
+
+# Riffusion — spectrogram-to-audio via Griffin-Lim, ~5s, lo-fi character
+curl -X POST http://localhost:8000/v1/audio/generate/riffusion \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"ambient drone with metallic resonance","output_path":"out/drone.wav"}'
+
+# AudioLDM 2 — general SFX (no opt-in gate, CC-BY 4.0 commercial-OK)
+curl -X POST http://localhost:8000/v1/audio/generate/audioldm2 \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"heavy rain on a metal roof with distant thunder","duration_sec":10,"num_inference_steps":50,"output_path":"out/rain.wav"}'
+```
+
+**Engine details:**
+
+| Engine | Licence | Max length | VRAM (fp16) | Output |
+|---|---|---|---|---|
+| `stable-audio-open` | **Stability Community Licence** (commercial OK below the revenue threshold) | 47 s hard cap | ~12 GB | 44.1 kHz stereo. Loops, SFX, ambient textures — instrumental only |
+| `musicgen-small` | **CC-BY-NC 4.0** (non-commercial only — opt-in via `AUDIOLLA_ENABLE_NONCOMMERCIAL=1`) | 30 s hard cap | ~3 GB | 32 kHz mono. Meta MusicGen 300M, instrumental |
+| `musicgen-medium` | **CC-BY-NC 4.0** (same opt-in) | 30 s hard cap | ~6-8 GB | 32 kHz mono. Higher quality than -small |
+| `riffusion` | **CreativeML OpenRAIL-M** (commercial OK with the licence's usage restrictions) | ~5 s per pass | ~3 GB | 22.05 kHz mono. SD-style spectrogram, Griffin-Lim reconstruction — lo-fi / loop-y character |
+| `audioldm2` | **CC-BY 4.0** (commercial use OK — no opt-in gate) | 30 s hard cap | ~8-10 GB (CPU offload) | 16 kHz mono. General SFX: ambience, foley, animal, mechanical, impact sounds. Slow (200-step DDIM default; pass `num_inference_steps=50` for ~4x speedup) |
+
+All engines support `async_job=true`, `webhook_url`, `output_path`, `output_url`, and `seed` for reproducibility. `stable-audio-open` and `audioldm2` additionally accept `num_inference_steps` (trade quality for speed). Model weights download on first call to `HF_HOME` (default `/data/hf` inside the container — ~7 GB across all five). Subsequent calls are inference-only. All five are flagged `cuda_only` — non-CUDA hosts get HTTP 400.
+
+**Licence opt-in for MusicGen.** MusicGen weights are CC-BY-NC 4.0. The engine code ships with the image but refuses to load the model unless the operator explicitly sets `AUDIOLLA_ENABLE_NONCOMMERCIAL=1` in the server's environment. Same pattern matchering (GPL v3) follows — licence-encumbered code in the image, conscious opt-in to actually use it. Read [the MusicGen weights licence](https://github.com/facebookresearch/audiocraft/blob/main/LICENSE_weights) before opting in. **AudioLDM 2 is CC-BY 4.0** (commercial use allowed, no opt-in gate) — it's the only generator in this set that's commercial-safe without flipping any flags.
+
+**Deferred to a future release** (researched but not shipped in v1.0.0):
+
+- **ACE-Step v1** (3.5B, Apache 2.0, full songs with vocals up to 4 min) — requires `AceStepPipeline` from `diffusers>=0.38`, which itself requires a pre-release `safetensors`. Doesn't pass the project's hash-locked supply-chain gate. Revisit when `safetensors 0.8.x` ships stable, or vendor ACE-Step's pipeline directly.
+- **DiffRhythm full v1.2** (Apache 2.0) — unpackaged research repo (no `setup.py` / PyPI release). Revisit when upstream ships a package or we vendor under `thirdparty/`.
+- **Stable Audio Open Small** (Stability Community Licence, 11 s SFX-specialist) — requires `stable-audio-tools` which pins `python >=3.10, <3.11`; audiolla is on Python 3.12, hard incompatibility. Revisit when `stable-audio-tools` widens the Python constraint or diffusers grows a pipeline for it.
+- **TangoFlux** (ICLR 2026, 44.1 kHz, 30 s, fast) — git-only install (no PyPI package). Could be SHA-pinned in the hash-locked supply chain; deferred for now to keep the heavy-deps stack PyPI-only.
+- **AudioGen** (Meta, CC-BY-NC) — `audiocraft==1.3.0` pins `transformers<=4.31.0`, hard conflict with audiolla's 4.51.3. Would require an isolated subprocess / sidecar container.
+- **YuE 7B** (Apache 2.0, full songs with vocals) — needs 16-24 GB VRAM at fp16, doesn't fit 12 GB GPUs without int4 quant tooling.
 
 ### Chord and key detection
 
@@ -472,7 +567,8 @@ Krumhansl-Schmuckler key estimation + chroma-template chord segmentation via lib
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/chords \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 # → {
 #     "key": "C major",
 #     "key_confidence": 0.87,
@@ -486,8 +582,8 @@ curl -X POST http://localhost:8000/v1/audio/chords \
 
 # Tune the hop length (lower = finer time resolution)
 curl -X POST http://localhost:8000/v1/audio/chords \
-  -F "file=@track.wav" \
-  -F "hop_length=256"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","hop_length":256}'
 ```
 
 Optional params: `hop_length` (default 512), `segment_min_duration_sec` (default 0.5 — merge very short chord segments).
@@ -498,7 +594,8 @@ silero-vad — ONNX-based VAD, fast and accurate on both speech and music. Retur
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/vad \
-  -F "file=@interview.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/interview.wav"}'
 # → {
 #     "speech_ratio": 0.73,
 #     "duration": 120.0,
@@ -515,10 +612,8 @@ curl -X POST http://localhost:8000/v1/audio/vad \
 
 # Tighter detection
 curl -X POST http://localhost:8000/v1/audio/vad \
-  -F "file=@podcast.wav" \
-  -F "threshold=0.7" \
-  -F "min_speech_duration_ms=300" \
-  -F "min_silence_duration_ms=200"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/podcast.wav","threshold":0.7,"min_speech_duration_ms":300,"min_silence_duration_ms":200}'
 ```
 
 Optional params: `threshold` (0–1, default 0.5), `min_speech_duration_ms` (default 250), `min_silence_duration_ms` (default 100).
@@ -539,7 +634,8 @@ docker run ... \
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
-  -F "file=@interview.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/interview.wav"}'
 # → {
 #     "num_speakers": 2,
 #     "speakers": ["SPEAKER_00", "SPEAKER_01"],
@@ -553,14 +649,13 @@ curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
 
 # Hint the expected speaker count
 curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
-  -F "file=@roundtable.wav" \
-  -F "num_speakers=4"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/roundtable.wav","num_speakers":4}'
 
 # Or constrain the range
 curl -X POST http://localhost:8000/v1/audio/diarize/pyannote \
-  -F "file=@panel.wav" \
-  -F "min_speakers=2" \
-  -F "max_speakers=6"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/panel.wav","min_speakers":2,"max_speakers":6}'
 ```
 
 Optional params: `num_speakers` (exact count hint), `min_speakers`, `max_speakers`.
@@ -572,10 +667,9 @@ Optional params: `num_speakers` (exact count hint), `min_speakers`, `max_speaker
 # operations is a JSON array — ops: gain, equalizer, compand, reverb,
 # pitch, tempo, rate, channels, trim, pad.
 curl -X POST http://localhost:8000/v1/audio/transform \
-  -F "file=@track.wav" \
-  -F 'operations=[{"op":"pitch","params":{"n_semitones":2}},{"op":"reverb","params":{"reverberance":50}}]' \
-  -F "output_format=mp3" \
-  -o out.mp3
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","operations":[{"op":"pitch","params":{"n_semitones":2}},{"op":"reverb","params":{"reverberance":50}}],"output_format":"mp3","output_path":"out/out.mp3"}'
+curl -o out.mp3 http://localhost:8000/v1/files/out/out.mp3
 ```
 
 ### Loudness measurement
@@ -583,7 +677,8 @@ curl -X POST http://localhost:8000/v1/audio/transform \
 ```bash
 # Measure integrated LUFS — returns JSON, no audio output
 curl -X POST http://localhost:8000/v1/audio/loudness \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 # → {"loudness_lufs": -18.4}
 ```
 
@@ -594,7 +689,8 @@ RMS envelope over time — returns a list of `{time_sec, rms_db}` points. Useful
 ```bash
 # Default hop (512 samples) — fine-grained envelope
 curl -X POST http://localhost:8000/v1/audio/loudness/curve \
-  -F "file=@track.wav" | jq '.curve[:5]'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}' | jq '.curve[:5]'
 # → [
 #     {"time_sec": 0.0,   "rms_db": -18.4},
 #     {"time_sec": 0.012, "rms_db": -17.9},
@@ -603,8 +699,8 @@ curl -X POST http://localhost:8000/v1/audio/loudness/curve \
 
 # Coarser envelope (2048-sample hop)
 curl -X POST http://localhost:8000/v1/audio/loudness/curve \
-  -F "file=@track.wav" \
-  -F "hop_length=2048" | jq '{duration, sample_rate, points}'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","hop_length":2048}' | jq '{duration, sample_rate, points}'
 ```
 
 Response fields: `curve` (array of `{time_sec, rms_db}`), `duration` (seconds), `sample_rate`, `points` (total curve length). Optional param: `hop_length` (default 512).
@@ -612,20 +708,19 @@ Response fields: `curve` (array of `{time_sec, rms_db}`), `duration` (seconds), 
 ### Loudness normalization
 
 ```bash
-# Normalize to -14 LUFS (streaming platform standard) — returns audio
+# Normalize to -14 LUFS (streaming platform standard)
 curl -X POST http://localhost:8000/v1/audio/normalize \
-  -F "file=@track.wav" \
-  -F "target_lufs=-14" \
-  -o normalized.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","target_lufs":-14,"output_path":"out/normalized.wav"}'
+curl -o normalized.wav http://localhost:8000/v1/files/out/normalized.wav
 
-# Write to staging, check measured LUFS from header
+# Write to a different staging path
 curl -X POST http://localhost:8000/v1/audio/normalize \
-  -F "file=@track.wav" \
-  -F "target_lufs=-23" \
-  -F "output_path=mastered/norm.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","target_lufs":-23,"output_path":"mastered/norm.wav"}'
 ```
 
-`target_lufs` is required. The response carries `X-Loudness-LUFS` with the measured pre-normalization level.
+`target_lufs` is required. The response JSON carries `loudness_lufs` with the measured pre-normalization level alongside `path` / `url` / `size`.
 
 ### HPSS (harmonic/percussive split)
 
@@ -634,20 +729,20 @@ Median-filter harmonic/percussive source separation via librosa. Harmonic = tona
 ```bash
 # Get both stems in a ZIP
 curl -X POST http://localhost:8000/v1/audio/separate/hpss \
-  -F "file=@track.wav" \
-  -o stems.zip
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","output_path":"out/stems.zip"}'
+curl -o stems.zip http://localhost:8000/v1/files/out/stems.zip
 # → stems.zip contains harmonic.wav + percussive.wav
 
 # Wider margin = harder separation (more aggressive)
 curl -X POST http://localhost:8000/v1/audio/separate/hpss \
-  -F "file=@track.wav" \
-  -F "margin=3.0" \
-  -o stems.zip
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","margin":3.0,"output_path":"out/stems.zip"}'
 
-# Output to staging
+# Output to a different staging path
 curl -X POST http://localhost:8000/v1/audio/separate/hpss \
-  -F "file=@track.wav" \
-  -F "output_path=hpss/stems.zip"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","output_path":"hpss/stems.zip"}'
 ```
 
 Params: `margin` (default 1.0 — ≥1.0, higher = more aggressive), `kernel_size` (default 31 — odd int, median filter width), `output_format` (default `wav`).
@@ -659,25 +754,23 @@ Noise reduction with two engine options under the same endpoint — pick DSP for
 ```bash
 # DSP (noisereduce) — no GPU, pure spectral subtraction + Wiener filtering
 curl -X POST http://localhost:8000/v1/audio/noise-reduce/noise-reduce \
-  -F "file=@recording.wav" \
-  -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav","output_path":"out/clean.wav"}'
 
 # Stationary mode — constant hum, hiss, fan noise
 curl -X POST http://localhost:8000/v1/audio/noise-reduce/noise-reduce \
-  -F "file=@recording.wav" \
-  -F "stationary=true" \
-  -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav","stationary":true,"output_path":"out/clean.wav"}'
 
 # Partial reduction — subtle noise floor cleanup
 curl -X POST http://localhost:8000/v1/audio/noise-reduce/noise-reduce \
-  -F "file=@recording.wav" \
-  -F "prop_decrease=0.5" \
-  -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav","prop_decrease":0.5,"output_path":"out/clean.wav"}'
 
 # ML (UVR MelBand Roformer, SDR 28) — higher quality, GPU-accelerated
 curl -X POST http://localhost:8000/v1/audio/noise-reduce/uvr-denoise \
-  -F "file=@recording.wav" \
-  -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav","output_path":"out/clean.wav"}'
 ```
 
 DSP params (only apply to `noise-reduce` engine): `stationary` (bool, default `false`), `prop_decrease` (0–1, default 1.0). Both engines accept `output_format`, `output_path`, `output_url`.
@@ -689,23 +782,18 @@ Independent tempo factor and semitone offset via librosa phase vocoder. Slow a t
 ```bash
 # Slow down to 80% speed, no pitch change
 curl -X POST http://localhost:8000/v1/audio/stretch \
-  -F "file=@track.wav" \
-  -F "tempo_factor=0.8" \
-  -o slow.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","tempo_factor":0.8,"output_path":"out/slow.wav"}'
 
 # Shift up 3 semitones, no tempo change
 curl -X POST http://localhost:8000/v1/audio/stretch \
-  -F "file=@vocal.wav" \
-  -F "pitch_semitones=3" \
-  -o pitched.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal.wav","pitch_semitones":3,"output_path":"out/pitched.wav"}'
 
 # Both — pitch-corrected time stretch (traditional chipmunk effect)
 curl -X POST http://localhost:8000/v1/audio/stretch \
-  -F "file=@track.wav" \
-  -F "tempo_factor=0.5" \
-  -F "pitch_semitones=6" \
-  -F "output_format=mp3" \
-  -o stretched.mp3
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","tempo_factor":0.5,"pitch_semitones":6,"output_format":"mp3","output_path":"out/stretched.mp3"}'
 ```
 
 Params: `tempo_factor` (default 1.0 — 0.5 = half speed), `pitch_semitones` (default 0.0 — ±semitones), `output_format`, `output_path`.
@@ -717,22 +805,18 @@ Auto-tune audio toward the nearest chromatic semitone using librosa's phase voco
 ```bash
 # Hard auto-tune — snap every note to the nearest semitone
 curl -X POST http://localhost:8000/v1/audio/pitch-correct \
-  -F "file=@vocal.wav" \
-  -o tuned.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal.wav","output_path":"out/tuned.wav"}'
 
 # Subtle correction — 50% blend
 curl -X POST http://localhost:8000/v1/audio/pitch-correct \
-  -F "file=@vocal.wav" \
-  -F "strength=0.5" \
-  -F "output_format=mp3" \
-  -o tuned.mp3
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal.wav","strength":0.5,"output_format":"mp3","output_path":"out/tuned.mp3"}'
 
 # Async for long files, staged output
 curl -X POST http://localhost:8000/v1/audio/pitch-correct \
-  -F "file_path=sessions/take1.wav" \
-  -F "strength=1.0" \
-  -F "async_job=true" \
-  -F "output_path=sessions/take1_tuned.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"sessions/take1.wav","strength":1.0,"async_job":true,"output_path":"sessions/take1_tuned.wav"}'
 ```
 
 Params: `strength` (0.0–1.0, default 1.0), `output_format`, `output_path`, `async_job`, `webhook_url`. Requires `librosa-analyze` engine.
@@ -744,25 +828,18 @@ Declip clipped peaks and/or remove power-line hum. Declipping uses cubic interpo
 ```bash
 # Declip only (default)
 curl -X POST http://localhost:8000/v1/audio/repair \
-  -F "file=@overdriven.wav" \
-  -o repaired.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/overdriven.wav","output_path":"out/repaired.wav"}'
 
 # Remove 60 Hz hum (North American power grid)
 curl -X POST http://localhost:8000/v1/audio/repair \
-  -F "file=@recording.wav" \
-  -F "declip=false" \
-  -F "dehum=true" \
-  -F "hum_freq=60.0" \
-  -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav","declip":false,"dehum":true,"hum_freq":60.0,"output_path":"out/clean.wav"}'
 
 # Both — declip a 50 Hz humming mic recording
 curl -X POST http://localhost:8000/v1/audio/repair \
-  -F "file=@problem_track.wav" \
-  -F "declip=true" \
-  -F "dehum=true" \
-  -F "hum_freq=50.0" \
-  -F "output_format=flac" \
-  -o repaired.flac
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/problem_track.wav","declip":true,"dehum":true,"hum_freq":50.0,"output_format":"flac","output_path":"out/repaired.flac"}'
 ```
 
 Params: `declip` (bool, default `true`), `dehum` (bool, default `false`), `hum_freq` (Hz, default 50.0), `output_format`, `output_path`, `async_job`, `webhook_url`.
@@ -773,7 +850,8 @@ Top-K AudioSet class label classification via Audio Spectrogram Transformer (MIT
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/tag \
-  -F "file=@recording.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav"}'
 # → {
 #     "tags": [
 #       {"label": "Music", "score": 0.94},
@@ -786,8 +864,8 @@ curl -X POST http://localhost:8000/v1/audio/tag \
 
 # Get top 20 results instead of the default 10
 curl -X POST http://localhost:8000/v1/audio/tag \
-  -F "file=@soundscape.wav" \
-  -F "top_k=20"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/soundscape.wav","top_k":20}'
 ```
 
 Requires the HF model cache. First run downloads the weights to `/data/hf/`. Optional: `top_k` (default 10).
@@ -801,13 +879,14 @@ Requires the HF model cache. First run downloads the weights to `/data/hf/`. Opt
 ```bash
 # Get the embedding vector
 curl -X POST http://localhost:8000/v1/audio/embed \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 # → {"embedding": [0.032, -0.11, ...], "dim": 512, "norm": 1.0}
 
 # Semantic similarity — how well does the audio match a text description?
 curl -X POST http://localhost:8000/v1/audio/embed \
-  -F "file=@track.wav" \
-  -F "query_text=energetic rock guitar riff"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","query_text":"energetic rock guitar riff"}'
 # → {"embedding": [...], "dim": 512, "norm": 1.0,
 #    "query_text": "energetic rock guitar riff", "similarity": 0.73}
 ```
@@ -821,8 +900,8 @@ Given audio and a list of free-form text labels, return cosine similarity scores
 ```bash
 # Genre detection
 curl -X POST http://localhost:8000/v1/audio/classify \
-  -F "file=@track.wav" \
-  -F 'labels=["jazz", "hip-hop", "classical", "electronic", "rock"]'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","labels":["jazz","hip-hop","classical","electronic","rock"]}'
 # → {"results": [
 #     {"label": "hip-hop", "score": 0.42},
 #     {"label": "electronic", "score": 0.38},
@@ -831,13 +910,13 @@ curl -X POST http://localhost:8000/v1/audio/classify \
 
 # Mood / energy
 curl -X POST http://localhost:8000/v1/audio/classify \
-  -F "file=@track.wav" \
-  -F 'labels=["energetic", "calm", "melancholic", "aggressive", "uplifting"]'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","labels":["energetic","calm","melancholic","aggressive","uplifting"]}'
 
 # Speaker gender
 curl -X POST http://localhost:8000/v1/audio/classify \
-  -F "file=@interview.wav" \
-  -F 'labels=["male voice", "female voice", "child voice", "multiple speakers"]'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/interview.wav","labels":["male voice","female voice","child voice","multiple speakers"]}'
 ```
 
 Results are sorted by descending score. Scores are cosine similarities in [-1, 1] — higher = more similar. Requires `clap-embed` model cache.
@@ -848,7 +927,8 @@ Probe any audio file for metadata without loading it into memory for processing.
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/info \
-  -F "file=@track.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}'
 # → {
 #     "size_bytes": 52428800,
 #     "duration_sec": 297.241,
@@ -861,9 +941,10 @@ curl -X POST http://localhost:8000/v1/audio/info \
 #     "bit_rate": 1411200
 #   }
 
-# Works on staged files too
+# Works on any staged file
 curl -X POST http://localhost:8000/v1/audio/info \
-  -F "file_path=recordings/interview.mp3"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"recordings/interview.mp3"}'
 # → {"codec": "mp3", "bit_rate": 192000, ...}
 ```
 
@@ -874,25 +955,18 @@ Cut a precise time range out of any audio file. Common use: extract a chorus, cl
 ```bash
 # Extract seconds 30–90 from a track
 curl -X POST http://localhost:8000/v1/audio/trim \
-  -F "file=@track.wav" \
-  -F "start_sec=30.0" \
-  -F "end_sec=90.0" \
-  -o chorus.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","start_sec":30.0,"end_sec":90.0,"output_path":"out/chorus.wav"}'
 
 # Clip a specific beat range, export as mp3
 curl -X POST http://localhost:8000/v1/audio/trim \
-  -F "file=@stem.wav" \
-  -F "start_sec=0.0" \
-  -F "end_sec=8.0" \
-  -F "output_format=mp3" \
-  -o loop.mp3
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/stem.wav","start_sec":0.0,"end_sec":8.0,"output_format":"mp3","output_path":"out/loop.mp3"}'
 
-# From staged file, write to staging
+# From staged file, write to a different staging path
 curl -X POST http://localhost:8000/v1/audio/trim \
-  -F "file_path=sessions/full.wav" \
-  -F "start_sec=120.5" \
-  -F "end_sec=180.0" \
-  -F "output_path=clips/verse.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"sessions/full.wav","start_sec":120.5,"end_sec":180.0,"output_path":"clips/verse.wav"}'
 ```
 
 `start_sec` defaults to 0. `end_sec` is required and must be greater than `start_sec`. Supports all standard `output_format` values.
@@ -904,23 +978,22 @@ Combine multiple staged or URL-accessible tracks into one. Per-track `gain_db` l
 ```bash
 # Mix drums and bass at equal levels
 curl -X POST http://localhost:8000/v1/audio/mix \
-  -F 'tracks=[{"file_path":"stems/drums.wav"},{"file_path":"stems/bass.wav"}]' \
-  -o rhythm.wav
+  -H 'Content-Type: application/json' \
+  -d '{"tracks":[{"file_path":"stems/drums.wav"},{"file_path":"stems/bass.wav"}],"output_path":"out/rhythm.wav"}'
 
 # Stems at custom levels (drums -3 dB, bass 0 dB, vocals +2 dB)
 curl -X POST http://localhost:8000/v1/audio/mix \
-  -F 'tracks=[
+  -H 'Content-Type: application/json' \
+  -d '{"tracks":[
     {"file_path":"stems/drums.wav","gain_db":-3},
     {"file_path":"stems/bass.wav","gain_db":0},
     {"file_path":"stems/vocals.wav","gain_db":2}
-  ]' \
-  -F "output_format=wav" \
-  -o custom_mix.wav
+  ],"output_format":"wav","output_path":"out/custom_mix.wav"}'
 
-# Write to staging
+# Write to a different staging path
 curl -X POST http://localhost:8000/v1/audio/mix \
-  -F 'tracks=[{"file_path":"stems/harmonic.wav"},{"file_path":"stems/percussive.wav","gain_db":-6}]' \
-  -F "output_path=mixed/recombined.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"tracks":[{"file_path":"stems/harmonic.wav"},{"file_path":"stems/percussive.wav","gain_db":-6}],"output_path":"mixed/recombined.wav"}'
 ```
 
 `tracks` is a required JSON array. Each entry needs `file_path` or `file_url` and an optional `gain_db` (default 0.0). Requires at least 2 tracks. Shorter tracks are padded with silence to match the longest.
@@ -931,14 +1004,13 @@ Stitch N audio files together in order. Handles different sample rates and chann
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/concat \
-  -F 'files=[{"file_path":"intro.wav"},{"file_path":"verse.wav"},{"file_path":"outro.wav"}]' \
-  -o full_track.wav
+  -H 'Content-Type: application/json' \
+  -d '{"files":[{"file_path":"intro.wav"},{"file_path":"verse.wav"},{"file_path":"outro.wav"}],"output_path":"out/full_track.wav"}'
 
-# output_format and staging also work
+# output_format change + different staging path
 curl -X POST http://localhost:8000/v1/audio/concat \
-  -F 'files=[{"file_path":"a.wav"},{"file_path":"b.wav"}]' \
-  -F "output_format=mp3" \
-  -F "output_path=concat/result.mp3"
+  -H 'Content-Type: application/json' \
+  -d '{"files":[{"file_path":"a.wav"},{"file_path":"b.wav"}],"output_format":"mp3","output_path":"concat/result.mp3"}'
 ```
 
 `files` is a required JSON array of `{file_path?, file_url?}` objects. Requires at least 2 entries.
@@ -950,15 +1022,18 @@ Change playback speed without pitch shifting — useful for auditioning at half/
 ```bash
 # Half speed
 curl -X POST http://localhost:8000/v1/audio/speed \
-  -F "file=@track.wav" -F "speed=0.5" -o slow.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","speed":0.5,"output_path":"out/slow.wav"}'
 
 # Double speed
 curl -X POST http://localhost:8000/v1/audio/speed \
-  -F "file=@track.wav" -F "speed=2.0" -o fast.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","speed":2.0,"output_path":"out/fast.wav"}'
 
 # 4× speed (chains two atempo=2.0 filters internally)
 curl -X POST http://localhost:8000/v1/audio/speed \
-  -F "file_path=track.wav" -F "speed=4.0" -F "output_format=mp3" -o fast.mp3
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","speed":4.0,"output_format":"mp3","output_path":"out/fast.mp3"}'
 ```
 
 `speed` is required. Range: 0.1–10.0. Note: this changes duration but not pitch. For pitch-preserving tempo changes use `/v1/audio/stretch`.
@@ -970,24 +1045,18 @@ Re-encode audio to a different format, sample rate, or channel count in a single
 ```bash
 # WAV → 16 kHz mono FLAC (for speech models)
 curl -X POST http://localhost:8000/v1/audio/convert \
-  -F "file=@recording.wav" \
-  -F "output_format=flac" \
-  -F "sample_rate=16000" \
-  -F "channels=1" \
-  -o prepared.flac
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav","output_format":"flac","sample_rate":16000,"channels":1,"output_path":"out/prepared.flac"}'
 
 # Stereo → mono WAV
 curl -X POST http://localhost:8000/v1/audio/convert \
-  -F "file_path=stereo.wav" \
-  -F "channels=1" \
-  -o mono.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"stereo.wav","channels":1,"output_path":"out/mono.wav"}'
 
 # Any format → Opus at 48 kHz
 curl -X POST http://localhost:8000/v1/audio/convert \
-  -F "file=@audio.mp3" \
-  -F "output_format=opus" \
-  -F "sample_rate=48000" \
-  -o out.opus
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/audio.mp3","output_format":"opus","sample_rate":48000,"output_path":"out/out.opus"}'
 ```
 
 `output_format` defaults to `wav`. `sample_rate` and `channels` are optional; if omitted, the source values are preserved.
@@ -998,17 +1067,17 @@ Compute cosine similarity between two audio files using CLAP embeddings. Returns
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/similar \
-  -F "file=@original.wav" \
-  -F "reference_file=@remix.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/original.wav","reference_file_path":"uploads/remix.wav"}'
 # → {"similarity": 0.847, "dim": 512}
 
-# Using staged files
+# Different staged paths
 curl -X POST http://localhost:8000/v1/audio/similar \
-  -F "file_path=stems/vocals.wav" \
-  -F "reference_file_path=stems/vocals_ref.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"stems/vocals.wav","reference_file_path":"stems/vocals_ref.wav"}'
 ```
 
-Primary file: `file` / `file_path` / `file_url`. Reference file: `reference_file` / `reference_file_path` / `reference_file_url`. Requires `clap-embed` engine.
+Primary file: `file_path` / `file_url`. Reference file: `reference_file_path` / `reference_file_url`. Requires `clap-embed` engine.
 
 ### MIDI quantize
 
@@ -1017,15 +1086,13 @@ Snap all note timings in a MIDI file to the nearest rhythmic grid. Cleaner dedic
 ```bash
 # Quantize to 16th notes (0.25 beats)
 curl -X POST http://localhost:8000/v1/midi/quantize \
-  -F "file=@sloppy.mid" \
-  -F "grid_beats=0.25" \
-  -o tight.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/sloppy.mid","grid_beats":0.25,"output_path":"out/tight.mid"}'
 
 # 8th note grid
 curl -X POST http://localhost:8000/v1/midi/quantize \
-  -F "file_path=recorded.mid" \
-  -F "grid_beats=0.5" \
-  -F "output_path=midi/quantized.mid"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"recorded.mid","grid_beats":0.5,"output_path":"midi/quantized.mid"}'
 ```
 
 `grid_beats`: grid size in beats — `0.25` = 16th note, `0.5` = 8th, `1.0` = quarter note. Default: `0.25`.
@@ -1037,15 +1104,18 @@ Apply fade-in, fade-out, or both. 13 curve shapes: `tri`, `qsin`, `esin`, `hsin`
 ```bash
 # 2s fade-in
 curl -X POST http://localhost:8000/v1/audio/fade \
-  -F "file=@track.wav" -F "fade_in=2.0" -o faded.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","fade_in":2.0,"output_path":"out/faded.wav"}'
 
 # 3s fade-out with exponential curve
 curl -X POST http://localhost:8000/v1/audio/fade \
-  -F "file=@track.wav" -F "fade_out=3.0" -F "curve=exp" -o faded.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","fade_out":3.0,"curve":"exp","output_path":"out/faded.wav"}'
 
 # Both — 1s in, 2s out
 curl -X POST http://localhost:8000/v1/audio/fade \
-  -F "file=@track.wav" -F "fade_in=1.0" -F "fade_out=2.0" -o faded.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","fade_in":1.0,"fade_out":2.0,"output_path":"out/faded.wav"}'
 ```
 
 At least one of `fade_in` / `fade_out` must be > 0.
@@ -1056,10 +1126,12 @@ Flip audio backwards via ffmpeg `areverse`.
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/reverse \
-  -F "file=@sample.wav" -o reversed.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/sample.wav","output_path":"out/reversed.wav"}'
 
 curl -X POST http://localhost:8000/v1/audio/reverse \
-  -F "file_path=stems/vocals.wav" -F "output_format=mp3" -o reversed.mp3
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"stems/vocals.wav","output_format":"mp3","output_path":"out/reversed.mp3"}'
 ```
 
 ### Loop
@@ -1069,11 +1141,13 @@ Repeat audio N times. Uses ffmpeg `aloop` filter — no re-encoding overhead per
 ```bash
 # Play 4 times total
 curl -X POST http://localhost:8000/v1/audio/loop \
-  -F "file=@beat.wav" -F "count=4" -o looped.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/beat.wav","count":4,"output_path":"out/looped.wav"}'
 
 # 8-bar loop → 32 bars
 curl -X POST http://localhost:8000/v1/audio/loop \
-  -F "file_path=stems/drums.wav" -F "count=4" -F "output_path=loops/drums32.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"stems/drums.wav","count":4,"output_path":"loops/drums32.wav"}'
 ```
 
 `count` must be ≥ 2 (total plays, not extra loops).
@@ -1085,17 +1159,16 @@ Detect the source BPM via librosa, then time-stretch to the target — no manual
 ```bash
 # Stretch anything to 128 BPM
 curl -X POST http://localhost:8000/v1/audio/bpm-match \
-  -F "file=@loop.wav" -F "target_bpm=128" -o matched.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/loop.wav","target_bpm":128,"output_path":"out/matched.wav"}'
 
 # Match tempo and also shift pitch
 curl -X POST http://localhost:8000/v1/audio/bpm-match \
-  -F "file=@loop.wav" \
-  -F "target_bpm=140" \
-  -F "pitch_semitones=2" \
-  -o matched.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/loop.wav","target_bpm":140,"pitch_semitones":2,"output_path":"out/matched.wav"}'
 ```
 
-Response includes `X-Source-BPM`, `X-Target-BPM`, and `X-Tempo-Factor` headers (also in JSON when `output_path` is used). Requires both `librosa-analyze` and `stretch` engines.
+Response JSON includes `source_bpm`, `target_bpm`, and `tempo_factor` alongside the staged `path` / `url`. Requires both `librosa-analyze` and `stretch` engines.
 
 ### Stereo width
 
@@ -1104,15 +1177,18 @@ Widen or collapse the stereo image via M/S processing. `width=0.0` → mono, `1.
 ```bash
 # Widen to 1.5×
 curl -X POST http://localhost:8000/v1/audio/stereo-width \
-  -F "file=@mix.wav" -F "width=1.5" -o wide.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/mix.wav","width":1.5,"output_path":"out/wide.wav"}'
 
 # Collapse to mono
 curl -X POST http://localhost:8000/v1/audio/stereo-width \
-  -F "file=@mix.wav" -F "width=0.0" -o mono.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/mix.wav","width":0.0,"output_path":"out/mono.wav"}'
 
 # Subtle narrowing for mix bus
 curl -X POST http://localhost:8000/v1/audio/stereo-width \
-  -F "file_path=master/mix.wav" -F "width=0.8" -F "output_path=master/narrow.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"master/mix.wav","width":0.8,"output_path":"master/narrow.wav"}'
 ```
 
 Range: `[0.0, 3.0]`.
@@ -1124,19 +1200,18 @@ Split a file into segments. Two modes: `equal` (N equal time parts) or `silence`
 ```bash
 # Split into 4 equal parts
 curl -X POST http://localhost:8000/v1/audio/split \
-  -F "file=@track.wav" -F "mode=equal" -F "count=4" -o segments.zip
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","mode":"equal","count":4,"output_path":"out/segments.zip"}'
 
 # Split a DJ mix on silence
 curl -X POST http://localhost:8000/v1/audio/split \
-  -F "file=@djmix.wav" \
-  -F "mode=silence" \
-  -F "threshold_db=-40" \
-  -F "min_duration_sec=1.0" \
-  -o tracks.zip
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/djmix.wav","mode":"silence","threshold_db":-40,"min_duration_sec":1.0,"output_path":"out/tracks.zip"}'
 
 # Split to mp3
 curl -X POST http://localhost:8000/v1/audio/split \
-  -F "file=@album.flac" -F "mode=equal" -F "count=10" -F "output_format=mp3" -o parts.zip
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/album.flac","mode":"equal","count":10,"output_format":"mp3","output_path":"out/parts.zip"}'
 ```
 
 `mode=equal` requires `count >= 2`. `mode=silence` uses `threshold_db` (default -30) and `min_duration_sec` (default 0.5); requires the `silence-detect` engine.
@@ -1148,15 +1223,18 @@ Position audio in the stereo field. Works on mono and stereo input.
 ```bash
 # Hard left
 curl -X POST http://localhost:8000/v1/audio/pan \
-  -F "file=@vocal.wav" -F "position=-1.0" -o left.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal.wav","position":-1.0,"output_path":"out/left.wav"}'
 
 # Slight right (e.g. guitar in mix)
 curl -X POST http://localhost:8000/v1/audio/pan \
-  -F "file_path=stems/guitar.wav" -F "position=0.4" -o guitar_panned.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"stems/guitar.wav","position":0.4,"output_path":"out/guitar_panned.wav"}'
 
 # Center (no-op but valid)
 curl -X POST http://localhost:8000/v1/audio/pan \
-  -F "file=@mono.wav" -F "position=0.0" -o stereo.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/mono.wav","position":0.0,"output_path":"out/stereo.wav"}'
 ```
 
 `position`: -1.0 = hard left, 0.0 = center, 1.0 = hard right.
@@ -1168,15 +1246,13 @@ Parametric EQ via ffmpeg `equalizer` filter. Pass any number of bands — each w
 ```bash
 # Low-cut + presence boost
 curl -X POST http://localhost:8000/v1/audio/eq \
-  -F "file=@vocal.wav" \
-  -F 'bands=[{"freq":100,"gain_db":-6,"width_hz":80},{"freq":3000,"gain_db":3,"width_hz":500}]' \
-  -o eq.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal.wav","bands":[{"freq":100,"gain_db":-6,"width_hz":80},{"freq":3000,"gain_db":3,"width_hz":500}],"output_path":"out/eq.wav"}'
 
 # Single band: cut 60 Hz hum
 curl -X POST http://localhost:8000/v1/audio/eq \
-  -F "file=@recording.wav" \
-  -F 'bands=[{"freq":60,"gain_db":-20,"width_hz":30}]' \
-  -o clean.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/recording.wav","bands":[{"freq":60,"gain_db":-20,"width_hz":30}],"output_path":"out/clean.wav"}'
 ```
 
 Each band: `freq` (Hz, required), `gain_db` (dB, required, range ±30), `width_hz` (optional, default 100).
@@ -1188,13 +1264,13 @@ Detect the source key via CLAP chord analysis, then pitch-shift to a target key 
 ```bash
 # Shift everything to C major
 curl -X POST http://localhost:8000/v1/audio/key-match \
-  -F "file=@loop.wav" -F "target_key=C" -o matched.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/loop.wav","target_key":"C","output_path":"out/matched.wav"}'
 
 # Match to F# (response includes source_key + semitones shifted)
 curl -X POST http://localhost:8000/v1/audio/key-match \
-  -F "file_path=stems/melody.wav" \
-  -F "target_key=F#" \
-  -F "output_path=matched/melody_fsharp.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"stems/melody.wav","target_key":"F#","output_path":"matched/melody_fsharp.wav"}'
 ```
 
 `target_key`: root note, e.g. `C`, `F#`, `Bb`, `D#`. Mode suffix (`major`/`minor`/`m`) is ignored — only the root matters for pitch. Requires `chord-detect` and `stretch` engines.
@@ -1204,23 +1280,16 @@ curl -X POST http://localhost:8000/v1/audio/key-match \
 Duck a primary track (music) whenever a trigger track (voice) is loud — the classic voiceover-over-music effect. Pure ffmpeg `sidechaincompress`, no model required.
 
 ```bash
+# stage music + voice first via PUT /v1/files/...
+
 curl -X POST http://localhost:8000/v1/audio/sidechain-duck \
-  -F "file=@music.wav" \
-  -F "trigger_file=@voice.wav" \
-  -F "threshold_db=-20" \
-  -F "ratio=4" \
-  -F "attack_ms=10" \
-  -F "release_ms=200" \
-  -o ducked.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/music.wav","trigger_file_path":"uploads/voice.wav","threshold_db":-20,"ratio":4,"attack_ms":10,"release_ms":200,"output_path":"out/ducked.wav"}'
 
 # Aggressive duck for podcast-style music bed
 curl -X POST http://localhost:8000/v1/audio/sidechain-duck \
-  -F "file_path=music/bed.wav" \
-  -F "trigger_file_path=voice/narration.wav" \
-  -F "threshold_db=-30" \
-  -F "ratio=10" \
-  -F "release_ms=400" \
-  -o "output_path=final/mix.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"music/bed.wav","trigger_file_path":"voice/narration.wav","threshold_db":-30,"ratio":10,"release_ms":400,"output_path":"final/mix.wav"}'
 ```
 
 Primary track is compressed whenever the trigger exceeds `threshold_db`. `ratio` sets compression intensity. Files must be the same duration for best results; shorter trigger is padded with silence.
@@ -1232,13 +1301,12 @@ Apply an ordered chain of pedalboard effects — full catalog, you pick the orde
 ```bash
 # Compress, then add reverb, then drop -3 dB
 curl -X POST http://localhost:8000/v1/audio/fx \
-  -F "file=@track.wav" \
-  -F 'effects=[
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","effects":[
     {"type":"Compressor","params":{"threshold_db":-18,"ratio":4.0}},
     {"type":"Reverb","params":{"room_size":0.5,"wet_level":0.3}},
     {"type":"Gain","params":{"gain_db":-3.0}}
-  ]' \
-  -o out.wav
+  ],"output_path":"out/out.wav"}'
 ```
 
 Allowed effects: `Compressor`, `Limiter`, `NoiseGate`, `Gain`, `Clipping`, `Distortion`, `Bitcrush`, `Reverb`, `Chorus`, `Delay`, `Phaser`, `PitchShift`, `HighShelfFilter`, `LowShelfFilter`, `PeakFilter`, `HighpassFilter`, `LowpassFilter`, `LadderFilter`, `IIRFilter`, `GSMFullRateCompressor`, `MP3Compressor`, `Resample`, `Invert`, `Convolution`.
@@ -1252,15 +1320,15 @@ Find the best seamless loop boundary in an audio file — audiolla analyses the 
 ```bash
 # Find best loop boundary (default: minimum 4 bars)
 curl -X POST http://localhost:8000/v1/audio/loop-point \
-  -F "file=@beat.wav" | jq '{loop_start_sec, loop_end_sec, bars, score, tempo_bpm}'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/beat.wav"}' | jq '{loop_start_sec, loop_end_sec, bars, score, tempo_bpm}'
 # → {"loop_start_sec": 0.0, "loop_end_sec": 7.44, "bars": 4,
 #    "score": 0.94, "tempo_bpm": 128.0, "candidates": [...]}
 
 # Require at least 8 bars, return top 3 candidates
 curl -X POST http://localhost:8000/v1/audio/loop-point \
-  -F "file=@long_track.wav" \
-  -F "min_loop_bars=8" \
-  -F "num_candidates=3"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/long_track.wav","min_loop_bars":8,"num_candidates":3}'
 ```
 
 Response fields: `loop_start_sec`, `loop_end_sec`, `bars`, `score` (0–1, higher = tighter loop), `tempo_bpm`, `candidates` (array of ranked alternatives). Optional params: `min_loop_bars` (default 4), `num_candidates` (default 5). Requires `librosa-analyze` engine.
@@ -1288,12 +1356,13 @@ curl -X POST http://localhost:8000/v1/midi/compose \
         {"pitch":36,"start_beats":2.0,"duration_beats":0.1,"velocity":110},
         {"pitch":36,"start_beats":3.0,"duration_beats":0.1,"velocity":110}
       ]}
-    ]
-  }' \
-  -o song.mid
+    ],
+    "output_path": "midi/song.mid"
+  }'
+curl -o song.mid http://localhost:8000/v1/files/midi/song.mid
 
-# Stage the MIDI for later via query-string output_path
-curl -X POST 'http://localhost:8000/v1/midi/compose?output_path=midi/song.mid' \
+# Use a JSON spec file (must include output_path / output_url in the body)
+curl -X POST http://localhost:8000/v1/midi/compose \
   -H 'Content-Type: application/json' \
   -d @spec.json
 ```
@@ -1305,7 +1374,8 @@ Spec fields: `tempo_bpm` (default 120), `time_signature` (default `[4,4]`), `key
 ```bash
 # read the structure of any Standard MIDI File
 curl -X POST http://localhost:8000/v1/midi/inspect \
-  -F "file=@song.mid"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid"}'
 # → {type, ticks_per_beat, tempo_changes, time_signatures,
 #    tracks[{name, note_on_count, channels, programs, length_beats}], ...}
 ```
@@ -1315,64 +1385,60 @@ curl -X POST http://localhost:8000/v1/midi/inspect \
 ```bash
 # transpose all non-drum tracks up an octave
 curl -X POST http://localhost:8000/v1/midi/transform \
-  -F "file=@song.mid" \
-  -F "transpose_semitones=12" \
-  -o transposed.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid","transpose_semitones":12,"output_path":"midi/transposed.mid"}'
 
 # override tempo to 140 BPM and save to staging
 curl -X POST http://localhost:8000/v1/midi/transform \
-  -F "file=@song.mid" \
-  -F "tempo_bpm=140" \
-  -F "output_path=midi/fast.mid"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid","tempo_bpm":140,"output_path":"midi/fast.mid"}'
 
 # drop the drum track (channel 9)
 curl -X POST http://localhost:8000/v1/midi/transform \
-  -F "file=@song.mid" \
-  -F "drop_channels=9" \
-  -o no-drums.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid","drop_channels":[9],"output_path":"midi/no-drums.mid"}'
 
-# keep only channels 0 and 1 (comma-separated)
+# keep only channels 0 and 1
 curl -X POST http://localhost:8000/v1/midi/transform \
-  -F "file=@song.mid" \
-  -F "keep_channels=0,1" \
-  -o two-ch.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid","keep_channels":[0,1],"output_path":"midi/two-ch.mid"}'
 
 # quantize to 1/16th notes
 curl -X POST http://localhost:8000/v1/midi/transform \
-  -F "file=@song.mid" \
-  -F "quantize_grid_beats=0.25" \
-  -o quantized.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid","quantize_grid_beats":0.25,"output_path":"midi/quantized.mid"}'
 ```
 
-`transpose_semitones` ±48. `quantize_grid_beats` is in beats (0.25 = 1/16th at 4/4). `keep_channels` and `drop_channels` take comma-separated channel numbers (`0,1,2`); only one can be set per request.
+`transpose_semitones` ±48. `quantize_grid_beats` is in beats (0.25 = 1/16th at 4/4). `keep_channels` and `drop_channels` take a JSON array of channel numbers; only one can be set per request.
 
 ### Render MIDI to audio
 
 ```bash
 # Synthesise via the bundled FluidR3_GM SoundFont
 curl -X POST http://localhost:8000/v1/midi/render \
-  -F "file=@song.mid" \
-  -F "output_format=wav" \
-  -o song.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid","output_format":"wav","output_path":"out/song.wav"}'
+curl -o song.wav http://localhost:8000/v1/files/out/song.wav
 
 # Use your own SoundFont (must be staged first)
-curl -X PUT http://localhost:8000/v1/files/sf/orchestral.sf2 --data-binary @my.sf2
+curl -X PUT --data-binary @my.sf2 \
+  -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/sf/orchestral.sf2
 curl -X POST http://localhost:8000/v1/midi/render \
-  -F "file=@song.mid" \
-  -F "soundfont_path=sf/orchestral.sf2" \
-  -F "output_format=flac" \
-  -o orch.flac
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/song.mid","soundfont_path":"sf/orchestral.sf2","output_format":"flac","output_path":"out/orch.flac"}'
 ```
 
 ### Generate music from a spec
 
-Compose + render in one call — spec in, WAV out.
+Compose + render in one call — spec in, audio file staged.
 
 ```bash
-curl -X POST 'http://localhost:8000/v1/midi/generate?output_format=wav' \
+# spec.json must include "output_path" or "output_url" alongside the composition fields
+curl -X POST http://localhost:8000/v1/midi/generate \
   -H 'Content-Type: application/json' \
-  -d @spec.json \
-  -o song.wav
+  -d @spec.json
+curl -o song.wav http://localhost:8000/v1/files/out/song.wav
 ```
 
 ### Drum pattern
@@ -1392,9 +1458,10 @@ curl -X POST http://localhost:8000/v1/midi/drum \
       "kick":  [1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0],
       "snare": [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
       "hihat": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
-    }
-  }' \
-  -o beat.mid
+    },
+    "output_path": "midi/beat.mid"
+  }'
+curl -o beat.mid http://localhost:8000/v1/files/midi/beat.mid
 
 # Swing groove — 0.1 = subtle, 0.5 = strong shuffle
 curl -X POST http://localhost:8000/v1/midi/drum \
@@ -1408,9 +1475,9 @@ curl -X POST http://localhost:8000/v1/midi/drum \
       "kick":  [1,0,0,1,0,0,1,0,1,0,0,1,0,0,1,0],
       "snare": [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
       "hihat": [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0]
-    }
-  }' \
-  -o groove.mid
+    },
+    "output_path": "midi/groove.mid"
+  }'
 ```
 
 Body fields: `tempo_bpm` (default 120), `steps` (steps per bar, default 16), `bars` (default 1), `swing` (0.0–0.5, default 0.0), `pattern` (object — keys are drum voice names, values are arrays of 0/1). Supported voices: `kick`, `snare`, `hihat`, `open_hihat`, `ride`, `crash`, `clap`, `tom_hi`, `tom_mid`, `tom_low`, `rim`, `cowbell`. Requires `midi-compose` engine.
@@ -1422,21 +1489,18 @@ Detect the chord progression from an audio file and convert each segment to a MI
 ```bash
 # Audio → chord MIDI at the detected tempo
 curl -X POST http://localhost:8000/v1/audio/chords-to-midi \
-  -F "file=@track.wav" \
-  -o chords.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav","output_path":"out/chords.mid"}'
 
 # Override tempo, set velocity and octave
 curl -X POST http://localhost:8000/v1/audio/chords-to-midi \
-  -F "file=@song.wav" \
-  -F "tempo_bpm=120" \
-  -F "velocity=90" \
-  -F "octave=3" \
-  -o chords.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/song.wav","tempo_bpm":120,"velocity":90,"octave":3,"output_path":"out/chords.mid"}'
 
-# Stage the output
+# Stage the output under a different path
 curl -X POST http://localhost:8000/v1/audio/chords-to-midi \
-  -F "file_path=sessions/song.wav" \
-  -F "output_path=midi/song_chords.mid"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"sessions/song.wav","output_path":"midi/song_chords.mid"}'
 ```
 
 Optional params: `tempo_bpm` (default: detected from audio), `velocity` (1–127, default 80), `octave` (0–8, default 4), `output_path`. Requires `chord-detect` engine. Each chord segment becomes a MIDI chord event (root + major 3rd/minor 3rd + perfect 5th, duration = segment length).
@@ -1448,12 +1512,13 @@ Read and write ID3 (MP3), Vorbis (OGG/FLAC), and WAV/M4A tags via mutagen. Requi
 ```bash
 # Read tags
 curl -X POST http://localhost:8000/v1/audio/metadata \
-  -F "file=@track.mp3" | jq '{title, artist, bpm, key, duration_sec}'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.mp3"}' | jq '{title, artist, bpm, key, duration_sec}'
 
 # Write tags — returns updated tag set
 curl -X POST http://localhost:8000/v1/audio/metadata \
-  -F "file=@track.mp3" \
-  -F 'tags={"title":"My Track","artist":"DJ Audiolla","bpm":"128","year":"2026"}'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.mp3","tags":{"title":"My Track","artist":"DJ Audiolla","bpm":"128","year":"2026"}}'
 ```
 
 ### Clip detection
@@ -1462,7 +1527,8 @@ Detect digital clipping. No engine required — pure numpy arithmetic.
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/clip-detect \
-  -F "file=@loud_master.wav" | jq '{clipped, clip_count, clip_ratio, peak_db}'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/loud_master.wav"}' | jq '{clipped, clip_count, clip_ratio, peak_db}'
 # → {"clipped":true,"clip_count":4219,"clip_ratio":0.0048,"peak_db":0.0}
 ```
 
@@ -1473,15 +1539,13 @@ Encode L/R stereo to Mid+Side or decode back. Useful for stereo width surgery wi
 ```bash
 # Encode L/R → M/S
 curl -X POST http://localhost:8000/v1/audio/mid-side \
-  -F "file=@stereo.wav" \
-  -F "mode=encode" \
-  -o ms_encoded.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/stereo.wav","mode":"encode","output_path":"out/ms_encoded.wav"}'
 
 # Decode back to L/R
 curl -X POST http://localhost:8000/v1/audio/mid-side \
-  -F "file=@ms_encoded.wav" \
-  -F "mode=decode" \
-  -o restored.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"out/ms_encoded.wav","mode":"decode","output_path":"out/restored.wav"}'
 ```
 
 ### Beat slice
@@ -1490,15 +1554,15 @@ Detect beat positions with librosa and return a ZIP of numbered WAV/MP3 slices �
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/beat-slice \
-  -F "file=@loop.wav" \
-  -F "output_format=wav" \
-  -o slices.zip
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/loop.wav","output_format":"wav","output_path":"out/slices.zip"}'
+curl -o slices.zip http://localhost:8000/v1/files/out/slices.zip
 # → slices.zip: beat_001.wav, beat_002.wav, beat_003.wav …
 
-# With output_path: stages the ZIP and returns JSON
+# Stage the ZIP at a different path
 curl -X POST http://localhost:8000/v1/audio/beat-slice \
-  -F "file=@loop.wav" \
-  -F "output_path=beats/loop_slices.zip"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/loop.wav","output_path":"beats/loop_slices.zip"}'
 # → {"path":"beats/loop_slices.zip","beat_count":32,...}
 ```
 
@@ -1508,15 +1572,14 @@ Apply an impulse response (IR) to audio via pedalboard's `Convolution`. Any WAV 
 
 ```bash
 # Upload your IR first
-curl -X PUT http://localhost:8000/v1/files/ir/plate.wav --data-binary @plate_reverb.wav
+curl -X PUT --data-binary @plate_reverb.wav \
+  -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/ir/plate.wav
 
 # Apply — wet_mix: 0.0=dry only, 1.0=wet only
 curl -X POST http://localhost:8000/v1/audio/conv-reverb \
-  -F "file=@dry_vocal.wav" \
-  -F "ir_file_path=ir/plate.wav" \
-  -F "wet_mix=0.25" \
-  -F "output_format=wav" \
-  -o reverbed.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/dry_vocal.wav","ir_file_path":"ir/plate.wav","wet_mix":0.25,"output_format":"wav","output_path":"out/reverbed.wav"}'
 ```
 
 ### Transient shaper
@@ -1526,17 +1589,13 @@ Attack/sustain dual-compressor blending. Positive `attack_gain_db` makes drums p
 ```bash
 # Punchy drums: boost attack, cut sustain
 curl -X POST http://localhost:8000/v1/audio/transient \
-  -F "file=@drums.wav" \
-  -F "attack_gain_db=6" \
-  -F "sustain_gain_db=-4" \
-  -o punchy_drums.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/drums.wav","attack_gain_db":6,"sustain_gain_db":-4,"output_path":"out/punchy_drums.wav"}'
 
 # Soft attack (pad-like)
 curl -X POST http://localhost:8000/v1/audio/transient \
-  -F "file=@synth.wav" \
-  -F "attack_gain_db=-6" \
-  -F "sustain_gain_db=0" \
-  -o softened.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/synth.wav","attack_gain_db":-6,"sustain_gain_db":0,"output_path":"out/softened.wav"}'
 ```
 
 ### Multiband compression
@@ -1546,14 +1605,12 @@ Split the signal into N+1 frequency bands and compress each one independently. B
 ```bash
 # 3-band mastering pass: low/mid/high
 curl -X POST http://localhost:8000/v1/audio/multiband-compress \
-  -F "file=@mixdown.wav" \
-  -F 'crossovers_hz=[200, 3000]' \
-  -F 'bands=[
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/mixdown.wav","crossovers_hz":[200,3000],"bands":[
     {"threshold_db":-18,"ratio":4,"attack_ms":15,"release_ms":150,"makeup_db":1.5},
     {"threshold_db":-14,"ratio":3,"attack_ms":8, "release_ms":80, "makeup_db":1.0},
     {"threshold_db":-10,"ratio":2,"attack_ms":3, "release_ms":40, "makeup_db":0.5}
-  ]' \
-  -o mastered.wav
+  ],"output_path":"out/mastered.wav"}'
 ```
 
 `crossovers_hz` length is N, `bands` length is N+1. Each band: required `threshold_db` + `ratio`, optional `attack_ms` (default 10), `release_ms` (default 100), `makeup_db` (default 0).
@@ -1564,7 +1621,8 @@ One call returns everything a DJ needs about a track. Requires `librosa-analyze`
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/dj-prep \
-  -F "file=@track.wav" | jq .
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/track.wav"}' | jq .
 # → {"bpm":128.0,"key":"A minor","camelot":"8A","integrated_lufs":-9.4}
 ```
 
@@ -1577,21 +1635,18 @@ Split-band high-frequency de-esser — attenuates sibilance above `frequency_hz`
 ```bash
 # Default settings (threshold -20 dB, 6 kHz, 4:1 ratio)
 curl -X POST http://localhost:8000/v1/audio/deess \
-  -F "file=@vocal.wav" \
-  -o deessed.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal.wav","output_path":"out/deessed.wav"}'
 
 # Gentle pass on a mix
 curl -X POST http://localhost:8000/v1/audio/deess \
-  -F "file=@mix.wav" \
-  -F "threshold_db=-15" \
-  -F "frequency_hz=7000" \
-  -F "ratio=2.5" \
-  -o mix_deessed.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/mix.wav","threshold_db":-15,"frequency_hz":7000,"ratio":2.5,"output_path":"out/mix_deessed.wav"}'
 
-# Stage output
+# Stage output under a different path
 curl -X POST http://localhost:8000/v1/audio/deess \
-  -F "file=@vocal.wav" \
-  -F "output_path=sessions/vocal_deessed.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/vocal.wav","output_path":"sessions/vocal_deessed.wav"}'
 # → {"path":"sessions/vocal_deessed.wav","threshold_db":-20.0,"frequency_hz":6000.0,"ratio":4.0,...}
 ```
 
@@ -1603,7 +1658,8 @@ Measure stereo width, phase correlation, mid/side balance, and mono compatibilit
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/stereo-field \
-  -F "file=@stereo_mix.wav" | jq .
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/stereo_mix.wav"}' | jq .
 # → {
 #     "correlation": 0.72,       # Pearson L/R correlation [-1,1]
 #     "width": 0.41,             # side_rms / mid_rms
@@ -1617,9 +1673,10 @@ curl -X POST http://localhost:8000/v1/audio/stereo-field \
 #     "duration": 210.5
 #   }
 
-# Analyze a staged file
+# Analyze a different staged file
 curl -X POST http://localhost:8000/v1/audio/stereo-field \
-  -F "file_path=masters/track.wav" | jq '{correlation, width, mono_compatible}'
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"masters/track.wav"}' | jq '{correlation, width, mono_compatible}'
 ```
 
 Mono files return `correlation=1.0`, `width=0.0`, `mono_compatible=true`. Use `correlation < 0` as a red flag for phase-cancelled material that will collapse on mono playback.
@@ -1631,21 +1688,18 @@ Extract the most energetic segment of an audio file — the passage with the hig
 ```bash
 # Default 30-second thumbnail
 curl -X POST http://localhost:8000/v1/audio/thumbnail \
-  -F "file=@long_track.wav" \
-  -o preview.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/long_track.wav","output_path":"out/preview.wav"}'
 
 # 10-second teaser
 curl -X POST http://localhost:8000/v1/audio/thumbnail \
-  -F "file=@podcast.wav" \
-  -F "duration_sec=10" \
-  -F "output_format=mp3" \
-  -o teaser.mp3
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/podcast.wav","duration_sec":10,"output_format":"mp3","output_path":"out/teaser.mp3"}'
 
 # Stage + get timestamps
 curl -X POST http://localhost:8000/v1/audio/thumbnail \
-  -F "file=@album_track.wav" \
-  -F "duration_sec=20" \
-  -F "output_path=previews/track_thumb.wav"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/album_track.wav","duration_sec":20,"output_path":"previews/track_thumb.wav"}'
 # → {"path":"previews/track_thumb.wav","start_sec":47.3,"end_sec":67.3,"duration_sec":20.0,...}
 ```
 
@@ -1658,22 +1712,18 @@ Add subtle timing and velocity variations to a MIDI file to make it sound less m
 ```bash
 # Gentle humanize with defaults (±10 ms timing, ±10% velocity)
 curl -X POST http://localhost:8000/v1/midi/humanize \
-  -F "file=@rigid.mid" \
-  -o human.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/rigid.mid","output_path":"midi/human.mid"}'
 
 # Heavier feel with a fixed seed for reproducible results
 curl -X POST http://localhost:8000/v1/midi/humanize \
-  -F "file=@drums.mid" \
-  -F "timing_ms=20" \
-  -F "velocity_pct=15" \
-  -F "seed=42" \
-  -o drums_human.mid
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/drums.mid","timing_ms":20,"velocity_pct":15,"seed":42,"output_path":"midi/drums_human.mid"}'
 
-# Stage output
+# Stage output under a different path
 curl -X POST http://localhost:8000/v1/midi/humanize \
-  -F "file=@pattern.mid" \
-  -F "timing_ms=8" \
-  -F "output_path=midi/pattern_human.mid"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"midi/pattern.mid","timing_ms":8,"output_path":"midi/pattern_human.mid"}'
 # → {"path":"midi/pattern_human.mid","timing_ms":8.0,"velocity_pct":10.0,...}
 ```
 
@@ -1705,21 +1755,35 @@ curl -X POST http://localhost:8000/v1/batch \
 Every audio endpoint accepts `async_job=true` — the request returns immediately with a job ID and the work happens in the background. Poll for status or register a webhook.
 
 ```bash
+# Pre-stage input (one-time)
+curl -X PUT --data-binary @track.wav \
+  -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/uploads/track.wav
+
 # Submit async with staging path — result written to /v1/files/stems/...
 curl -X POST http://localhost:8000/v1/audio/separate \
-  -F "file=@track.wav" \
-  -F "engine=htdemucs" \
-  -F "async_job=true" \
-  -F "webhook_url=https://my-server.com/hooks/audio" \
-  -F "output_path=stems/track-vocals.wav"
-# → {"job_id":"abc123","status":"pending"}
+  -H 'Content-Type: application/json' \
+  -d '{
+    "file_path":"uploads/track.wav",
+    "engine":"htdemucs",
+    "stems":["vocals"],
+    "async_job":true,
+    "webhook_url":"https://my-server.com/hooks/audio",
+    "output_path":"stems/track-vocals.wav"
+  }'
+# → {"job_id":"abc123","status":"pending","status_url":"/v1/jobs/abc123"}
 
 # Submit async with presigned S3 PUT URL — result uploaded on completion
 curl -X POST http://localhost:8000/v1/audio/master \
-  -F "file=@track.wav" \
-  -F "async_job=true" \
-  -F "output_url=https://bucket.s3.amazonaws.com/result.wav?X-Amz-..."
-# → {"job_id":"def456","status":"pending"}
+  -H 'Content-Type: application/json' \
+  -d '{
+    "file_path":"uploads/track.wav",
+    "mode":"chain",
+    "preset":"transparent",
+    "async_job":true,
+    "output_url":"https://bucket.s3.amazonaws.com/result.wav?X-Amz-..."
+  }'
+# → {"job_id":"def456","status":"pending","status_url":"/v1/jobs/def456"}
 
 # Poll
 curl http://localhost:8000/v1/jobs/abc123 | jq '{status, duration_sec, result}'
@@ -1769,15 +1833,18 @@ Once staged, reference the file by path on any audio endpoint via `file_path`:
 ```bash
 # Analyze a staged file
 curl -X POST http://localhost:8000/v1/audio/analyze \
-  -F "file_path=mytrack.wav" \
-  -F "features=bpm"
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"mytrack.wav","features":["bpm"]}'
 
 # Separate stems and write the result back to staging
 curl -X POST http://localhost:8000/v1/audio/separate \
-  -F "file_path=mytrack.wav" \
-  -F "engine=htdemucs" \
-  -F "stems=vocals" \
-  -F "output_path=stems/mytrack-vocals.wav"
+  -H 'Content-Type: application/json' \
+  -d '{
+    "file_path":"mytrack.wav",
+    "engine":"htdemucs",
+    "stems":["vocals"],
+    "output_path":"stems/mytrack-vocals.wav"
+  }'
 # → {"path":"stems/mytrack-vocals.wav","size":...,"output_format":"wav",...}
 ```
 
@@ -1798,10 +1865,13 @@ Then:
 ```bash
 # Fetch from S3, master, PUT result back to a presigned S3 URL
 curl -X POST http://localhost:8000/v1/audio/master \
-  -F "file_url=https://my-bucket.s3.amazonaws.com/in.wav" \
-  -F "reference_url=https://my-bucket.s3.amazonaws.com/ref.wav" \
-  -F "mode=reference" \
-  -F "output_url=https://my-bucket.s3.amazonaws.com/out.wav?X-Amz-Signature=..."
+  -H 'Content-Type: application/json' \
+  -d '{
+    "file_url":"https://my-bucket.s3.amazonaws.com/in.wav",
+    "reference_url":"https://my-bucket.s3.amazonaws.com/ref.wav",
+    "mode":"reference",
+    "output_url":"https://my-bucket.s3.amazonaws.com/out.wav?X-Amz-Signature=..."
+  }'
 # → {"url":"...","size":...,"output_format":"wav",...}
 ```
 
@@ -1856,6 +1926,11 @@ See [Configuration](#configuration) for all `AUDIOLLA_FETCH_*` env vars.
 | `hpss` | Harmonic/percussive source separation via librosa HPSS median filter — returns harmonic + percussive stems as a ZIP. Backs `/v1/audio/separate/hpss`. |
 | `noise-reduce` | Spectral noise reduction via noisereduce — stationary (constant hum/hiss) and non-stationary (adaptive) modes, no GPU required. Backs `/v1/audio/noise-reduce/noise-reduce`. |
 | `metadata` | Read/write audio tags (ID3 for MP3, Vorbis for OGG/FLAC, INFO for WAV, MP4 for M4A) via mutagen. No ML weights. Backs `/v1/audio/metadata`. |
+| `stable-audio-open` | Text-to-audio — Stability Stable Audio Open 1.0. **Stability Community Licence** (commercial use OK below the revenue threshold; read the license). 47-second hard cap; best for loops, riffs, ambient textures, SFX, drum beats. No vocals. ~12 GB VRAM at fp16 — CUDA-only. Backs `/v1/audio/generate/stable-audio-open`. |
+| `musicgen-small` | Text-to-music — Meta MusicGen 300M. **CC-BY-NC 4.0** (non-commercial only; opt-in via `AUDIOLLA_ENABLE_NONCOMMERCIAL=1` in the server env). 30 s hard cap; instrumental only. ~3 GB VRAM at fp16 — CUDA-only. Backs `/v1/audio/generate/musicgen-small`. |
+| `musicgen-medium` | Text-to-music — Meta MusicGen 1.5B. **CC-BY-NC 4.0** (same opt-in). 30 s hard cap; higher quality than -small. ~6-8 GB VRAM at fp16 — CUDA-only. Backs `/v1/audio/generate/musicgen-medium`. |
+| `riffusion` | Text-to-music — Riffusion-v1, a Stable Diffusion fine-tune that generates spectrograms (converted to audio via Griffin-Lim). **CreativeML OpenRAIL-M** (commercial use OK with the licence's usage restrictions). ~5 s per pass, lo-fi character, 22.05 kHz mono. ~3 GB VRAM at fp16 — CUDA-only. Backs `/v1/audio/generate/riffusion`. |
+| `audioldm2` | Text-to-audio / SFX — AudioLDM 2 (cvssp/audioldm2). **CC-BY 4.0** (commercial use OK — no opt-in gate, the only commercial-safe generator in this set). General-purpose SFX: environmental ambience, animal sounds, foley, mechanical / impact sounds. 16 kHz mono, up to 30 s. Slow (200-step DDIM by default — pass `num_inference_steps=50` to trade quality for ~4x speed). ~8-10 GB VRAM at fp16 with CPU offload. CUDA-only. Backs `/v1/audio/generate/audioldm2`. |
 
 Each Demucs variant is its own checkpoint (hosted on `dl.fbaipublicfiles.com`). The entrypoint prefetches every enabled variant into `/data/torch_cache/` at startup so the first separation request doesn't sit there downloading.
 
@@ -1870,10 +1945,17 @@ Two ways to chain operations server-side without re-uploading the audio between 
 **Curated presets** — server-side YAML workflows shipped in `presets/`. Run one with a single POST:
 
 ```bash
+# Pre-stage input
+curl -X PUT --data-binary @mix.wav \
+  -H 'Content-Type: application/octet-stream' \
+  http://localhost:8000/v1/files/uploads/mix.wav
+
 # Master a mix for Spotify (-14 LUFS) — multiband compress + normalise
 curl -X POST http://localhost:8000/v1/presets/master-for-spotify \
-  -F "file=@mix.wav" \
-  -o mastered.wav
+  -H 'Content-Type: application/json' \
+  -d '{"file_path":"uploads/mix.wav","output_path":"out/mastered.wav"}'
+# → {"path":"out/mastered.wav","size":...,"steps":[...]}
+curl -o mastered.wav http://localhost:8000/v1/files/out/mastered.wav
 
 # List available presets
 curl http://localhost:8000/v1/presets | jq '.data[] | {name, description}'
@@ -1890,20 +1972,24 @@ Shipped presets: `master-for-spotify` (3-band master + -14 LUFS), `podcast-clean
 # Restore + multiband + normalise in one request — intermediates stay
 # server-side, no re-upload between steps.
 curl -X POST http://localhost:8000/v1/pipeline \
-  -F "file=@track.wav" \
-  -F 'steps=[
-    {"op":"restore","params":{"engine":"uvr-denoise"}},
-    {"op":"multiband_compress","params":{
-      "crossovers_hz":[200,3000],
-      "bands":[
-        {"threshold_db":-18,"ratio":3},
-        {"threshold_db":-14,"ratio":2.5},
-        {"threshold_db":-10,"ratio":2}
-      ]
-    }},
-    {"op":"normalize","params":{"target_lufs":-14}}
-  ]' \
-  -o pipelined.wav
+  -H 'Content-Type: application/json' \
+  -d '{
+    "file_path":"uploads/track.wav",
+    "output_path":"out/pipelined.wav",
+    "steps":[
+      {"op":"restore","params":{"engine":"uvr-denoise"}},
+      {"op":"multiband_compress","params":{
+        "crossovers_hz":[200,3000],
+        "bands":[
+          {"threshold_db":-18,"ratio":3},
+          {"threshold_db":-14,"ratio":2.5},
+          {"threshold_db":-10,"ratio":2}
+        ]
+      }},
+      {"op":"normalize","params":{"target_lufs":-14}}
+    ]
+  }'
+# → {"path":"out/pipelined.wav","size":...,"steps":[...]}
 
 # Discover available ops
 curl http://localhost:8000/v1/ops | jq .
@@ -1925,74 +2011,78 @@ Full wire contract: [`openapi.yaml`](openapi.yaml).
 
 ### Audio processing
 
-Every endpoint accepts exactly one of `file` / `file_path` / `file_url`.
-Audio-producing endpoints additionally accept optional `output_path` /
-`output_url` — when either is set, the response is JSON instead of audio
-bytes.
+Every endpoint takes a JSON body. Inputs pick exactly one of `file_path`
+(pre-staged file under `FILES_DIR`) xor `file_url` (HTTPS URL the server
+fetches). Audio-producing endpoints additionally require exactly one of
+`output_path` (server writes the result under `FILES_DIR`) xor
+`output_url` (presigned PUT — server uploads the encoded bytes). Both
+missing → 400; both set → 400. Responses are always JSON — no raw audio
+bytes, no `Content-Disposition: attachment`, no `*_base64` fields.
 
 | Method | Path | Default returns |
 |--------|------|-----------------|
-| `POST` | `/v1/audio/separate` | audio bytes for one stem; ZIP when requesting multiple (or all) stems |
-| `POST` | `/v1/audio/master` | audio bytes |
+| `POST` | `/v1/audio/separate` | JSON `{path\|url, size, ...}` — one stem; multi-stem (or all) returns ZIP stream of stems via `output_path`/`output_url` |
+| `POST` | `/v1/audio/master` | JSON `{path\|url, size, output_format, ...}` |
 | `POST` | `/v1/audio/analyze` | JSON — BPM, key, LUFS, spectral features |
 | `POST` | `/v1/audio/beats` | JSON — BPM + beat timestamps; optional click-track WAV |
 | `POST` | `/v1/audio/onsets` | JSON — onset timestamps |
 | `POST` | `/v1/audio/melody` | JSON — dominant melody contour; optional MIDI export |
 | `POST` | `/v1/audio/segments` | JSON — structural segment labels (A, B, C…) |
 | `POST` | `/v1/audio/silence` | JSON — silent/non-silent ranges; optional trimmed audio |
-| `POST` | `/v1/audio/visualize/image/spectrogram` | PNG bytes — static spectrogram (`color`, `scale` params) |
-| `POST` | `/v1/audio/visualize/image/waveform` | PNG bytes — static waveform (`color` param) |
-| `POST` | `/v1/audio/visualize/video/{mode}` | MP4/WebM bytes — animated video (8 modes: `spectrum`, `waves`, `cqt`, …) |
+| `POST` | `/v1/audio/visualize/image/spectrogram` | JSON `{path\|url, size, ...}` — static PNG spectrogram (`color`, `scale` params) |
+| `POST` | `/v1/audio/visualize/image/waveform` | JSON `{path\|url, size, ...}` — static PNG waveform (`color` param) |
+| `POST` | `/v1/audio/visualize/video/{mode}` | JSON `{path\|url, size, ...}` — animated MP4/WebM video (8 modes: `spectrum`, `waves`, `cqt`, …) |
 | `POST` | `/v1/audio/fingerprint` | JSON — Chromaprint fingerprint string |
-| `POST` | `/v1/audio/restore/{engine}` | audio bytes — reverb/echo/noise removed; `aggressive=true` for uvr-deecho hard mode |
-| `POST` | `/v1/audio/to_midi/{engine}` | MIDI bytes (`audio/midi`) — polyphonic transcription |
-| `POST` | `/v1/audio/enhance/{engine}` | audio bytes — neural speech/vocal enhancement |
+| `POST` | `/v1/audio/restore/{engine}` | JSON `{path\|url, size, output_format, ...}` — reverb/echo/noise removed; `aggressive=true` for uvr-deecho hard mode |
+| `POST` | `/v1/audio/to_midi/{engine}` | JSON `{path\|url, size, ...}` — polyphonic transcription (MIDI) |
+| `POST` | `/v1/audio/enhance/{engine}` | JSON `{path\|url, size, output_format, ...}` — neural speech/vocal enhancement |
+| `POST` | `/v1/audio/generate/{engine}` | JSON `{path\|url, size, output_format, ...}` — text-to-audio (engine = `stable-audio-open` / `musicgen-small` / `musicgen-medium` / `riffusion` / `audioldm2`); `prompt` required, optional `duration_sec` / `seed` / `lyrics` / `num_inference_steps` |
 | `POST` | `/v1/audio/chords` | JSON — detected key and chord progression |
 | `POST` | `/v1/audio/vad` | JSON — speech/non-speech segments with timestamps and speech ratio |
 | `POST` | `/v1/audio/diarize/{engine}` | JSON — per-speaker timestamped segments |
-| `POST` | `/v1/audio/transform` | audio bytes |
+| `POST` | `/v1/audio/transform` | JSON `{path\|url, size, output_format, ...}` |
 | `POST` | `/v1/audio/loudness` | JSON — `{loudness_lufs}` (measure only, no audio) |
 | `POST` | `/v1/audio/loudness/curve` | JSON — `{curve:[{time_sec,rms_db}],duration,sample_rate,points}`; `hop_length` param |
-| `POST` | `/v1/audio/normalize` | audio bytes — requires `target_lufs`; header `X-Loudness-LUFS` carries pre-normalization level |
-| `POST` | `/v1/audio/separate/hpss` | ZIP containing `harmonic.<fmt>` + `percussive.<fmt>` |
-| `POST` | `/v1/audio/noise-reduce/{engine}` | audio bytes — `engine=noise-reduce` (DSP, `stationary`/`prop_decrease`) or `uvr-denoise` (ML) |
-| `POST` | `/v1/audio/stretch` | audio bytes |
-| `POST` | `/v1/audio/pitch-correct` | audio bytes — `strength` [0.0–1.0]; requires `librosa-analyze` |
-| `POST` | `/v1/audio/repair` | audio bytes — `declip` bool, `dehum` bool, `hum_freq` Hz |
+| `POST` | `/v1/audio/normalize` | JSON `{path\|url, size, measured_lufs, ...}` — requires `target_lufs`; pre-normalization LUFS reported in `measured_lufs` field |
+| `POST` | `/v1/audio/separate/hpss` | JSON `{path\|url, size, ...}` — ZIP stream containing `harmonic.<fmt>` + `percussive.<fmt>` |
+| `POST` | `/v1/audio/noise-reduce/{engine}` | JSON `{path\|url, size, output_format, ...}` — `engine=noise-reduce` (DSP, `stationary`/`prop_decrease`) or `uvr-denoise` (ML) |
+| `POST` | `/v1/audio/stretch` | JSON `{path\|url, size, output_format, ...}` |
+| `POST` | `/v1/audio/pitch-correct` | JSON `{path\|url, size, output_format, ...}` — `strength` [0.0–1.0]; requires `librosa-analyze` |
+| `POST` | `/v1/audio/repair` | JSON `{path\|url, size, output_format, ...}` — `declip` bool, `dehum` bool, `hum_freq` Hz |
 | `POST` | `/v1/audio/tag` | JSON — top-K AudioSet labels with confidence scores |
 | `POST` | `/v1/audio/embed` | JSON — 512-dim embedding; with `query_text` also returns cosine similarity |
 | `POST` | `/v1/audio/classify` | JSON — `{results: [{label, score}]}` sorted descending; requires `clap-embed` |
 | `POST` | `/v1/audio/info` | JSON — duration, sample_rate, channels, codec, bit_depth, format |
-| `POST` | `/v1/audio/trim` | audio bytes — `start_sec` + `end_sec` required |
-| `POST` | `/v1/audio/mix` | audio bytes — `tracks` JSON array required (≥2 entries) |
-| `POST` | `/v1/audio/concat` | audio bytes — `files` JSON array required (≥2 entries) |
-| `POST` | `/v1/audio/speed` | audio bytes — `speed` float required (0.1–10.0) |
-| `POST` | `/v1/audio/convert` | audio bytes — format/sample_rate/channels conversion |
+| `POST` | `/v1/audio/trim` | JSON `{path\|url, size, output_format, ...}` — `start_sec` + `end_sec` required |
+| `POST` | `/v1/audio/mix` | JSON `{path\|url, size, output_format, ...}` — `tracks` JSON array required (≥2 entries) |
+| `POST` | `/v1/audio/concat` | JSON `{path\|url, size, output_format, ...}` — `files` JSON array required (≥2 entries) |
+| `POST` | `/v1/audio/speed` | JSON `{path\|url, size, output_format, ...}` — `speed` float required (0.1–10.0) |
+| `POST` | `/v1/audio/convert` | JSON `{path\|url, size, output_format, ...}` — format/sample_rate/channels conversion |
 | `POST` | `/v1/audio/similar` | JSON — `{similarity, dim}`; requires `clap-embed` |
-| `POST` | `/v1/audio/fade` | audio bytes — `fade_in`/`fade_out` seconds, 13 `curve` options |
-| `POST` | `/v1/audio/reverse` | audio bytes — flips playback direction |
-| `POST` | `/v1/audio/loop` | audio bytes — `count` total plays (≥2) |
-| `POST` | `/v1/audio/bpm-match` | audio bytes — `target_bpm` required; requires `librosa-analyze` + `stretch` |
-| `POST` | `/v1/audio/stereo-width` | audio bytes — `width` [0.0–3.0]; M/S stereo processing |
-| `POST` | `/v1/audio/split` | ZIP — `mode=equal` (requires `count`) or `mode=silence` |
-| `POST` | `/v1/audio/pan` | audio bytes — `position` [-1.0–1.0] |
-| `POST` | `/v1/audio/eq` | audio bytes — `bands` JSON array of `{freq, gain_db, width_hz}` |
-| `POST` | `/v1/audio/key-match` | audio bytes — `target_key` required; requires `chord-detect` + `stretch` |
-| `POST` | `/v1/audio/sidechain-duck` | audio bytes — primary + `trigger_file_*`; ffmpeg sidechaincompress |
-| `POST` | `/v1/audio/fx` | audio bytes |
+| `POST` | `/v1/audio/fade` | JSON `{path\|url, size, output_format, ...}` — `fade_in`/`fade_out` seconds, 13 `curve` options |
+| `POST` | `/v1/audio/reverse` | JSON `{path\|url, size, output_format, ...}` — flips playback direction |
+| `POST` | `/v1/audio/loop` | JSON `{path\|url, size, output_format, ...}` — `count` total plays (≥2) |
+| `POST` | `/v1/audio/bpm-match` | JSON `{path\|url, size, output_format, ...}` — `target_bpm` required; requires `librosa-analyze` + `stretch` |
+| `POST` | `/v1/audio/stereo-width` | JSON `{path\|url, size, output_format, ...}` — `width` [0.0–3.0]; M/S stereo processing |
+| `POST` | `/v1/audio/split` | JSON `{path\|url, size, ...}` — ZIP stream; `mode=equal` (requires `count`) or `mode=silence` |
+| `POST` | `/v1/audio/pan` | JSON `{path\|url, size, output_format, ...}` — `position` [-1.0–1.0] |
+| `POST` | `/v1/audio/eq` | JSON `{path\|url, size, output_format, ...}` — `bands` JSON array of `{freq, gain_db, width_hz}` |
+| `POST` | `/v1/audio/key-match` | JSON `{path\|url, size, output_format, ...}` — `target_key` required; requires `chord-detect` + `stretch` |
+| `POST` | `/v1/audio/sidechain-duck` | JSON `{path\|url, size, output_format, ...}` — primary + `trigger_file_*`; ffmpeg sidechaincompress |
+| `POST` | `/v1/audio/fx` | JSON `{path\|url, size, output_format, ...}` |
 | `POST` | `/v1/audio/metadata` | JSON — tag fields (title, artist, bpm, key, duration, sample_rate…); writes tags when `tags` JSON is provided |
 | `POST` | `/v1/audio/clip-detect` | JSON — clipped, clip_count, clip_ratio, peak_db, duration_sec |
-| `POST` | `/v1/audio/mid-side` | audio bytes — `mode=encode` (L/R→M/S) or `mode=decode` (M/S→L/R) |
-| `POST` | `/v1/audio/beat-slice` | ZIP of numbered beat slices — requires `librosa-analyze` |
-| `POST` | `/v1/audio/conv-reverb` | audio bytes — `ir_file` / `ir_file_path` / `ir_file_url` required; `wet_mix` [0.0–1.0] |
-| `POST` | `/v1/audio/transient` | audio bytes — `attack_gain_db` + `sustain_gain_db` |
-| `POST` | `/v1/audio/multiband-compress` | audio bytes — N-band compressor; `crossovers_hz` + `bands` JSON arrays |
+| `POST` | `/v1/audio/mid-side` | JSON `{path\|url, size, output_format, ...}` — `mode=encode` (L/R→M/S) or `mode=decode` (M/S→L/R) |
+| `POST` | `/v1/audio/beat-slice` | JSON `{path\|url, size, ...}` — ZIP stream of numbered beat slices; requires `librosa-analyze` |
+| `POST` | `/v1/audio/conv-reverb` | JSON `{path\|url, size, output_format, ...}` — `ir_file_path` / `ir_file_url` required; `wet_mix` [0.0–1.0] |
+| `POST` | `/v1/audio/transient` | JSON `{path\|url, size, output_format, ...}` — `attack_gain_db` + `sustain_gain_db` |
+| `POST` | `/v1/audio/multiband-compress` | JSON `{path\|url, size, output_format, ...}` — N-band compressor; `crossovers_hz` + `bands` JSON arrays |
 | `POST` | `/v1/audio/dj-prep` | JSON — bpm, key, camelot, integrated_lufs; requires `librosa-analyze` + `chord-detect` |
 | `POST` | `/v1/audio/loop-point` | JSON — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}`; requires `librosa-analyze` |
-| `POST` | `/v1/audio/chords-to-midi` | MIDI bytes — chord progression from audio; requires `chord-detect` |
-| `POST` | `/v1/audio/deess` | audio bytes — split-band sibilance attenuation; `threshold_db`, `frequency_hz`, `ratio` |
+| `POST` | `/v1/audio/chords-to-midi` | JSON `{path\|url, size, ...}` — chord progression from audio (MIDI); requires `chord-detect` |
+| `POST` | `/v1/audio/deess` | JSON `{path\|url, size, output_format, ...}` — split-band sibilance attenuation; `threshold_db`, `frequency_hz`, `ratio` |
 | `POST` | `/v1/audio/stereo-field` | JSON — `{correlation, width, balance_db, mono_compatible, mid_level_db, side_level_db, phase_issues, …}` |
-| `POST` | `/v1/audio/thumbnail` | audio bytes — most energetic `duration_sec` segment; `start_sec`/`end_sec` in JSON when `output_path` set; requires `librosa-analyze` |
+| `POST` | `/v1/audio/thumbnail` | JSON `{path\|url, size, start_sec, end_sec, ...}` — most energetic `duration_sec` segment; requires `librosa-analyze` |
 
 ### Workflow — presets, pipeline, catalog
 
@@ -2004,8 +2094,8 @@ Server-side multi-step chains + discovery. See [Workflows](#workflows--presets--
 | `GET`  | `/v1/ops` | list of pipeline op slugs (~24) usable in presets + `/v1/pipeline` |
 | `GET`  | `/v1/presets` | list curated server-side workflows (name + description) |
 | `GET`  | `/v1/presets/{name}` | describe one preset including all steps |
-| `POST` | `/v1/presets/{name}` | audio bytes — run a curated preset (full async_job / output_path / output_url support) |
-| `POST` | `/v1/pipeline` | audio bytes — ad-hoc `steps=[{op, params}, …]` chain, server-side intermediates |
+| `POST` | `/v1/presets/{name}` | JSON `{path\|url, size, steps, ...}` — run a curated preset; response includes a `steps` audit log of each op executed |
+| `POST` | `/v1/pipeline` | JSON `{path\|url, size, steps, ...}` — ad-hoc `steps=[{op, params}, …]` chain, server-side intermediates; response includes a `steps` audit log |
 
 ### Batch
 
@@ -2015,7 +2105,7 @@ Server-side multi-step chains + discovery. See [Workflows](#workflows--presets--
 
 ### Async jobs
 
-Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` optional delivery.
+Every audio endpoint accepts `"async_job": true` in the JSON body. Optional `"webhook_url"` for push-style delivery. When `async_job=true`, the endpoint returns HTTP 202 with `{job_id, status: "pending", status_url}` instead of executing inline.
 
 | Method | Path | |
 |--------|------|-|
@@ -2027,14 +2117,14 @@ Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` o
 
 | Method | Path | Default returns |
 |--------|------|-----------------|
-| `POST` | `/v1/midi/compose` | MIDI bytes (`audio/midi`) — body is `application/json` song spec |
+| `POST` | `/v1/midi/compose` | JSON `{path\|url, size, ...}` — body is JSON song spec; writes MIDI |
 | `POST` | `/v1/midi/inspect` | JSON — tempo, tracks, channels, note counts, time/key signatures |
-| `POST` | `/v1/midi/transform` | MIDI bytes — transpose, quantize, tempo override, channel filter |
-| `POST` | `/v1/midi/quantize` | MIDI bytes — `grid_beats` snaps all note timings to a rhythmic grid |
-| `POST` | `/v1/midi/render` | audio bytes — input MIDI via `file` / `file_path` / `file_url` |
-| `POST` | `/v1/midi/generate` | audio bytes — body is `application/json` song spec (compose + render in one) |
-| `POST` | `/v1/midi/drum` | MIDI bytes — body is `application/json` step-sequencer spec; requires `midi-compose` |
-| `POST` | `/v1/midi/humanize` | MIDI bytes — timing + velocity jitter; `timing_ms`, `velocity_pct`, `seed`; requires `midi-compose` |
+| `POST` | `/v1/midi/transform` | JSON `{path\|url, size, ...}` — transpose, quantize, tempo override, channel filter; writes MIDI |
+| `POST` | `/v1/midi/quantize` | JSON `{path\|url, size, ...}` — `grid_beats` snaps all note timings to a rhythmic grid; writes MIDI |
+| `POST` | `/v1/midi/render` | JSON `{path\|url, size, output_format, ...}` — input MIDI via `file_path` / `file_url`; writes audio |
+| `POST` | `/v1/midi/generate` | JSON `{path\|url, size, output_format, ...}` — body is JSON song spec (compose + render in one); writes audio |
+| `POST` | `/v1/midi/drum` | JSON `{path\|url, size, ...}` — body is JSON step-sequencer spec; writes MIDI; requires `midi-compose` |
+| `POST` | `/v1/midi/humanize` | JSON `{path\|url, size, ...}` — timing + velocity jitter; `timing_ms`, `velocity_pct`, `seed`; writes MIDI; requires `midi-compose` |
 
 ### File staging
 
@@ -2061,7 +2151,7 @@ Every audio endpoint accepts `async_job=true` (Form field). Adds `webhook_url` o
 
 audiolla exposes a [Model Context Protocol](https://modelcontextprotocol.io) server at `/v1/mcp`. Point any MCP-capable LLM agent at it and it gets the full audio processing surface as callable tools — separate stems, detect chords, transcribe to MIDI, diarize speakers, compose music from a JSON spec, read/write tags, submit async jobs — all over JSON-RPC without writing a line of integration code.
 
-Audio over MCP supports the same three output modes as REST: pass nothing → audio comes back **base64-encoded** in the response (JSON-RPC can't carry raw bytes natively); pass **`output_path`** → server stages the result in `FILES_DIR`, response is `{path, size, ...}` and the client retrieves it via the `get_file` tool or `/v1/files/<path>` over HTTP; pass **`output_url`** (presigned PUT) → server PUTs the encoded bytes to the URL, response is `{url, size, ...}`. `output_path` and `output_url` are mutually exclusive — passing both raises `ValueError`. Use `list_jobs` / `get_job` / `cancel_job` to manage long-running async work.
+Audio-producing MCP tools follow the same contract as REST: callers MUST pass exactly one of **`output_path`** (server writes the result under `FILES_DIR`; client retrieves it via the `get_file` tool or HTTP `GET /v1/files/<path>`; response is `{path, size, ...}`) xor **`output_url`** (presigned PUT — server uploads the encoded bytes to the URL; response is `{url, size, ...}`). Both missing → `ValueError`; both set → `ValueError`. Inline base64 audio responses are gone in v1.0.0 — no `audio_base64` / `midi_base64` / `image_base64` / `video_base64` / `zip_base64` fields exist anymore. Use `list_jobs` / `get_job` / `cancel_job` to manage long-running async work.
 
 **Endpoint:** `http://localhost:8000/v1/mcp`
 
@@ -2075,7 +2165,8 @@ Audio over MCP supports the same three output modes as REST: pass nothing → au
 | `list_ops` | List the ~24 pipeline op slugs available in `run_pipeline_tool` / presets |
 | `run_preset` | Run a curated preset against an input file |
 | `run_pipeline_tool` | Run an ad-hoc `[{op, params}, …]` chain server-side |
-| `separate` | Demucs stem separation — base64 stems back, per-stem staging via `output_paths={stem:path}`, or per-stem PUT via `output_urls={stem:url}` |
+| `generate_music` | Text-to-audio — `engine` = `stable-audio-open` / `musicgen-small` / `musicgen-medium` / `riffusion` / `audioldm2`; `prompt` required, optional `lyrics`, `duration_sec`, `seed`. MusicGen requires `AUDIOLLA_ENABLE_NONCOMMERCIAL=1`. AudioLDM 2 is CC-BY 4.0 — commercial-safe with no opt-in. |
+| `separate` | Demucs stem separation — per-stem staging via `output_paths={stem:path}` xor per-stem PUT via `output_urls={stem:url}` |
 | `master` | Reference mastering (matchering) or preset chain (pedalboard) |
 | `analyze` | BPM, key, LUFS, spectral features via librosa |
 | `beats` | Beat grid — BPM + timestamps; optional click-track audio |
@@ -2087,7 +2178,7 @@ Audio over MCP supports the same three output modes as REST: pass nothing → au
 | `fingerprint` | Chromaprint acoustic fingerprint (AcoustID-compatible) |
 | `restore` | Remove reverb/echo/noise via UVR — `engine` selects model; `aggressive=true` for harder echo suppression |
 | `denoise` | Thin shim — prefer `restore` with `engine=uvr-denoise` or `noise_reduce` with `engine=uvr-denoise` |
-| `audio_to_midi` | Polyphonic audio-to-MIDI transcription via basic-pitch (ONNX) — returns MIDI base64 |
+| `audio_to_midi` | Polyphonic audio-to-MIDI transcription via basic-pitch (ONNX) — writes MIDI to `output_path` xor `output_url` |
 | `enhance` | Neural speech and vocal enhancement via DeepFilterNet DF3 |
 | `chords` | Chord and key detection via librosa — key + per-segment chord labels |
 | `vad` | Voice activity detection via silero-vad — speech/non-speech segments with timestamps |
@@ -2095,8 +2186,8 @@ Audio over MCP supports the same three output modes as REST: pass nothing → au
 | `transform` | Sox DSP chain — gain, EQ, reverb, pitch, tempo, etc. |
 | `loudness` | Measure integrated LUFS — returns JSON only |
 | `loudness_curve` | RMS envelope over time — `{curve:[{time_sec,rms_db}],duration,sample_rate,points}` |
-| `normalize` | Normalize audio to a target LUFS level — returns base64 audio |
-| `hpss` | Harmonic/percussive separation — returns per-stem base64 audio |
+| `normalize` | Normalize audio to a target LUFS level — writes to `output_path` xor `output_url` |
+| `hpss` | Harmonic/percussive separation — writes per-stem audio to `output_paths={stem:path}` xor `output_urls={stem:url}` |
 | `noise_reduce` | Noise reduction — `engine=noise-reduce` (DSP, stationary/prop_decrease) or `engine=uvr-denoise` (ML) |
 | `stretch` | Time-stretch + pitch-shift via librosa phase vocoder |
 | `pitch_correct` | Auto-tune toward nearest chromatic semitone — `strength` [0.0–1.0]; requires `librosa-analyze` |
@@ -2105,7 +2196,7 @@ Audio over MCP supports the same three output modes as REST: pass nothing → au
 | `embed` | 512-dim CLAP audio embedding; with `query_text` returns cosine similarity |
 | `classify` | Zero-shot CLAP classification — cosine similarity against any list of text labels |
 | `info` | Probe audio metadata — duration, sample_rate, channels, codec, bit_depth |
-| `trim` | Cut audio to [start_sec, end_sec) — returns base64 audio |
+| `trim` | Cut audio to [start_sec, end_sec) — writes to `output_path` xor `output_url` |
 | `mix` | Mix N tracks with per-track gain — `tracks` list of {file_path/url, gain_db} |
 | `concat` | Stitch N audio files end-to-end in order — `files` list of {file_path/url} |
 | `speed` | Change playback speed without pitch shift — `speed` float (0.1–10.0) |
@@ -2117,13 +2208,13 @@ Audio over MCP supports the same three output modes as REST: pass nothing → au
 | `loop` | Repeat audio N times — `count` total plays |
 | `bpm_match` | Detect BPM then stretch to `target_bpm` — returns source/target BPM + tempo_factor |
 | `stereo_width` | M/S stereo width — `width=0` mono, `1` original, `>1` wider |
-| `split` | Split into equal parts or on silence — returns `{segments:[{name,audio_base64}]}` |
+| `split` | Split into equal parts or on silence — MCP form deprecated in v1.0.0; use REST `POST /v1/audio/split` with `output_path` for per-segment staging |
 | `pan` | Pan in the stereo field — `position` [-1.0–1.0] |
 | `eq` | Parametric EQ — `bands` list of `{freq, gain_db, width_hz}` |
 | `key_match` | Detect key then pitch-shift to `target_key` — returns source_key + semitones |
 | `sidechain_duck` | Duck primary track on trigger — `threshold_db`, `ratio`, `attack_ms`, `release_ms` |
 | `fx` | Generic pedalboard effects chain — full catalog, your order and params |
-| `midi_compose` | JSON song spec → MIDI bytes (base64 or staged) |
+| `midi_compose` | JSON song spec → MIDI; writes to `output_path` xor `output_url` |
 | `midi_inspect` | Read MIDI structure — tempo, tracks, channels, note counts |
 | `midi_transform` | Transpose, quantize, tempo override, channel filter on an existing MIDI file |
 | `midi_render` | MIDI → audio via fluidsynth + SoundFont |
@@ -2133,7 +2224,7 @@ Audio over MCP supports the same three output modes as REST: pass nothing → au
 | `audio_metadata` | Read or write audio tags — pass `tags` dict to write, omit to read |
 | `detect_clipping` | Report digital clipping — clipped, clip_count, clip_ratio, peak_db |
 | `mid_side` | M/S encode (`mode=encode`) or decode (`mode=decode`) stereo audio |
-| `slice_at_beats` | Slice audio at beat positions — returns `{zip_base64, beat_count}` |
+| `slice_at_beats` | Slice audio at beat positions — writes zip archive to `output_path` xor `output_url`; response includes `beat_count` |
 | `convolution_reverb` | Apply IR reverb — `ir_file_path`/`ir_file_url` + `wet_mix` [0.0–1.0] |
 | `transient_shaper` | Attack/sustain shaping — `attack_gain_db`, `sustain_gain_db` |
 | `multiband_compress` | N-band compressor — `crossovers_hz` list + `bands` list of per-band specs |
@@ -2141,7 +2232,7 @@ Audio over MCP supports the same three output modes as REST: pass nothing → au
 | `find_loop_point` | Find best seamless loop boundary — `{loop_start_sec,loop_end_sec,bars,score,tempo_bpm,candidates}` |
 | `deess` | Split-band sibilance attenuation — `threshold_db`, `frequency_hz`, `ratio` |
 | `stereo_field` | Stereo field analysis — correlation, width, balance_db, mono_compatible, mid/side levels |
-| `audio_thumbnail` | Extract most energetic segment — `duration_sec`; returns base64 audio + `start_sec`/`end_sec` |
+| `audio_thumbnail` | Extract most energetic segment — `duration_sec`; writes to `output_path` xor `output_url`; response includes `start_sec`/`end_sec` |
 | `midi_humanize` | Add timing + velocity jitter to MIDI — `timing_ms`, `velocity_pct`, optional `seed` for deterministic output |
 | `list_jobs` | List async jobs; optional `status` filter |
 | `get_job` | Poll one async job by `job_id` |
@@ -2187,7 +2278,8 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 
 | | Why |
 |-|-----|
-| Music generation | MusicGen is CC-BY-NC. Stable Audio Open needs a Stability AI commercial agreement. Nothing permissively licensed at production quality exists yet. |
+| MusicGen / MAGNeT / JASCO | CC-BY-NC weights. Outclassed by ACE-Step (Apache 2.0) and DiffRhythm (Apache 2.0), both shipping in the box as of v1.0.0. |
+| YuE 7B | Apache 2.0 but realistically needs 16-24 GB VRAM at fp16; doesn't fit comfortably on a 12 GB GPU without int4 quant tooling. Revisit when a 2B or quantised variant lands. |
 | Essentia analysis | AGPL v3 — any network service using it has to publish full source. librosa handles the common cases without that. |
 | Streaming separation | Demucs needs the whole file. No chunked or real-time inference. |
 | VST3 plugin hosting | Pedalboard can do it but you'd need to mount your host plugin directory. Out of scope for the default image. |

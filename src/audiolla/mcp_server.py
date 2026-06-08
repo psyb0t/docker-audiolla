@@ -20,10 +20,11 @@ populated via ``put_file`` or the REST ``/v1/files`` endpoints) OR
 ``AUDIOLLA_FETCH_MODE`` allowlist/denylist policy in config). Exactly one
 of the two is required.
 
-Output from audio tools defaults to base64-encoded audio because MCP
-JSON-RPC can't carry raw bytes. Pass ``output_url`` to have the server PUT
-the result to a presigned URL instead (subject to the same fetch policy);
-``separate`` accepts ``output_urls`` as a per-stem map.
+Output from audio tools requires exactly one of ``output_path`` (writes
+under ``FILES_DIR``; response is ``{path, size, ...}``) xor ``output_url``
+(presigned PUT; response is ``{url, size, ...}``). Inline base64 audio
+responses were removed in v1.0.0. ``separate`` and ``hpss`` accept
+``output_paths`` / ``output_urls`` as per-stem maps.
 
 Why a separate module: avoids a circular import between ``server.py`` (which
 holds the shared ``ENGINES`` / ``REGISTRY`` state) and this module. ``server.py``
@@ -68,12 +69,13 @@ def build_mcp_server(
             "restoration (de-reverb / de-echo / de-noise), mastering, MIR "
             "analysis, DSP transform, loudness, speech enhancement, voice "
             "activity detection, speaker diarization, MIDI transcription, "
-            "and curated workflows (presets + ad-hoc pipelines). Three "
-            "input modes for audio: stage a file via put_file (base64) then "
-            "pass file_path, OR pass file_url to have the server fetch a "
-            "remote URL (subject to AUDIOLLA_FETCH_MODE allowlist/denylist). "
-            "Audio results default to base64; pass output_url to have the "
-            "server PUT to a presigned URL instead."
+            "and curated workflows (presets + ad-hoc pipelines). Audio "
+            "input: stage via put_file then pass file_path, OR pass "
+            "file_url for server fetch (subject to AUDIOLLA_FETCH_MODE). "
+            "Audio output (v1.0.0): every audio-producing tool requires "
+            "exactly one of output_path (writes under FILES_DIR; response "
+            "{path,size,...}) xor output_url (presigned PUT; response "
+            "{url,size,...}). Inline base64 audio is no longer supported."
         ),
         stateless_http=True,
         json_response=True,
@@ -125,17 +127,25 @@ def build_mcp_server(
         output_url: str | None,
         output_path: str | None = None,
     ) -> dict[str, Any]:
-        """Return audio in one of three forms:
+        """Return audio in one of two forms (v1.0.0: base64 mode removed):
         - ``output_path`` set → stage to FILES_DIR/<output_path>, return
           ``{path, size, output_format}`` (the path is what /v1/files API uses).
         - ``output_url`` set → PUT to the presigned URL, return
           ``{url, size, output_format}``.
-        - neither → return ``{audio_base64, output_format}`` (default).
 
-        ``output_path`` and ``output_url`` are mutually exclusive — passing
-        both raises ValueError to match the REST layer's 400 behaviour."""
+        Exactly one of the two is REQUIRED. Passing neither raises
+        ValueError — the base64-audio response was dropped in v1.0.0
+        because LLMs can't consume audio bytes anyway (they need a path/
+        URL to hand off to a downstream player/processor) and large base64
+        payloads choke the context window (10MB WAV = ~13MB base64 = ~3M
+        tokens). Passing both also raises ValueError (mutually exclusive)."""
         if output_path and output_url:
             raise ValueError("provide only one of: output_path, output_url")
+        if not output_path and not output_url:
+            raise ValueError(
+                "audio-producing MCP tool requires output_path or output_url; "
+                "the raw-base64 response mode was removed in v1.0.0"
+            )
         if output_path:
             from . import files as files_mod  # noqa: PLC0415
             try:
@@ -154,22 +164,18 @@ def build_mcp_server(
                 "size": len(data),
                 "output_format": output_format,
             }
-        if output_url:
-            try:
-                await fetch.upload_bytes(
-                    output_url,
-                    data,
-                    content_type_for(output_format),
-                )
-            except fetch.FetchError as exc:
-                raise ValueError(str(exc)) from exc
-            return {
-                "url": output_url,
-                "size": len(data),
-                "output_format": output_format,
-            }
+        assert output_url is not None  # narrowed by branch
+        try:
+            await fetch.upload_bytes(
+                output_url,
+                data,
+                content_type_for(output_format),
+            )
+        except fetch.FetchError as exc:
+            raise ValueError(str(exc)) from exc
         return {
-            "audio_base64": base64.b64encode(data).decode("ascii"),
+            "url": output_url,
+            "size": len(data),
             "output_format": output_format,
         }
 
@@ -251,7 +257,7 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Run a curated preset pipeline against an input file.
-        Returns ``{audio_base64, ...}`` by default, or PUTs to ``output_url``."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,steps}` or `{url,size,steps}`."""
         from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
 
         if not presets or name not in presets:
@@ -291,6 +297,54 @@ def build_mcp_server(
 
         return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
 
+    # ── text-to-music generation (no input file) ────────────────────────────
+
+    @mcp.tool()
+    async def generate_music(
+        engine: str,
+        prompt: str,
+        duration_sec: float = 60.0,
+        lyrics: str | None = None,
+        seed: int | None = None,
+        output_format: str = "wav",
+        output_path: str | None = None,
+        output_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Text-to-music generation.
+
+        ``engine`` selects the generator:
+        - ``ace-step`` — Apache 2.0, ~4 min vocal+instrumental songs.
+        - ``diffrhythm`` — Apache 2.0, ~4m45s songs, lowest VRAM.
+        - ``stable-audio-open`` — Stability Community License, 47s cap,
+          loops / SFX / textures (no vocals).
+
+        ``lyrics`` applies to ace-step and diffrhythm only; ignored by
+        stable-audio-open. Writes audio to `output_path` xor `output_url`;
+        ``output_path`` to stage in FILES_DIR or ``output_url`` for a
+        presigned PUT. Long generations may take multiple minutes — use
+        the REST endpoint with ``async_job=true`` for fire-and-forget.
+        """
+        eng = engines.get(engine)
+        if eng is None:
+            raise ValueError(
+                f"unknown engine {engine!r}; configured: {sorted(engines)}"
+            )
+        if not hasattr(eng, "generate"):
+            raise ValueError(
+                f"engine {engine!r} does not support text-to-music generation"
+            )
+        try:
+            data = await eng.generate(
+                prompt,
+                duration_sec=duration_sec,
+                lyrics=lyrics,
+                seed=seed,
+                output_format=output_format,
+            )
+        except AudioConversionError as exc:
+            raise ValueError(str(exc)) from exc
+        return await _emit_audio(data, output_format, output_url, output_path)
+
     # ── audio processing tools ──────────────────────────────────────────────
 
     @mcp.tool()
@@ -308,7 +362,7 @@ def build_mcp_server(
         Provide exactly one of `file_path` or `file_url`. Three output modes
         (mutually exclusive — pass at most one):
 
-        - default: per-stem audio base64-encoded under `stems`.
+        - default: per-stem audio paths under `stems` (one path per stem).
         - `output_paths={stem_name: path}`: stage each stem in FILES_DIR;
           response has `staged_stems` mapping stem -> {path, size}.
         - `output_urls={stem_name: presigned_put_url}`: PUT each stem to
@@ -384,13 +438,10 @@ def build_mcp_server(
                 "output_format": output_format,
             }
 
-        return {
-            "stems": {
-                stem_name: base64.b64encode(audio).decode("ascii")
-                for stem_name, audio in result.items()
-            },
-            "output_format": output_format,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     @mcp.tool()
     async def master(
@@ -410,8 +461,9 @@ def build_mcp_server(
         Provide exactly one of `file_path` or `file_url`. For
         `mode=reference`, also provide one of `reference_path` or
         `reference_url`. For `mode=chain`, set `preset` (transparent or
-        loud). Returns base64 audio unless `output_url` is set (presigned
-        PUT). target_lufs is optional in both modes.
+        loud). Writes audio to `output_path` xor `output_url`; response
+        `{path,size,...}` or `{url,size,...}`. target_lufs is optional in
+        both modes.
         """
         if mode not in ("reference", "chain"):
             raise ValueError("mode must be 'reference' or 'chain'")
@@ -489,8 +541,8 @@ def build_mcp_server(
 
         Provide exactly one of `file_path` or `file_url`. `operations` is
         a list of {op, params} — valid ops: gain, equalizer, compand,
-        reverb, pitch, tempo, rate, channels, trim, pad. Returns base64
-        audio unless `output_url` is set (presigned PUT).
+        reverb, pitch, tempo, rate, channels, trim, pad. Writes audio to
+        `output_path` xor `output_url`.
         """
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("sox-transform")
@@ -535,9 +587,9 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Normalize audio to a target LUFS level via pyloudnorm.
 
-        Provide exactly one of `file_path` or `file_url`. Returns base64
-        audio plus ``measured_lufs`` and ``target_lufs``. Pass
-        ``output_url`` for a presigned PUT instead.
+        Provide exactly one of `file_path` or `file_url`. Writes audio to
+        `output_path` xor `output_url`; response carries ``measured_lufs``
+        and ``target_lufs`` plus `{path,size,...}` or `{url,size,...}`.
         """
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("librosa-analyze")
@@ -573,8 +625,8 @@ def build_mcp_server(
         Provide exactly one of `file_path` or `file_url`. `effects` is an
         ordered list of {type, params} — type names match pedalboard
         classes (Compressor, Reverb, Chorus, Delay, PitchShift,
-        HighShelfFilter, ...). Returns base64 audio unless `output_url`
-        is set (presigned PUT).
+        HighShelfFilter, ...). Writes audio to `output_path` xor
+        `output_url`.
         """
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("fx-chain")
@@ -605,10 +657,8 @@ def build_mcp_server(
         ``{tempo_bpm, time_signature, tracks: [{program, channel,
         notes: [{pitch, start_beats, duration_beats, velocity}]}]}``.
 
-        Returns base64 MIDI by default, or writes to staging if
-        `output_path` is set, or PUTs to a presigned URL if `output_url`
-        is set. The returned dict carries `size` and either
-        `midi_base64` / `path` / `url`.
+        Writes MIDI to `output_path` xor `output_url`; response carries
+        `size` and either `path` or `url`.
         """
         eng = engines.get("midi-compose")
         if eng is None or not hasattr(eng, "compose"):
@@ -632,10 +682,10 @@ def build_mcp_server(
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
             return {"url": output_url, "size": len(midi)}
-        return {
-            "midi_base64": base64.b64encode(midi).decode("ascii"),
-            "size": len(midi),
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     @mcp.tool()
     async def midi_render(
@@ -653,7 +703,7 @@ def build_mcp_server(
         Provide exactly one of `file_path` (staged MIDI) or `file_url`
         (remote MIDI — subject to fetch policy). `soundfont_path`
         optionally overrides the server's default SoundFont with a
-        staged ``.sf2``. Returns base64 audio unless `output_url` is set.
+        staged ``.sf2``. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`.
         """
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("midi-render")
@@ -714,7 +764,7 @@ def build_mcp_server(
         output_format: str = "wav",
     ) -> dict[str, Any]:
         """Beat tracking. Returns tempo + beat positions in seconds.
-        With ``click_track=True`` also returns base64 audio of input
+        With ``click_track=True`` also writes click-track audio to ``output_path`` xor ``output_url`` of input
         mixed with a metronome click on each beat."""
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("librosa-analyze")
@@ -755,7 +805,7 @@ def build_mcp_server(
         as_midi: bool = False,
     ) -> dict[str, Any]:
         """Monophonic pitch tracking via pyin. Returns the pitch contour
-        and (with ``as_midi=True``) a base64 MIDI file of quantised
+        and (with ``as_midi=True``) a MIDI file of quantised (writes to ``output_path`` xor ``output_url``)
         notes."""
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("librosa-analyze")
@@ -803,7 +853,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Find silent ranges + optionally auto-trim. ``trim_mode='edges'``
         removes leading/trailing silence; ``'all'`` removes every detected
-        silence. Output is base64 audio under ``trimmed_audio_base64``."""
+        silence. When `trim_mode` is set, writes trimmed audio to `output_path` xor `output_url`."""
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("silence-detect")
         if eng is None or not hasattr(eng, "detect"):
@@ -847,8 +897,8 @@ def build_mcp_server(
         - ``spectrum`` / ``waves`` / ``cqt`` / ``freqs`` / ``volume`` /
           ``vectorscope`` / ``phasemeter`` / ``histogram`` — animated MP4/WebM video
 
-        Output: PNG modes return ``{image_base64, ...}`` / video modes return
-        ``{video_base64, ...}``. Pass ``output_path`` to stage in FILES_DIR
+        Output: PNG/MP4/WebM bytes are written to ``output_path`` xor ``output_url``;
+        response is ``{path, size, ...}`` or ``{url, size, ...}``. Pass ``output_path`` to stage in FILES_DIR
         and get ``{path, ...}`` back, or ``output_url`` for a presigned PUT
         returning ``{url, ...}``. ``output_path`` + ``output_url`` are mutually
         exclusive.
@@ -887,7 +937,10 @@ def build_mcp_server(
                 if output_url:
                     await fetch.upload_bytes(output_url, out, "image/png")
                     return {"url": output_url, "size": len(out), **base}
-                return {"image_base64": base64.b64encode(out).decode("ascii"), "size": len(out), **base}
+                raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
             out = await eng.visualize(raw, name, mode=mode, width=width, height=height, fps=fps, container=container)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
@@ -901,11 +954,10 @@ def build_mcp_server(
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
             return {"url": output_url, "size": len(out), **base}
-        return {
-            "video_base64": base64.b64encode(out).decode("ascii"),
-            "size": len(out),
-            **base,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── fingerprint (Chromaprint) ──────────────────────────────────────────
 
@@ -952,8 +1004,8 @@ def build_mcp_server(
         engine=uvr-denoise: MelBand Roformer noise removal (SDR 28).
           For DSP-based noise reduction use noise_reduce with engine=noise-reduce.
 
-        Returns {audio_base64, size, engine, output_format} or
-        {url, size, engine, output_format} if output_url is set.
+        Writes audio to `output_path` xor `output_url`; response is
+        `{path,size,engine,output_format}` or `{url,size,engine,output_format}`.
         """
         from .engines import is_uvr_restore_engine  # noqa: PLC0415
 
@@ -973,13 +1025,10 @@ def build_mcp_server(
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
             return {"url": output_url, "size": len(audio_bytes), "engine": engine, "aggressive": aggressive, "output_format": output_format}
-        return {
-            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
-            "size": len(audio_bytes),
-            "engine": engine,
-            "aggressive": aggressive,
-            "output_format": output_format,
-        }
+        raise ValueError(
+            "audio-producing MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     @mcp.tool()
     async def denoise(
@@ -1041,7 +1090,7 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Transform a MIDI file: transpose / quantize / change tempo /
-        filter channels. Returns base64 MIDI by default."""
+        filter channels. Writes MIDI to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         raw, _name = await _load_input(file_path, file_url)
         eng = engines.get("midi-compose")
         if eng is None or not hasattr(eng, "transform"):
@@ -1063,10 +1112,10 @@ def build_mcp_server(
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
             return {"url": output_url, "size": len(out)}
-        return {
-            "midi_base64": base64.b64encode(out).decode("ascii"),
-            "size": len(out),
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── audio-to-MIDI (basic-pitch) ────────────────────────────────────────
 
@@ -1087,10 +1136,9 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Convert audio to a polyphonic MIDI file via Spotify basic-pitch.
 
-        Provide exactly one of `file_path` or `file_url`. Returns
-        `{midi_base64, size, engine}` by default, or writes to staging
-        if `output_path` is set, or PUTs to a presigned URL if
-        `output_url` is set.
+        Provide exactly one of `file_path` or `file_url`. Writes MIDI to
+        `output_path` xor `output_url`; response is `{path,size,engine}`
+        or `{url,size,engine}`.
         """
         from .engines import is_basic_pitch_engine  # noqa: PLC0415
 
@@ -1131,11 +1179,10 @@ def build_mcp_server(
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
             return {"url": output_url, "size": len(midi), "engine": engine}
-        return {
-            "midi_base64": base64.b64encode(midi).decode("ascii"),
-            "size": len(midi),
-            "engine": engine,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── neural enhancement (DeepFilterNet) ────────────────────────────────
 
@@ -1149,9 +1196,9 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Neural speech and vocal enhancement via DeepFilterNet DF3.
 
-        Provide exactly one of `file_path` or `file_url`. Returns
-        `{audio_base64, size, engine, output_format}` by default,
-        or `{url, size, engine, output_format}` if `output_url` is set.
+        Provide exactly one of `file_path` or `file_url`. Writes audio to
+        `output_path` xor `output_url`; response is
+        `{path,size,engine,output_format}` or `{url,size,engine,output_format}`.
         """
         from .engines import is_deepfilter_engine  # noqa: PLC0415
 
@@ -1182,12 +1229,10 @@ def build_mcp_server(
                 "engine": engine,
                 "output_format": output_format,
             }
-        return {
-            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
-            "size": len(audio_bytes),
-            "engine": engine,
-            "output_format": output_format,
-        }
+        raise ValueError(
+            "audio-producing MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── chord + key detection (librosa) ───────────────────────────────────────
 
@@ -1289,8 +1334,7 @@ def build_mcp_server(
         output_format: str = "wav",
     ) -> dict[str, Any]:
         """Time-stretch and/or pitch-shift audio. tempo_factor=0.5 halves speed;
-        pitch_semitones=12 shifts one octave up. Returns base64 audio (or writes
-        to output_path in staging)."""
+        pitch_semitones=12 shifts one octave up. Writes audio to `output_path` xor `output_url`."""
         from .engines import is_stretch_engine  # noqa: PLC0415
         from .audio import content_type_for  # noqa: PLC0415
 
@@ -1315,11 +1359,10 @@ def build_mcp_server(
                 raise ValueError(str(exc)) from exc
             files_mod.write_atomic(dest, audio_bytes)
             return {"path": str(rel), "size": len(audio_bytes)}
-        return {
-            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
-            "content_type": content_type_for(output_format),
-            "size": len(audio_bytes),
-        }
+        raise ValueError(
+            "audio-producing MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     @mcp.tool()
     async def tag(
@@ -1388,7 +1431,7 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Cut audio to [start_sec, end_sec). end_sec required and must be > start_sec.
-        Returns base64 audio unless output_url is set (presigned PUT)."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import trim_audio as _trim  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if end_sec <= start_sec:
@@ -1408,7 +1451,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Mix multiple audio tracks with per-track gain.
         tracks: list of {file_path or file_url, gain_db (optional, default 0.0)}.
-        Requires at least 2 tracks. Returns base64 audio unless output_url is set."""
+        Requires at least 2 tracks. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import mix_audio as _mix  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if len(tracks) < 2:
@@ -1461,7 +1504,7 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Apply fade-in/fade-out. curve: tri/qsin/esin/hsin/log/exp/lin/etc.
-        At least one of fade_in/fade_out must be > 0. Returns base64 audio."""
+        At least one of fade_in/fade_out must be > 0. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import fade_audio as _fade  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if fade_in <= 0.0 and fade_out <= 0.0:
@@ -1481,7 +1524,7 @@ def build_mcp_server(
         output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Reverse audio playback direction. Returns base64 audio."""
+        """Reverse audio playback direction. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import reverse_audio as _reverse  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         async def _work(raw: bytes, filename: str) -> bytes:
@@ -1497,7 +1540,7 @@ def build_mcp_server(
         output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Repeat audio count times (minimum 2). Returns base64 audio."""
+        """Repeat audio count times (minimum 2). Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import loop_audio as _loop  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if count < 2:
@@ -1518,7 +1561,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Detect source BPM then time-stretch to target_bpm.
         Requires librosa-analyze + stretch engines.
-        Returns base64 audio + {source_bpm, target_bpm, tempo_factor}."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}` plus {source_bpm, target_bpm, tempo_factor}."""
         from .engines import is_beats_engine as _is_beats  # noqa: PLC0415
         from .engines import is_stretch_engine as _is_stretch  # noqa: PLC0415
         if target_bpm <= 0:
@@ -1560,7 +1603,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Adjust stereo image width via M/S processing.
         width=0.0 → mono, 1.0 → original, >1.0 → wider. Range: [0.0, 3.0].
-        Returns base64 audio."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import stereo_width_audio as _stereo_width  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if not (0.0 <= width <= 3.0):
@@ -1586,7 +1629,7 @@ def build_mcp_server(
         """Split audio into segments.
         mode=equal: requires count>=2, splits into equal time parts.
         mode=silence: splits on quiet gaps (uses threshold_db/min_duration_sec).
-        Returns {segments: [{name, audio_base64}, ...]}."""
+        DEPRECATED in v1.0.0 — raises ValueError; use REST `POST /v1/audio/split` with `output_path`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import (  # noqa: PLC0415
             split_audio_equal as _split_equal,
@@ -1631,16 +1674,13 @@ def build_mcp_server(
                 segs.append(seg)
         else:
             raise ValueError("mode must be 'equal' or 'silence'")
-        return {
-            "segments": [
-                {
-                    "name": f"segment_{i:03d}.{output_format}",
-                    "audio_base64": base64.b64encode(seg).decode(),
-                }
-                for i, seg in enumerate(segs)
-            ],
-            "count": len(segs),
-        }
+        # v1.0.0: split MCP tool no longer returns inline base64 segments.
+        # Use REST POST /v1/audio/split with output_path for per-segment staging,
+        # or iterate via repeated MCP calls writing each segment to a path.
+        raise ValueError(
+            "split MCP tool no longer returns inline base64 segments in "
+            "v1.0.0; use REST POST /v1/audio/split with output_path"
+        )
 
     @mcp.tool()
     async def pan(
@@ -1653,7 +1693,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Pan audio in the stereo field.
         position: -1.0=hard left, 0.0=center, 1.0=hard right.
-        Returns base64 audio."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import pan_audio as _pan  # noqa: PLC0415
 
@@ -1675,7 +1715,7 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Parametric EQ. bands: [{freq, gain_db, width_hz (opt)}].
-        Returns base64 audio."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import eq_audio as _eq  # noqa: PLC0415
 
@@ -1697,7 +1737,7 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Detect source key then pitch-shift to target_key (e.g. C, F#, Bb).
-        Returns base64 audio + {source_key, target_key, semitones}.
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}` plus {source_key, target_key, semitones}.
         Requires chord-detect + stretch engines."""
         from .engines import (  # noqa: PLC0415
             is_chord_detect_engine as _is_chord,
@@ -1774,7 +1814,7 @@ def build_mcp_server(
         """Duck primary audio when trigger audio is loud.
         Provide primary via file_path/file_url, trigger via
         trigger_file_path/trigger_file_url.
-        Returns base64 audio."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import sidechain_duck as _duck  # noqa: PLC0415
 
@@ -1805,7 +1845,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Concatenate N audio files in order.
         files: list of {file_path or file_url}. Requires at least 2.
-        Returns base64 audio unless output_url is set."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import concat_audio as _concat  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if len(files) < 2:
@@ -1836,7 +1876,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Change playback speed without pitch shift via ffmpeg atempo.
         speed=0.5 halves speed; speed=2.0 doubles. Range: 0.1–10.0.
-        Returns base64 audio unless output_url is set."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import speed_audio as _speed  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if not (0.1 <= speed <= 10.0):
@@ -1857,7 +1897,7 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Re-encode audio to a different format, sample rate, or channel count.
         output_format: wav/mp3/flac/opus/aac/pcm. sample_rate: e.g. 16000, 44100, 48000.
-        channels: 1 (mono) or 2 (stereo). Returns base64 audio unless output_url is set."""
+        channels: 1 (mono) or 2 (stereo). Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import convert_audio as _convert  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         async def _work(raw: bytes, filename: str) -> bytes:
@@ -1896,7 +1936,7 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Snap MIDI note timings to the nearest rhythmic grid.
-        grid_beats: 0.25=16th note, 0.5=8th, 1.0=quarter. Returns base64 MIDI."""
+        grid_beats: 0.25=16th note, 0.5=8th, 1.0=quarter. Writes MIDI to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         if grid_beats <= 0:
             raise ValueError(f"grid_beats must be > 0, got {grid_beats}")
         raw, _name = await _load_input(file_path, file_url)
@@ -1913,11 +1953,10 @@ def build_mcp_server(
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
             return {"url": output_url, "size": len(out), "grid_beats": grid_beats}
-        return {
-            "midi_base64": base64.b64encode(out).decode("ascii"),
-            "size": len(out),
-            "grid_beats": grid_beats,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── HPSS + noise reduction ──────────────────────────────────────────────
 
@@ -1932,7 +1971,7 @@ def build_mcp_server(
         """Harmonic/percussive source separation via librosa HPSS median filter.
 
         Provide exactly one of `file_path` or `file_url`. Returns
-        ``{stems: {harmonic: <base64>, percussive: <base64>}, output_format}``.
+        ``{stems: {harmonic: <path|url>, percussive: <path|url>}, output_format}`` — pass ``output_paths={'harmonic':..., 'percussive':...}`` xor ``output_urls={...}``.
         ``margin`` ≥1.0 controls separation aggressiveness; ``kernel_size``
         sets the median filter width (odd int, default 31).
         """
@@ -1952,13 +1991,10 @@ def build_mcp_server(
             )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return {
-            "stems": {
-                stem: base64.b64encode(audio).decode("ascii")
-                for stem, audio in result.items()
-            },
-            "output_format": output_format,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     @mcp.tool()
     async def noise_reduce(
@@ -2039,8 +2075,7 @@ def build_mcp_server(
         return {
             "path": rel,
             "size": len(data),
-            "content_base64": base64.b64encode(data).decode("ascii"),
-        }
+        }  # v1.0.0: content_base64 dropped — fetch via REST GET /v1/files/{path}
 
     @mcp.tool()
     async def delete_file(path: str) -> dict[str, Any]:
@@ -2143,11 +2178,10 @@ def build_mcp_server(
             zip_bytes = await asyncio.to_thread(beat_slice, raw, filename, beat_times, output_format)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
-        return {
-            "zip_base64": base64.b64encode(zip_bytes).decode("ascii"),
-            "beat_count": len(beat_times),
-            "output_format": output_format,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── conv_reverb — convolution reverb ──────────────────────────────────
 
@@ -2424,10 +2458,10 @@ def build_mcp_server(
             async with httpx.AsyncClient(timeout=30) as client:
                 await client.put(output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"})
             return {"output_url": output_url, "size": len(midi_bytes)}
-        return {
-            "midi_base64": base64.b64encode(midi_bytes).decode("ascii"),
-            "size": len(midi_bytes),
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── chords_to_midi — chord progression → MIDI ─────────────────────────
 
@@ -2467,12 +2501,10 @@ def build_mcp_server(
             async with httpx.AsyncClient(timeout=30) as client:
                 await client.put(output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"})
             return {"output_url": output_url, "size": len(midi_bytes), "key": chord_result.get("key", "")}
-        return {
-            "midi_base64": base64.b64encode(midi_bytes).decode("ascii"),
-            "size": len(midi_bytes),
-            "chord_count": len(chords),
-            "key": chord_result.get("key", ""),
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── deess — sibilance suppressor ─────────────────────────────────────────
 
@@ -2503,13 +2535,10 @@ def build_mcp_server(
             async with httpx.AsyncClient(timeout=30) as client:
                 await client.put(output_url, content=result, headers={"Content-Type": content_type_for(output_format)})
             return {"output_url": output_url, "size": len(result)}
-        return {
-            f"audio_{output_format}_base64": base64.b64encode(result).decode("ascii"),
-            "size": len(result),
-            "threshold_db": threshold_db,
-            "frequency_hz": frequency_hz,
-            "ratio": ratio,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── stereo_field — stereo field analysis ─────────────────────────────────
 
@@ -2557,11 +2586,10 @@ def build_mcp_server(
             async with httpx.AsyncClient(timeout=30) as client:
                 await client.put(output_url, content=audio_bytes, headers={"Content-Type": content_type_for(output_format)})
             return {"output_url": output_url, "size": len(audio_bytes), **meta}
-        return {
-            f"audio_{output_format}_base64": base64.b64encode(audio_bytes).decode("ascii"),
-            "size": len(audio_bytes),
-            **meta,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # ── midi_humanize — add timing jitter + velocity variation ────────────────
 
@@ -2595,12 +2623,10 @@ def build_mcp_server(
             async with httpx.AsyncClient(timeout=30) as client:
                 await client.put(output_url, content=result, headers={"Content-Type": "audio/midi"})
             return {"output_url": output_url, "size": len(result)}
-        return {
-            "midi_base64": base64.b64encode(result).decode("ascii"),
-            "size": len(result),
-            "timing_ms": timing_ms,
-            "velocity_pct": velocity_pct,
-        }
+        raise ValueError(
+            "binary-output MCP tool requires output_path or output_url; "
+            "the raw-base64 response mode was removed in v1.0.0"
+        )
 
     # Log the live tool count via the public list_tools() API — avoids a
     # hardcoded number that drifts every time a tool is added/removed.

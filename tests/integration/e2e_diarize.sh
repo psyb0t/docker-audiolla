@@ -24,8 +24,14 @@ harness_start "pyannote"
 
 test_diarize_returns_segments() {
     local body
-    body=$(curl -s --max-time 300 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/diarize/pyannote")
     if ! echo "$body" | jq -e '.segments | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: segments not an array; body: $body"; return 1
@@ -40,10 +46,20 @@ test_diarize_returns_segments() {
 
 test_diarize_404_for_unknown_engine() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/diarize/nonexistent")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "404" "unknown engine -> 404" || return 1
     echo "OK: diarize_404_for_unknown_engine"
 }
@@ -52,9 +68,14 @@ test_diarize_404_for_unknown_engine() {
 
 test_diarize_with_num_speakers() {
     local body
-    body=$(curl -s --max-time 300 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "num_speakers=2" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"num_speakers\":2}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/diarize/pyannote")
     if ! echo "$body" | jq -e '.segments | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: segments missing when num_speakers=2; body: $body"; return 1

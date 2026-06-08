@@ -55,12 +55,24 @@ trap "rm -f $MIDI_FIXTURE" EXIT
 test_humanize_returns_midi() {
     local tmpf code sz
     tmpf=$(mktemp --suffix=.mid)
-    code=$(curl -s -o "$tmpf" -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${MIDI_FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${MIDI_FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.mid"
+    curl -sf -X PUT --data-binary "@${MIDI_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o /dev/null \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/humanize")
-    assert_eq "$code" "200" "humanize default -> 200" || { rm -f "$tmpf"; return 1; }
-    if ! head -c 4 "$tmpf" | grep -q "MThd"; then
-        echo "  FAIL: output is not MIDI"; rm -f "$tmpf"; return 1
+    assert_eq "$code" "200" "humanize default -> 200" || return 1
+    curl -sf -o "$tmpf" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || {
+        echo "  FAIL: GET staged humanized MIDI failed"; rm -f "$tmpf"; return 1
+    }
+    if [ "$(head -c 4 "$tmpf")" != "MThd" ]; then
+        echo "  FAIL: staged file is not MIDI (no MThd)"; rm -f "$tmpf"; return 1
     fi
     sz=$(stat -c%s "$tmpf")
     rm -f "$tmpf"
@@ -76,14 +88,26 @@ test_humanize_seed_deterministic() {
     local tmp1 tmp2 code1 code2
     tmp1=$(mktemp --suffix=.mid)
     tmp2=$(mktemp --suffix=.mid)
-    code1=$(curl -s -o "$tmp1" -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${MIDI_FIXTURE}" \
-        -F "seed=42" \
+    local _stage="uploads/$(basename "${MIDI_FIXTURE}")"
+    local _out1="out/result-$$-${RANDOM}-1.mid"
+    local _out2="out/result-$$-${RANDOM}-2.mid"
+    curl -sf -X PUT --data-binary "@${MIDI_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code1=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"seed\":42,\"output_path\":\"$_out1\"}" \
+        -o /dev/null \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/humanize")
-    code2=$(curl -s -o "$tmp2" -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${MIDI_FIXTURE}" \
-        -F "seed=42" \
+    curl -sf -o "$tmp1" "${AUDIOLLA_BASE_URL}/v1/files/${_out1}" || true
+    code2=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"seed\":42,\"output_path\":\"$_out2\"}" \
+        -o /dev/null \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/humanize")
+    curl -sf -o "$tmp2" "${AUDIOLLA_BASE_URL}/v1/files/${_out2}" || true
     assert_eq "$code1" "200" "humanize seed 1st call -> 200" || { rm -f "$tmp1" "$tmp2"; return 1; }
     assert_eq "$code2" "200" "humanize seed 2nd call -> 200" || { rm -f "$tmp1" "$tmp2"; return 1; }
     if ! cmp -s "$tmp1" "$tmp2"; then
@@ -97,11 +121,15 @@ test_humanize_seed_deterministic() {
 
 test_humanize_output_path() {
     local body code fetched
-    body=$(curl -s --max-time 30 -X POST \
-        -F "file=@${MIDI_FIXTURE}" \
-        -F "timing_ms=5" \
-        -F "velocity_pct=5" \
-        -F "output_path=humanize_test/out.mid" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${MIDI_FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${MIDI_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"timing_ms\":5,\"velocity_pct\":5,\"output_path\":\"humanize_test/out.mid\"}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/humanize")
     if ! echo "$body" | jq -e '.path == "humanize_test/out.mid"' >/dev/null 2>&1; then
         echo "  FAIL: path missing; body: $body"; return 1
@@ -113,9 +141,9 @@ test_humanize_output_path() {
     code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
         "${AUDIOLLA_BASE_URL}/v1/files/humanize_test/out.mid")
     assert_eq "$code" "200" "GET staged humanized MIDI -> 200" || { rm -f "$fetched"; return 1; }
-    head -c 4 "$fetched" | grep -q "MThd" || {
-        echo "  FAIL: staged file not MIDI"; rm -f "$fetched"; return 1
-    }
+    if [ "$(head -c 4 "$fetched")" != "MThd" ]; then
+        echo "  FAIL: staged file not MIDI (no MThd)"; rm -f "$fetched"; return 1
+    fi
     rm -f "$fetched"
     echo "OK: humanize_output_path"
 }
@@ -124,8 +152,16 @@ test_humanize_output_path() {
 
 test_humanize_non_midi_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.mid"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/humanize")
     assert_eq "$code" "400" "non-MIDI file -> 400" || return 1
     echo "OK: humanize_non_midi_400"
@@ -135,9 +171,16 @@ test_humanize_non_midi_400() {
 
 test_humanize_invalid_timing_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${MIDI_FIXTURE}" \
-        -F "timing_ms=1000" \
+    local _stage="uploads/$(basename "${MIDI_FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.mid"
+    curl -sf -X PUT --data-binary "@${MIDI_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"timing_ms\":1000,\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/midi/humanize")
     assert_eq "$code" "400" "timing_ms=1000 -> 400" || return 1
     echo "OK: humanize_invalid_timing_400"

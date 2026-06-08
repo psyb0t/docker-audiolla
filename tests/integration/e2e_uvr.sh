@@ -28,10 +28,20 @@ _uvr_or_skip() {
     local tmp
     tmp=$(mktemp)
     # 600s allows for first-run model download (BS-Roformer ~500MB pull).
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 600 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/restore/${engine}")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     body=$(cat "$tmp")
     rm -f "$tmp"
 
@@ -88,10 +98,20 @@ test_restore_rejects_wrong_engine_type() {
     local code body
     local tmp
     tmp=$(mktemp)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" \
-        --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/restore/ffmpeg-render")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     body=$(cat "$tmp")
     rm -f "$tmp"
     # Either 400 (wrong type) or 404 (engine not configured for this run) is correct.
@@ -108,11 +128,20 @@ test_restore_output_path() {
     local code body
     local tmp
     tmp=$(mktemp)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" \
-        --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_path=uvr/restore.wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"uvr/restore.wav\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/restore/uvr-dereverb")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     body=$(cat "$tmp")
     rm -f "$tmp"
 

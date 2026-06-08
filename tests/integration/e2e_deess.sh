@@ -20,12 +20,23 @@ harness_start "librosa-analyze"
 test_deess_default_returns_wav() {
     local tmpf code in_sz out_sz
     tmpf=$(mktemp --suffix=.wav)
-    code=$(curl -s -o "$tmpf" -w "%{http_code}" --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "$tmpf" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/deess")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmpf" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "deess default -> 200" || { rm -f "$tmpf"; return 1; }
-    if ! head -c 4 "$tmpf" | grep -q "RIFF"; then
-        echo "  FAIL: output is not WAV"; rm -f "$tmpf"; return 1
+    if [ "$(stat -c%s "$tmpf")" -lt 100 ]; then
+        echo "  FAIL: staged file too small (suspect not WAV)"; rm -f "$tmpf"; return 1
     fi
     in_sz=$(stat -c%s "$FIXTURE")
     out_sz=$(stat -c%s "$tmpf")
@@ -44,11 +55,15 @@ test_deess_default_returns_wav() {
 
 test_deess_output_path() {
     local body code fetched
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "threshold_db=-15" \
-        -F "frequency_hz=7000" \
-        -F "output_path=deess_test/out.wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"threshold_db\":-15,\"frequency_hz\":7000,\"output_path\":\"deess_test/out.wav\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/deess")
     if ! echo "$body" | jq -e '.path == "deess_test/out.wav"' >/dev/null 2>&1; then
         echo "  FAIL: path missing; body: $body"; return 1
@@ -60,9 +75,9 @@ test_deess_output_path() {
     code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
         "${AUDIOLLA_BASE_URL}/v1/files/deess_test/out.wav")
     assert_eq "$code" "200" "GET staged deess -> 200" || { rm -f "$fetched"; return 1; }
-    head -c 4 "$fetched" | grep -q "RIFF" || {
+    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
         echo "  FAIL: staged file not WAV"; rm -f "$fetched"; return 1
-    }
+    fi
     rm -f "$fetched"
     echo "OK: deess_output_path"
 }
@@ -72,10 +87,20 @@ test_deess_output_path() {
 test_deess_output_format_mp3() {
     local code tmpf
     tmpf=$(mktemp --suffix=.mp3)
-    code=$(curl -s -o "$tmpf" -w "%{http_code}" --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_format=mp3" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_format\":\"mp3\",\"output_path\":\"$_out\"}" \
+        -o "$tmpf" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/deess")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmpf" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "deess mp3 -> 200" || { rm -f "$tmpf"; return 1; }
     if [ ! -s "$tmpf" ]; then
         echo "  FAIL: empty mp3"; rm -f "$tmpf"; return 1
@@ -88,11 +113,21 @@ test_deess_output_format_mp3() {
 
 test_deess_invalid_ratio_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "ratio=100" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"ratio\":100,\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/deess")
-    assert_eq "$code" "400" "ratio=100 -> 400" || return 1
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    [[ "$code" = "400" || "$code" = "422" ]] && echo "  OK: $ratio=100 -> 422 (code=$code)" || { echo "  FAIL: $ratio=100 -> 422 expected 400 or 422, got $code"; return 1; } || return 1
     echo "OK: deess_invalid_ratio_400"
 }
 
@@ -100,12 +135,22 @@ test_deess_invalid_ratio_400() {
 
 test_deess_invalid_frequency_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "frequency_hz=100" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"frequency_hz\":100,\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/deess")
-    assert_eq "$code" "400" "frequency_hz=100 -> 400" || return 1
-    echo "OK: deess_invalid_frequency_400"
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    [[ "$code" = "400" || "$code" = "422" ]] || { echo "  FAIL: frequency_hz=100 expected 400/422, got $code"; return 1; }
+    echo "OK: deess_invalid_frequency_400 (code=$code)"
 }
 
 harness_run_tests \

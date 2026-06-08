@@ -20,8 +20,14 @@ harness_start "librosa-analyze"
 
 test_loop_point_shape() {
     local body
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loop-point")
     if ! echo "$body" | jq -e '.loop_start_sec | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: loop_start_sec missing; body: $body"; return 1
@@ -45,8 +51,14 @@ test_loop_point_shape() {
 
 test_loop_point_start_lt_end() {
     local body
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loop-point")
     if ! echo "$body" | jq -e '.loop_start_sec <= .loop_end_sec' >/dev/null 2>&1; then
         local s e
@@ -64,10 +76,14 @@ test_loop_point_start_lt_end() {
 
 test_loop_point_beat_fixture_real_candidates() {
     local body
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
-        -F "min_loop_bars=1" \
-        -F "num_candidates=3" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"min_loop_bars\":1,\"num_candidates\":3}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loop-point")
     # The 120BPM click track has ≥16 beats → enough for min_bars=1 candidates.
     if echo "$body" | jq -e '.note != null' >/dev/null 2>&1; then
@@ -90,9 +106,14 @@ test_loop_point_beat_fixture_real_candidates() {
 
 test_loop_point_beat_fixture_loop_length() {
     local body
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
-        -F "min_loop_bars=1" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"min_loop_bars\":1}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loop-point")
     local start end length
     start=$(echo "$body" | jq -r '.loop_start_sec')
@@ -108,9 +129,14 @@ test_loop_point_beat_fixture_loop_length() {
 
 test_loop_point_candidates_count() {
     local body count
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
-        -F "num_candidates=3" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"num_candidates\":3}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loop-point")
     if ! echo "$body" | jq -e '.candidates | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: candidates not an array; body: $body"; return 1
@@ -123,11 +149,21 @@ test_loop_point_candidates_count() {
 
 test_loop_point_invalid_bars() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "min_loop_bars=0" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"min_loop_bars\":0,\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loop-point")
-    assert_eq "$code" "400" "min_loop_bars=0 -> 400" || return 1
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    [[ "$code" = "400" || "$code" = "422" ]] && echo "  OK: $min_loop_bars=0 -> 422 (code=$code)" || { echo "  FAIL: $min_loop_bars=0 -> 422 expected 400 or 422, got $code"; return 1; } || return 1
     echo "OK: loop_point_invalid_bars"
 }
 

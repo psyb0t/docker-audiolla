@@ -41,6 +41,13 @@ from .librosa_analyze import LibrosaAnalyzeEngine
 from .matchering_engine import MatcheringEngine
 from .metadata_engine import MetadataEngine
 from .midi_compose import MidiComposeEngine
+from .music_gen import (
+    AudioLDM2Engine,
+    MusicGenMediumEngine,
+    MusicGenSmallEngine,
+    RiffusionEngine,
+    StableAudioOpenEngine,
+)
 from .midi_render import MidiRenderEngine
 from .noise_reduce_engine import NoiseReduceEngine
 from .pedalboard_chain import PedalboardChainEngine
@@ -130,6 +137,22 @@ def build_engines(registry: dict[str, dict], device: str) -> dict[str, Any]:
         if executor == "metadata":
             out[slug] = MetadataEngine(slug=slug, entry=entry)
             continue
+        if executor == "stable_audio_open":
+            out[slug] = StableAudioOpenEngine(slug=slug, entry=entry)
+            continue
+        if executor == "musicgen":
+            size = entry.get("model_size", "small")
+            if size == "medium":
+                out[slug] = MusicGenMediumEngine(slug=slug, entry=entry)
+            else:
+                out[slug] = MusicGenSmallEngine(slug=slug, entry=entry)
+            continue
+        if executor == "riffusion":
+            out[slug] = RiffusionEngine(slug=slug, entry=entry)
+            continue
+        if executor == "audioldm2":
+            out[slug] = AudioLDM2Engine(slug=slug, entry=entry)
+            continue
         raise ValueError(f"unknown executor {executor!r} for engine {slug!r}")
     return out
 
@@ -160,6 +183,10 @@ def is_loudness_engine(engine: Any) -> bool:
 
 def is_fx_engine(engine: Any) -> bool:
     return hasattr(engine, "fx")
+
+
+def is_music_gen_engine(engine: Any) -> bool:
+    return hasattr(engine, "generate")
 
 
 def is_midi_compose_engine(engine: Any) -> bool:

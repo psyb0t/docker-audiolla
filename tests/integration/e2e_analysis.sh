@@ -39,12 +39,14 @@ test_healthz_has_librosa() {
 test_analyze_all_features() {
     _skip_if_no_fixture && return 0
     local body
-    body=$(curl -s --max-time 60 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "features=bpm" -F "features=key" -F "features=loudness" \
-        -F "features=duration" -F "features=spectral_centroid" \
-        -F "features=rms" -F "features=zcr" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s --max-time 120 -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"features\":[\"bpm\",\"key\",\"loudness\",\"duration\",\"spectral_centroid\",\"rms\",\"zcr\"]}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/analyze")
 
     for k in duration bpm key loudness_lufs spectral_centroid rms zcr; do
@@ -75,7 +77,14 @@ test_analyze_all_features() {
 test_analyze_default_features() {
     _skip_if_no_fixture && return 0
     local body
-    body=$(curl -s --max-time 60 -X POST -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s --max-time 120 -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/analyze")
     if ! echo "$body" | jq -e '.duration != null' >/dev/null 2>&1; then
         echo "  FAIL: default-features response missing duration"
@@ -90,10 +99,17 @@ test_analyze_default_features() {
 test_analyze_unknown_feature_400() {
     _skip_if_no_fixture && return 0
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "features=not-a-feature" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s --max-time 60 -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"features\":[\"not-a-feature\"]}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/analyze")
     assert_eq "$code" "400" "unknown feature -> 400" || return 1
     echo "OK: analyze_unknown_feature_400"
@@ -107,9 +123,17 @@ test_analyze_bad_input_400() {
     echo "this is not audio" > "$tmp"
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" RETURN
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${tmp}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${tmp}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${tmp}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s --max-time 60 -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/analyze")
     assert_eq "$code" "400" "non-audio -> 400" || return 1
     echo "OK: analyze_bad_input_400"

@@ -19,8 +19,14 @@ harness_start "chord-detect"
 
 test_chords_returns_key_and_chords() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/chords")
     if ! echo "$body" | jq -e '.key | type == "string" and length > 0' >/dev/null 2>&1; then
         echo "  FAIL: key missing or empty; body: $body"; return 1
@@ -48,9 +54,14 @@ test_chords_rejects_missing_file() {
 
 test_chords_custom_hop_length() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "hop_length=1024" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"hop_length\":1024}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/chords")
     if ! echo "$body" | jq -e '.key | type == "string"' >/dev/null 2>&1; then
         echo "  FAIL: key missing with custom hop_length; body: $body"; return 1
@@ -63,13 +74,23 @@ test_chords_custom_hop_length() {
 test_chords_segment_min_duration_sec() {
     local body_short body_long count_short count_long
     # Large min duration merges more aggressively → fewer or equal segments.
-    body_short=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "segment_min_duration_sec=0.1" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body_short=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"segment_min_duration_sec\":0.1}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/chords")
-    body_long=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "segment_min_duration_sec=2.0" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body_long=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"segment_min_duration_sec\":2.0}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/chords")
     if ! echo "$body_short" | jq -e '.chords | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: chords missing for segment_min_duration_sec=0.1; body: $body_short"; return 1

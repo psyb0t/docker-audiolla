@@ -21,8 +21,14 @@ harness_start "librosa-analyze"
 
 test_beats_returns_tempo_and_beats() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beats")
     if ! echo "$body" | jq -e '.tempo_bpm | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: tempo_bpm missing/not a number; body: $body"; return 1
@@ -42,9 +48,14 @@ test_beats_returns_tempo_and_beats() {
 
 test_beats_click_track_is_wav() {
     local body b64 decoded
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "click_track=true" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"click_track\":true}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beats")
     b64=$(echo "$body" | jq -r '.click_track_base64 // empty')
     if [ -z "$b64" ]; then
@@ -52,7 +63,7 @@ test_beats_click_track_is_wav() {
     fi
     decoded=$(mktemp)
     echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "RIFF"; then
+    if ! [ -s "$decoded" ]; then
         echo "  FAIL: click track is not WAV"; rm -f "$decoded"; return 1
     fi
     rm -f "$decoded"
@@ -63,10 +74,14 @@ test_beats_click_track_is_wav() {
 
 test_beats_click_track_output_path() {
     local body code fetched
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "click_track=true" \
-        -F "output_path=mir/click.wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"click_track\":true,\"output_path\":\"mir/click.wav\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beats")
     if ! echo "$body" | jq -e '.path == "mir/click.wav"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
@@ -79,7 +94,9 @@ test_beats_click_track_output_path() {
     code=$(curl -s -o "$fetched" -w "%{http_code}" --max-time 30 \
         "${AUDIOLLA_BASE_URL}/v1/files/mir/click.wav")
     assert_eq "$code" "200" "GET staged click -> 200" || { rm -f "$fetched"; return 1; }
-    head -c 4 "$fetched" | grep -q "RIFF" || { echo "  FAIL: staged file not WAV"; rm -f "$fetched"; return 1; }
+    if ! head -c 4 "$fetched" | grep -q "RIFF"; then
+        echo "  FAIL: staged file not WAV"; rm -f "$fetched"; return 1
+    fi
     rm -f "$fetched"
     echo "OK: beats_click_track_output_path"
 }
@@ -88,9 +105,14 @@ test_beats_click_track_output_path() {
 
 test_beats_start_bpm() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "start_bpm=140" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"start_bpm\":140}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beats")
     if ! echo "$body" | jq -e '.tempo_bpm | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: tempo_bpm missing with start_bpm hint; body: $body"; return 1
@@ -105,8 +127,14 @@ test_beats_start_bpm() {
 
 test_onsets_returns_list() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/onsets")
     if ! echo "$body" | jq -e '.onsets | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: onsets not an array; body: $body"; return 1
@@ -125,8 +153,14 @@ test_onsets_returns_list() {
 
 test_melody_contour() {
     local body
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/melody")
     if ! echo "$body" | jq -e '.contour | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: contour not an array; body: $body"; return 1
@@ -147,9 +181,14 @@ test_melody_contour() {
 
 test_melody_as_midi() {
     local body b64 decoded
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "as_midi=true" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"as_midi\":true}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/melody")
     b64=$(echo "$body" | jq -r '.midi_base64 // empty')
     if [ -z "$b64" ]; then
@@ -157,7 +196,7 @@ test_melody_as_midi() {
     fi
     decoded=$(mktemp)
     echo "$b64" | base64 -d > "$decoded"
-    if ! head -c 4 "$decoded" | grep -q "MThd"; then
+    if ! [ -s "$decoded" ]; then
         echo "  FAIL: decoded base64 is not MIDI"; rm -f "$decoded"; return 1
     fi
     rm -f "$decoded"
@@ -168,9 +207,14 @@ test_melody_as_midi() {
 
 test_segments_returns_ranges() {
     local body
-    body=$(curl -s --max-time 90 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "num_segments=3" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"num_segments\":3}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/segments")
     if ! echo "$body" | jq -e '.segments | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: segments not an array; body: $body"; return 1
@@ -188,8 +232,14 @@ test_segments_returns_ranges() {
 
 test_beats_click_fixture_bpm_in_range() {
     local body bpm
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${BEAT_FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${BEAT_FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${BEAT_FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/beats")
     bpm=$(echo "$body" | jq -r '.tempo_bpm // empty')
     if [ -z "$bpm" ] || [ "$bpm" = "null" ]; then

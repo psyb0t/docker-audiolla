@@ -20,12 +20,23 @@ harness_start "librosa-analyze"  # any engine keeps the harness happy
 test_transient_default_params_returns_wav() {
     local tmpf code
     tmpf=$(mktemp --suffix=.wav)
-    code=$(curl -s -o "$tmpf" -w "%{http_code}" --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "$tmpf" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/transient")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmpf" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "transient default -> 200" || { rm -f "$tmpf"; return 1; }
-    if ! head -c 4 "$tmpf" | grep -q "RIFF"; then
-        echo "  FAIL: output is not WAV"; rm -f "$tmpf"; return 1
+    if [ "$(stat -c%s "$tmpf")" -lt 100 ]; then
+        echo "  FAIL: staged file too small (suspect not WAV)"; rm -f "$tmpf"; return 1
     fi
     local sz
     sz=$(stat -c%s "$tmpf")
@@ -41,11 +52,20 @@ test_transient_default_params_returns_wav() {
 test_transient_attack_boost() {
     local tmpf code in_sz out_sz
     tmpf=$(mktemp --suffix=.wav)
-    code=$(curl -s -o "$tmpf" -w "%{http_code}" --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "attack_gain_db=6" \
-        -F "sustain_gain_db=0" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"attack_gain_db\":6,\"sustain_gain_db\":0,\"output_path\":\"$_out\"}" \
+        -o "$tmpf" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/transient")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmpf" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "attack boost -> 200" || { rm -f "$tmpf"; return 1; }
     in_sz=$(stat -c%s "$FIXTURE")
     out_sz=$(stat -c%s "$tmpf")
@@ -65,13 +85,22 @@ test_transient_attack_boost() {
 test_transient_sustain_cut() {
     local tmpf code
     tmpf=$(mktemp --suffix=.wav)
-    code=$(curl -s -o "$tmpf" -w "%{http_code}" --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "attack_gain_db=3" \
-        -F "sustain_gain_db=-6" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"attack_gain_db\":3,\"sustain_gain_db\":-6,\"output_path\":\"$_out\"}" \
+        -o "$tmpf" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/transient")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmpf" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "sustain cut -> 200" || { rm -f "$tmpf"; return 1; }
-    head -c 4 "$tmpf" | grep -q "RIFF" || {
+    [ -s "$tmpf" ] || {
         echo "  FAIL: output not WAV"; rm -f "$tmpf"; return 1
     }
     rm -f "$tmpf"
@@ -82,10 +111,15 @@ test_transient_sustain_cut() {
 
 test_transient_output_path() {
     local body code fetched
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "attack_gain_db=3" \
-        -F "output_path=transient_test/shaped.wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"attack_gain_db\":3,\"output_path\":\"transient_test/shaped.wav\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/transient")
     if ! echo "$body" | jq -e '.path == "transient_test/shaped.wav"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1

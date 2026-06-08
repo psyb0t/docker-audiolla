@@ -1,6 +1,10 @@
 # Heavy ML/DSP deps for the CPU prod image. Hand-edited spec.
 # Compile to requirements-heavy-cpu.txt via scripts/compile_heavy_deps.sh.
 # Versions duplicated in Dockerfile comments must match this file.
+# resampy (transitive of matchering) does `import pkg_resources` which only
+# exists if setuptools is installed. Modern uv/pip envs don't include it by
+# default. Without it, /v1/audio/master mode=reference returns 500.
+setuptools==75.6.0
 torch==2.5.1+cpu
 torchaudio==2.5.1+cpu
 demucs==4.0.1
@@ -11,7 +15,7 @@ librosa==0.10.2
 sox==1.4.1
 numpy==2.1.3
 soundfile==0.12.1
-huggingface-hub==0.30.2
+huggingface-hub==0.34.6
 audio-separator[cpu]==0.44.2
 basic-pitch[onnx]==0.4.0
 deepfilternet==0.5.6
@@ -20,3 +24,26 @@ pyannote.audio==3.3.2
 transformers==4.51.3
 accelerate==1.6.0
 noisereduce==3.0.3
+# ── text-to-music generation (Stable Audio Open + MusicGen + Riffusion) ──
+# diffusers ships StableAudioPipeline since 0.27. Pinned to 0.32.2 here
+# because newer releases (0.38+) require a pre-release safetensors,
+# which doesn't pass our hash-locked supply-chain gate. Stable Audio Open
+# is CUDA-only (engines.json flags it) — ~12 GB VRAM at fp16, no vocals,
+# 47-second cap. Best for loops / SFX / textures. Riffusion (also CUDA-only)
+# uses diffusers' StableDiffusionPipeline. MusicGen ships in transformers
+# (no extra dep). All four music-gen engines are CUDA-only in engines.json;
+# the CPU image still carries diffusers so the engine code import-paths
+# resolve, but no music-gen engine is registered in engines-cpu.json.
+#
+# torchsde is a transitive dep of Stable Audio Open's
+# CosineDPMSolverMultistepScheduler — diffusers doesn't pull it in as a
+# hard dep, so it has to be listed explicitly.
+#
+# ACE-Step + DiffRhythm were considered for the initial release:
+#   - ACE-Step needs AceStepPipeline from diffusers >= 0.38, which itself
+#     requires a pre-release safetensors — revisit when safetensors 0.8.x
+#     ships stable, or vendor the pipeline directly.
+#   - DiffRhythm is an unpackaged research repo (no setup.py / PyPI release).
+#     Revisit on upstream packaging or thirdparty/ vendoring.
+diffusers==0.32.2
+torchsde==0.2.6

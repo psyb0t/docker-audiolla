@@ -37,12 +37,20 @@ _is_webm() {
 test_spectrogram_png() {
     local code tmp
     tmp=$(mktemp --suffix=.png)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=640" \
-        -F "height=240" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":640,\"height\":240,\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/spectrogram")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "visualize/spectrogram -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"
@@ -62,12 +70,20 @@ test_spectrogram_png() {
 test_waveform_png() {
     local code tmp
     tmp=$(mktemp --suffix=.png)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=640" \
-        -F "height=160" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":640,\"height\":160,\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/waveform")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "visualize/waveform -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"
@@ -81,11 +97,15 @@ test_waveform_png() {
 
 test_spectrogram_output_path() {
     local body code fetched
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=320" \
-        -F "height=160" \
-        -F "output_path=viz/spec.png" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":320,\"height\":160,\"output_path\":\"viz/spec.png\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/spectrogram")
     if ! echo "$body" | jq -e '.path == "viz/spec.png"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
@@ -107,14 +127,20 @@ test_spectrogram_output_path() {
 test_visualize_spectrum_mp4() {
     local code tmp
     tmp=$(mktemp --suffix=.mp4)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 180 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=320" \
-        -F "height=180" \
-        -F "fps=15" \
-        -F "container=mp4" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":320,\"height\":180,\"fps\":15,\"container\":\"mp4\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/spectrum")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "visualize/spectrum -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_mp4 "$tmp"; then
         echo "  FAIL: response is not an MP4"
@@ -134,14 +160,20 @@ test_visualize_spectrum_mp4() {
 test_visualize_waves_webm() {
     local code tmp
     tmp=$(mktemp --suffix=.webm)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 180 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=320" \
-        -F "height=180" \
-        -F "fps=15" \
-        -F "container=webm" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":320,\"height\":180,\"fps\":15,\"container\":\"webm\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/waves")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "visualize/waves webm -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_webm "$tmp"; then
         echo "  FAIL: response is not a WebM"
@@ -156,13 +188,20 @@ test_visualize_waves_webm() {
 test_visualize_cqt_mp4() {
     local code tmp
     tmp=$(mktemp --suffix=.mp4)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 180 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=320" \
-        -F "height=180" \
-        -F "fps=15" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":320,\"height\":180,\"fps\":15,\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/cqt")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "visualize/cqt -> 200" || { rm -f "$tmp"; return 1; }
     _is_mp4 "$tmp" || { echo "  FAIL: not MP4"; rm -f "$tmp"; return 1; }
     rm -f "$tmp"
@@ -173,12 +212,15 @@ test_visualize_cqt_mp4() {
 
 test_visualize_output_path() {
     local body code fetched
-    body=$(curl -s --max-time 180 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=320" \
-        -F "height=180" \
-        -F "fps=15" \
-        -F "output_path=viz/viz.mp4" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":320,\"height\":180,\"fps\":15,\"output_path\":\"viz/viz.mp4\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/spectrum")
     if ! echo "$body" | jq -e '.path == "viz/viz.mp4"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
@@ -197,10 +239,20 @@ test_visualize_output_path() {
 test_visualize_unknown_mode_400() {
     local code body tmp
     tmp=$(mktemp)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/video/notamode")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     body=$(cat "$tmp")
     rm -f "$tmp"
     assert_eq "$code" "400" "unknown mode -> 400" || return 1
@@ -213,14 +265,20 @@ test_visualize_unknown_mode_400() {
 test_spectrogram_color_scale() {
     local code tmp
     tmp=$(mktemp --suffix=.png)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=320" \
-        -F "height=160" \
-        -F "color=fire" \
-        -F "scale=lin" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":320,\"height\":160,\"color\":\"fire\",\"scale\":\"lin\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/spectrogram")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "visualize/spectrogram color=fire scale=lin -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"
@@ -235,13 +293,20 @@ test_spectrogram_color_scale() {
 test_waveform_color() {
     local code tmp
     tmp=$(mktemp --suffix=.png)
-    code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "width=320" \
-        -F "height=160" \
-        -F "color=cyan" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"width\":320,\"height\":160,\"color\":\"cyan\",\"output_path\":\"$_out\"}" \
+        -o "$tmp" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/visualize/image/waveform")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "$tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "200" "visualize/waveform color=cyan -> 200" || { rm -f "$tmp"; return 1; }
     if ! _is_png "$tmp"; then
         echo "  FAIL: response is not a PNG"

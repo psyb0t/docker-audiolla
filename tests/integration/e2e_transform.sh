@@ -26,13 +26,27 @@ _skip_if_no_fixture() {
 }
 
 _post_transform() {
+    # Returns: prints HTTP status code on stdout; writes downloaded result to $outfile.
     local outfile="$1" ops="$2" fmt="${3:-wav}"
-    curl -s -o "$outfile" -w "%{http_code}" --max-time 120 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "operations=${ops}" \
-        -F "output_format=${fmt}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/transform"
+    # Pre-stage the fixture per invocation so tests are reusable.
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/tx-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    local resp
+    resp=$(mktemp -t audiolla-tx-resp.XXXXXX)
+    local code
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"operations\":${ops},\"output_format\":\"${fmt}\",\"output_path\":\"$_out\"}" \
+        -o "$resp" -w "%{http_code}" --max-time 60 \
+        "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    if [ "$code" = "200" ]; then
+        curl -sf -o "$outfile" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    fi
+    rm -f "$resp"
+    printf '%s' "$code"
 }
 
 # ── Single op: gain -3 dB → RIFF WAV ─────────────────────────────────────────
@@ -109,11 +123,18 @@ test_transform_empty_ops() {
 test_transform_unknown_op_400() {
     _skip_if_no_fixture && return 0
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F 'operations=[{"op":"not-a-real-op","params":{}}]' \
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"operations\":[{\"op\":\"nope_unknown\",\"params\":{}}],\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/transform")
+    # Handler-level unknown-op rejection returns 400 (not Pydantic 422).
     assert_eq "$code" "400" "unknown op -> 400" || return 1
     echo "OK: transform_unknown_op_400"
 }
@@ -123,12 +144,19 @@ test_transform_unknown_op_400() {
 test_transform_bad_json_400() {
     _skip_if_no_fixture && return 0
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F 'operations=this is not json' \
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    # Missing required `operations` → Pydantic 422.
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/transform")
-    assert_eq "$code" "400" "malformed JSON -> 400" || return 1
+    assert_eq "$code" "422" "missing operations -> 422" || return 1
     echo "OK: transform_bad_json_400"
 }
 

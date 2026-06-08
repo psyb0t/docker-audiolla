@@ -167,7 +167,7 @@ harness_start() {
     # set explicitly above, so we skip them here to avoid duplicate flags.
     local forwarded_env=()
     local name value
-    for name in $(compgen -e | grep '^AUDIOLLA_' || true); do
+    for name in $(compgen -e | grep -E '^(AUDIOLLA_|HF_|HUGGINGFACE_)' || true); do
         case "$name" in
             AUDIOLLA_DEVICE|AUDIOLLA_ENABLED_ENGINES)
                 continue

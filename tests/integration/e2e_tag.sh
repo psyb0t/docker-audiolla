@@ -26,8 +26,14 @@ harness_start "ast-tag"
 
 test_tag_returns_tags_and_duration() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/tag")
     if ! echo "$body" | jq -e '.tags | type == "array" and length > 0' >/dev/null 2>&1; then
         echo "  FAIL: tags missing or empty; body: $body"; return 1
@@ -61,9 +67,14 @@ test_tag_rejects_missing_file() {
 
 test_tag_top_k() {
     local body count
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "top_k=5" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"top_k\":5}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/tag")
     if ! echo "$body" | jq -e '.tags | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: tags missing with top_k=5; body: $body"; return 1
@@ -79,8 +90,14 @@ test_tag_top_k() {
 
 test_tag_score_range() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/tag")
     if ! echo "$body" | jq -e '.tags | map(.score) | all(. >= 0 and . <= 1)' >/dev/null 2>&1; then
         echo "  FAIL: score outside [0,1]; body: $body"; return 1

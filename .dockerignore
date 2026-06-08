@@ -69,9 +69,12 @@ tests/
 tests/integration/.fixtures/
 .e2e-cache/
 
-# Docs / spec — not COPYed by prod Dockerfiles; dev container bind-mounts at runtime
+# Docs — not COPYed by prod Dockerfiles; dev container bind-mounts at runtime
 docs/
-openapi.yaml
+# openapi.yaml IS shipped into the prod image (v1.0.0) so /openapi.json
+# can serve the canonical static spec with tags, parameters, descriptions,
+# and oneOf constraints that FastAPI's auto-generated form can't fully
+# express. Do not re-ignore it.
 
 # Dev-only Dockerfile + scripts (dev container bind-mounts scripts/ at runtime)
 Dockerfile.dev

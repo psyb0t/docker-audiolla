@@ -58,31 +58,28 @@ audiolla_method_status() {
     curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X "$method" "${AUDIOLLA_BASE_URL}${path}"
 }
 
-# Multipart upload to an audio endpoint.
-#
-# args:
-#   $1 = path (e.g. /v1/audio/separate)
-#   $2 = path to local audio fixture
-#   $3... = extra "key=value" form fields
-#
-# Successful HTTP 2xx → body on stdout, exit 0.
-# Anything else      → stderr explains, exit 1.
-audiolla_post_audio() {
-    local path="$1" fixture="$2"
-    shift 2
+# ── v1.0.0 helpers — JSON-body POST + staged-file upload ───────────────────
 
-    local extras=()
-    local kv
-    for kv in "$@"; do
-        extras+=(-F "$kv")
-    done
+audiolla_upload() {
+    local local_path="$1" stage_path="$2"
+    if [ ! -f "$local_path" ]; then
+        echo "  FAIL: audiolla_upload: local file not found: $local_path" >&2
+        return 1
+    fi
+    curl -sf --max-time 60 -X PUT \
+        --data-binary "@${local_path}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${stage_path}"
+}
 
+audiolla_post_json() {
+    local path="$1" body="$2"
     local tmp
     tmp=$(mktemp -t audiolla_resp.XXXXXX) || return 2
     local code
     code=$(curl -s -o "$tmp" -w "%{http_code}" --max-time 900 \
-        "${extras[@]}" \
-        -F "file=@${fixture}" \
+        -X POST -H "Content-Type: application/json" \
+        -d "$body" \
         "${AUDIOLLA_BASE_URL}${path}" 2>/dev/null) || {
         rm -f "$tmp"
         return 2
@@ -94,6 +91,37 @@ audiolla_post_audio() {
     fi
     cat "$tmp"
     rm -f "$tmp"
+}
+
+# Legacy helper — auto-upload + JSON-POST shim. Builds JSON body from
+# key=value args plus an auto output_path if none provided.
+audiolla_post_audio() {
+    local path="$1" fixture="$2"
+    shift 2
+    local stage="e2e/$(basename "$fixture")-$$"
+    audiolla_upload "$fixture" "$stage" >/dev/null || return 1
+    local json='{"file_path":"'"$stage"'"'
+    local has_output=0
+    local kv key val
+    for kv in "$@"; do
+        key="${kv%%=*}"
+        val="${kv#*=}"
+        if [ "$key" = "output_path" ] || [ "$key" = "output_url" ]; then
+            has_output=1
+        fi
+        if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+            json="${json},\"${key}\":${val}"
+        elif [ "$val" = "true" ] || [ "$val" = "false" ]; then
+            json="${json},\"${key}\":${val}"
+        else
+            json="${json},\"${key}\":\"${val}\""
+        fi
+    done
+    if [ "$has_output" = "0" ]; then
+        json="${json},\"output_path\":\"e2e/out-$$-${RANDOM}.wav\""
+    fi
+    json="${json}}"
+    audiolla_post_json "$path" "$json"
 }
 
 # Check that a response is a valid audio file (non-empty, has expected magic).

@@ -19,8 +19,14 @@ harness_start "audio-fingerprint"
 
 test_fingerprint_returns_string() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
     if ! echo "$body" | jq -e '.duration | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: duration not a number; body: $body"; return 1
@@ -35,9 +41,23 @@ test_fingerprint_returns_string() {
 
 test_fingerprint_is_deterministic() {
     local b1 b2 fp1 fp2
-    b1=$(curl -s --max-time 60 -X POST -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    b1=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
-    b2=$(curl -s --max-time 60 -X POST -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    b2=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
     fp1=$(echo "$b1" | jq -r '.fingerprint')
     fp2=$(echo "$b2" | jq -r '.fingerprint')
@@ -52,9 +72,14 @@ test_fingerprint_is_deterministic() {
 
 test_fingerprint_return_raw() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "return_raw=true" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"return_raw\":true}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
     if ! echo "$body" | jq -e '.fingerprint_raw | type == "array" and length > 0' >/dev/null 2>&1; then
         echo "  FAIL: fingerprint_raw missing or empty; body: $(echo "$body" | head -c 500)"
@@ -78,9 +103,7 @@ test_fingerprint_via_file_path() {
     if [ "$code" != "201" ]; then
         echo "  FAIL: stage fixture -> $code"; return 1
     fi
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file_path=fp/in.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
+    body=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"fp/in.wav\"}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
     if ! echo "$body" | jq -e '.fingerprint | type == "string"' >/dev/null 2>&1; then
         echo "  FAIL: fingerprint missing for staged file; body: $body"; return 1
     fi
@@ -92,12 +115,23 @@ test_fingerprint_via_file_path() {
 test_fingerprint_analyze_seconds() {
     local body_full body_short fp_full fp_short
     # Default (120s) — covers the entire 8s fixture so both should match.
-    body_full=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body_full=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
-    body_short=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "analyze_seconds=3" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body_short=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"analyze_seconds\":3}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/fingerprint")
     if ! echo "$body_short" | jq -e '.fingerprint | type == "string" and length > 0' >/dev/null 2>&1; then
         echo "  FAIL: fingerprint missing with analyze_seconds=3; body: $body_short"; return 1

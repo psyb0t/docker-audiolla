@@ -19,9 +19,15 @@ harness_start "librosa-analyze"
 # Stage input fixture once for all tests.
 setup_staged_input() {
     local body
-    body=$(curl -s --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_path=batch_e2e/input.wav" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"batch_e2e/input.wav\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/convert")
     if ! echo "$body" | jq -e '.path == "batch_e2e/input.wav"' >/dev/null 2>&1; then
         echo "  FAIL: could not stage input; body: $body"; return 1

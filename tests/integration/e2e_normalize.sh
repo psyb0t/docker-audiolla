@@ -19,8 +19,14 @@ harness_start "librosa-analyze"
 
 test_loudness_returns_lufs() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loudness")
     if ! echo "$body" | jq -e '.loudness_lufs | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: loudness_lufs not a number; body: $body"; return 1
@@ -32,8 +38,14 @@ test_loudness_returns_lufs() {
 
 test_loudness_is_json_only() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loudness")
     # Must not contain audio data
     if echo "$body" | jq -e 'has("audio_base64") or has("url")' 2>/dev/null | grep -q "true"; then
@@ -46,48 +58,60 @@ test_loudness_is_json_only() {
 
 test_loudness_missing_file_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file_path=no/such/file.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness")
-    assert_eq "$code" "400" "missing file -> 400" || return 1
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"no/such/file.wav\"}" -o "/dev/null" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/loudness")
+    assert_eq "$code" "404" "missing file -> 404" || return 1
     echo "OK: loudness_missing_file_400"
 }
 
 # ── /v1/audio/normalize: returns audio and measured_lufs ────────────────────
 
 test_normalize_returns_audio_and_measured_lufs() {
-    local tmpout code lufs
-    tmpout=$(mktemp)
-    code=$(curl -s -o "$tmpout" -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "target_lufs=-14" \
+    local resp_json code lufs audio_tmp
+    resp_json=$(mktemp)
+    audio_tmp=$(mktemp)
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"target_lufs\":-14,\"output_path\":\"$_out\"}" \
+        -o "$resp_json" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/normalize")
-    assert_eq "$code" "200" "normalize -> 200" || { rm -f "$tmpout"; return 1; }
-    if ! head -c 4 "$tmpout" | grep -q "RIFF"; then
-        echo "  FAIL: normalize did not return WAV"
-        rm -f "$tmpout"; return 1
+    assert_eq "$code" "200" "normalize -> 200" || { rm -f "$resp_json" "$audio_tmp"; return 1; }
+    # JSON response should have measured_lufs (or some loudness field)
+    lufs=$(jq -r '.measured_lufs // .loudness_lufs // empty' < "$resp_json" 2>/dev/null || echo "")
+    rm -f "$resp_json"
+    # Fetch the staged audio and verify it's a real WAV.
+    curl -sf -o "$audio_tmp" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || {
+        echo "  FAIL: could not fetch staged output"; rm -f "$audio_tmp"; return 1
+    }
+    if [ "$(head -c 4 "$audio_tmp")" != "RIFF" ]; then
+        echo "  FAIL: staged file is not WAV (no RIFF magic)"
+        rm -f "$audio_tmp"; return 1
     fi
-    lufs=$(curl -s --max-time 10 -I -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "target_lufs=-14" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/normalize" 2>/dev/null | \
-        grep -i "x-loudness-lufs" | awk '{print $2}' | tr -d '\r' || true)
-    rm -f "$tmpout"
-    echo "OK: normalize_returns_audio_and_measured_lufs (X-Loudness-LUFS: ${lufs:-<not-checked>})"
+    rm -f "$audio_tmp"
+    echo "OK: normalize_returns_audio_and_measured_lufs (measured_lufs: ${lufs:-<not-found>})"
 }
 
-# ── normalize: target_lufs=0 → 200 (edge case, may clip but valid call) ─────
+# ── normalize: target_lufs=-0.1 → 200 (boundary, max ceiling) ──────────────
 
 test_normalize_target_lufs_zero() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "target_lufs=0" \
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"target_lufs\":-0.1,\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/normalize")
-    assert_eq "$code" "200" "normalize target_lufs=0 -> 200" || return 1
+    assert_eq "$code" "200" "normalize target_lufs=-0.1 -> 200" || return 1
     echo "OK: normalize_target_lufs_zero"
 }
 
@@ -95,12 +119,8 @@ test_normalize_target_lufs_zero() {
 
 test_normalize_missing_file_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file_path=ghost.wav" \
-        -F "target_lufs=-14" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/normalize")
-    assert_eq "$code" "400" "normalize missing file -> 400" || return 1
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"ghost.wav\",\"target_lufs\":-14,\"output_path\":\"ghost-out.wav\"}" -o "/dev/null" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/normalize")
+    assert_eq "$code" "404" "normalize missing file -> 404" || return 1
     echo "OK: normalize_missing_file_400"
 }
 
@@ -108,11 +128,21 @@ test_normalize_missing_file_400() {
 
 test_normalize_no_target_lufs_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/normalize")
-    assert_eq "$code" "400" "normalize without target_lufs -> 400" || return 1
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    assert_eq "$code" "422" "normalize without target_lufs -> 422" || return 1
     echo "OK: normalize_no_target_lufs_400"
 }
 
@@ -121,22 +151,21 @@ test_normalize_no_target_lufs_400() {
 test_normalize_moves_loudness_toward_target() {
     local target=-14
     local before_lufs after_lufs
-    before_lufs=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    before_lufs=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loudness" | jq -r '.loudness_lufs')
 
-    local tmpout
-    tmpout=$(mktemp)
-    curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "target_lufs=${target}" \
-        -F "output_path=normalize/out.wav" \
+    curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"target_lufs\":${target},\"output_path\":\"normalize/out.wav\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/normalize" > /dev/null
 
-    after_lufs=$(curl -s --max-time 60 -X POST \
-        -F "file_path=normalize/out.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness" | jq -r '.loudness_lufs')
-    rm -f "$tmpout"
+    after_lufs=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"normalize/out.wav\"}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/loudness" | jq -r '.loudness_lufs')
 
     if [ -z "$before_lufs" ] || [ -z "$after_lufs" ]; then
         echo "  FAIL: could not measure LUFS (before=$before_lufs after=$after_lufs)"; return 1

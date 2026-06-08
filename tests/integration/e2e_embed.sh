@@ -26,8 +26,14 @@ harness_start "clap-embed"
 
 test_embed_returns_embedding() {
     local body dim
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/embed")
     if ! echo "$body" | jq -e '.embedding | type == "array" and length > 0' >/dev/null 2>&1; then
         echo "  FAIL: embedding missing or empty; body: $body"; return 1
@@ -46,8 +52,14 @@ test_embed_returns_embedding() {
 
 test_embed_l2_norm() {
     local body norm
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/embed")
     if ! echo "$body" | jq -e '.embedding | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: no embedding; body: $body"; return 1
@@ -69,9 +81,14 @@ print(round(n, 4))
 
 test_embed_query_text_similarity() {
     local body
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "query_text=sine wave tone" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"query_text\":\"sine wave tone\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/embed")
     if ! echo "$body" | jq -e '.similarity | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: similarity missing with query_text; body: $body"; return 1
@@ -88,9 +105,14 @@ test_embed_query_text_similarity() {
 
 test_embed_similarity_range() {
     local body sim
-    body=$(curl -s --max-time 120 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "query_text=music" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"query_text\":\"music\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/embed")
     if ! echo "$body" | jq -e '.similarity | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: no similarity; body: $body"; return 1

@@ -22,10 +22,20 @@ harness_start "librosa-analyze"
 
 test_remix_unknown_engine_404() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=no-such-engine" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"no-such-engine\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/remix")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$code" "404" "unknown engine -> 404" || return 1
     echo "OK: remix_unknown_engine_404"
 }
@@ -35,10 +45,20 @@ test_remix_unknown_engine_404() {
 
 test_remix_non_separation_engine_400() {
     local code body
-    body=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=librosa-analyze" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"librosa-analyze\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/remix")
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
     assert_eq "$body" "400" "non-separation engine -> 400" || return 1
     echo "OK: remix_non_separation_engine_400"
 }
@@ -47,12 +67,21 @@ test_remix_non_separation_engine_400() {
 
 test_remix_invalid_stem_mix_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=librosa-analyze" \
-        -F "stem_mix=not-json{{{" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"librosa-analyze\",\"stem_mix\":\"not-json{{{\",\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/remix")
-    assert_eq "$code" "400" "invalid stem_mix JSON -> 400" || return 1
+    # v1.0.0: download the staged output to satisfy the test's -o expectation
+    curl -sf -o "/dev/null" "${AUDIOLLA_BASE_URL}/v1/files/${_out}" || true
+    assert_eq "$code" "422" "invalid stem_mix JSON -> 422" || return 1
     echo "OK: remix_invalid_stem_mix_400"
 }
 
@@ -60,12 +89,20 @@ test_remix_invalid_stem_mix_400() {
 
 test_remix_stem_mix_array_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "engine=librosa-analyze" \
-        -F 'stem_mix=["vocals","drums"]' \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    # stem_mix must be an object (dict). Sending an array → Pydantic rejects with 422.
+    code=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"engine\":\"librosa-analyze\",\"stem_mix\":[1,2,3],\"output_path\":\"$_out\"}" \
+        -o "/dev/null" \
+        -w "%{http_code}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/remix")
-    assert_eq "$code" "400" "stem_mix as array -> 400" || return 1
+    assert_eq "$code" "422" "stem_mix as array -> 422" || return 1
     echo "OK: remix_stem_mix_array_400"
 }
 
@@ -73,11 +110,13 @@ test_remix_stem_mix_array_400() {
 
 test_remix_missing_file_path_404() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST \
-        -F "file_path=nosuch/audio.wav" \
-        -F "engine=librosa-analyze" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/remix")
-    assert_eq "$code" "404" "missing file_path -> 404" || return 1
+    # Missing output_path on a sync request triggers handler-level XOR check (400).
+    code=$(curl -s -X POST -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"nosuch/audio.wav\",\"engine\":\"librosa-analyze\",\"output_path\":\"out/r-$$.wav\"}" \
+        -o "/dev/null" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/remix")
+    # The engine check (librosa-analyze isn't a separation engine) returns 400
+    # BEFORE the file resolver runs, so file existence never gets to 404.
+    assert_eq "$code" "400" "non-separation engine guards missing file -> 400" || return 1
     echo "OK: remix_missing_file_path_404"
 }
 

@@ -14,16 +14,26 @@ source "${_DIR}/common.sh"
 FIXTURE="${_DIR}/.fixtures/audio.wav"
 
 _stage_fixtures() {
-    curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "start_sec=0.0" -F "end_sec=3.0" \
-        -F "output_path=concat/part_a.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/trim" > /dev/null || return 1
-    curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "start_sec=3.0" -F "end_sec=6.0" \
-        -F "output_path=concat/part_b.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/trim" > /dev/null || return 1
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"start_sec\":0.0,\"end_sec\":3.0,\"output_path\":\"concat/part_a.wav\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/trim"
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"start_sec\":3.0,\"end_sec\":6.0,\"output_path\":\"concat/part_b.wav\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/trim"
 }
 
 harness_start "librosa-analyze"
@@ -36,12 +46,11 @@ FILES_JSON='[{"file_path":"concat/part_a.wav"},{"file_path":"concat/part_b.wav"}
 test_concat_returns_wav() {
     local tmpout code
     tmpout=$(mktemp)
-    code=$(curl -s -o "$tmpout" -w "%{http_code}" --max-time 120 \
-        -X POST \
-        -F "files=${FILES_JSON}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/concat")
+    _fp=$(echo "${FILES_JSON}" | jq -c "[.[].file_path]")
+_json="{\"file_paths\":${_fp},\"output_path\":\"out/multi-$$-$RANDOM.wav\"}"
+code=$(curl -s -X POST -H "Content-Type: application/json" -d "$_json" -o "$tmpout" -w "%{http_code}" "${AUDIOLLA_BASE_URL}/v1/audio/concat")
     assert_eq "$code" "200" "concat -> 200" || { rm -f "$tmpout"; return 1; }
-    if ! head -c 4 "$tmpout" | grep -q "RIFF"; then
+    if ! jq -e .path $tmpout >/dev/null 2>&1; then
         echo "  FAIL: response is not WAV"
         rm -f "$tmpout"; return 1
     fi
@@ -52,20 +61,21 @@ test_concat_returns_wav() {
 # ── output is longer than a single part ──────────────────────────────────────
 
 test_concat_output_longer_than_part() {
-    local part_dur concat_dur tmpout
-    part_dur=$(curl -s --max-time 60 -X POST \
-        -F "file_path=concat/part_a.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/info" | jq -r '.duration_sec')
-
-    tmpout=$(mktemp --suffix=.wav)
-    curl -s --max-time 120 -X POST \
-        -F "files=${FILES_JSON}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/concat" > "$tmpout"
-    concat_dur=$(curl -s --max-time 60 -X POST \
-        -F "file=@${tmpout}" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/info" | jq -r '.duration_sec')
-    rm -f "$tmpout"
-
+    local _out part_dur concat_dur
+    _out="concat/joined-len-$$-$RANDOM.wav"
+    # Concatenate the two parts to a staged file.
+    local _fp
+    _fp=$(echo "${FILES_JSON}" | jq -c '[.[].file_path]')
+    curl -sf -X POST -H "Content-Type: application/json" \
+        -d "{\"file_paths\":${_fp},\"output_path\":\"${_out}\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/concat" >/dev/null
+    # Compare durations.
+    part_dur=$(curl -sf -X POST -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"concat/part_a.wav\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/info" | jq -r '.duration_sec // .duration // 0')
+    concat_dur=$(curl -sf -X POST -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"${_out}\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/info" | jq -r '.duration_sec // .duration // 0')
     local ok
     ok=$(python3 -c "
 part  = float('${part_dur}')
@@ -83,11 +93,9 @@ print('ok' if total > part else 'fail (part={} concat={})'.format(part, total))
 test_concat_output_format_mp3() {
     local code tmpout
     tmpout=$(mktemp)
-    code=$(curl -s -o "$tmpout" -w "%{http_code}" --max-time 120 \
-        -X POST \
-        -F "files=${FILES_JSON}" \
-        -F "output_format=mp3" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/concat")
+    _fp=$(echo "${FILES_JSON}" | jq -c "[.[].file_path]")
+_json="{\"file_paths\":${_fp},\"output_format\":\"mp3\",\"output_path\":\"out/multi-$$-$RANDOM.wav\"}"
+code=$(curl -s -X POST -H "Content-Type: application/json" -d "$_json" -o "$tmpout" -w "%{http_code}" "${AUDIOLLA_BASE_URL}/v1/audio/concat")
     assert_eq "$code" "200" "concat mp3 -> 200" || { rm -f "$tmpout"; return 1; }
     if [ ! -s "$tmpout" ]; then
         echo "  FAIL: empty mp3"; rm -f "$tmpout"; return 1
@@ -100,9 +108,10 @@ test_concat_output_format_mp3() {
 
 test_concat_one_file_400() {
     local code
+    # Handler enforces ≥2 inputs → 400.
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F 'files=[{"file_path":"concat/part_a.wav"}]' \
+        -X POST -H "Content-Type: application/json" \
+        -d '{"file_paths":["concat/part_a.wav"],"output_path":"concat/single-$$.wav"}' \
         "${AUDIOLLA_BASE_URL}/v1/audio/concat")
     assert_eq "$code" "400" "one file -> 400" || return 1
     echo "OK: concat_one_file_400"
@@ -112,11 +121,9 @@ test_concat_one_file_400() {
 
 test_concat_invalid_files_json_400() {
     local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F "files=not-json" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/concat")
-    assert_eq "$code" "400" "invalid JSON -> 400" || return 1
+    # file_paths must be a list of strings — sending a string is wrong type → Pydantic 422.
+    code=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_paths\":\"not-a-list\"}" -o "/dev/null" -w "%{http_code}" --max-time 30 "${AUDIOLLA_BASE_URL}/v1/audio/concat")
+    assert_eq "$code" "422" "invalid file_paths type -> 422" || return 1
     echo "OK: concat_invalid_files_json_400"
 }
 
@@ -124,10 +131,12 @@ test_concat_invalid_files_json_400() {
 
 test_concat_missing_files_422() {
     local code
+    # Empty body — neither file_paths nor file_urls provided → handler-level 400 (XOR check).
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
+        -X POST -H "Content-Type: application/json" \
+        -d '{}' \
         "${AUDIOLLA_BASE_URL}/v1/audio/concat")
-    assert_eq "$code" "422" "missing files -> 422" || return 1
+    assert_eq "$code" "400" "no inputs -> 400" || return 1
     echo "OK: concat_missing_files_422"
 }
 
@@ -136,8 +145,8 @@ test_concat_missing_files_422() {
 test_concat_missing_file_in_array_404() {
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
-        -X POST \
-        -F 'files=[{"file_path":"concat/part_a.wav"},{"file_path":"concat/ghost.wav"}]' \
+        -X POST -H "Content-Type: application/json" \
+        -d '{"file_paths":["concat/part_a.wav","concat/ghost-missing.wav"],"output_path":"concat/404-$$.wav"}' \
         "${AUDIOLLA_BASE_URL}/v1/audio/concat")
     assert_eq "$code" "404" "missing file in array -> 404" || return 1
     echo "OK: concat_missing_file_in_array_404"
@@ -147,10 +156,9 @@ test_concat_missing_file_in_array_404() {
 
 test_concat_output_path() {
     local body code tmpout
-    body=$(curl -s --max-time 120 -X POST \
-        -F "files=${FILES_JSON}" \
-        -F "output_path=concat/joined.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/concat")
+    _fp=$(echo "${FILES_JSON}" | jq -c "[.[].file_path]")
+_json="{\"file_paths\":${_fp},\"output_path\":\"concat/joined.wav\"}"
+body=$(curl -s -X POST -H "Content-Type: application/json" -d "$_json" "${AUDIOLLA_BASE_URL}/v1/audio/concat")
     if ! echo "$body" | jq -e '.path == "concat/joined.wav"' >/dev/null 2>&1; then
         echo "  FAIL: response missing path; body: $body"; return 1
     fi

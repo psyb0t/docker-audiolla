@@ -148,6 +148,40 @@
     "metadata": {
       "executor": "metadata",
       "description": "Read and write audio file tags (ID3, Vorbis, FLAC) via mutagen"
+    },
+    "stable-audio-open": {
+      "executor": "stable_audio_open",
+      "license": "Stability-Community-License",
+      "cuda_only": true,
+      "description": "Text-to-audio — Stability Stable Audio Open 1.0. 47-second hard cap; best for loops, riffs, ambient textures, SFX, drum beats. No vocals. ~12 GB VRAM at fp16 (borderline on 12 GB GPUs). Commercial use allowed below the Stability Community License revenue threshold — read the license. Backs /v1/audio/generate/stable-audio-open."
+    },
+    "musicgen-small": {
+      "executor": "musicgen",
+      "model_size": "small",
+      "license": "CC-BY-NC-4.0",
+      "cuda_only": true,
+      "noncommercial": true,
+      "description": "Text-to-music — Meta MusicGen 300M (small). Instrumental only, 30 s hard cap, ~3 GB VRAM at fp16. Weights are CC-BY-NC — server must set AUDIOLLA_ENABLE_NONCOMMERCIAL=1 to load. Backs /v1/audio/generate/musicgen-small."
+    },
+    "musicgen-medium": {
+      "executor": "musicgen",
+      "model_size": "medium",
+      "license": "CC-BY-NC-4.0",
+      "cuda_only": true,
+      "noncommercial": true,
+      "description": "Text-to-music — Meta MusicGen 1.5B (medium). Instrumental only, 30 s hard cap, ~6-8 GB VRAM at fp16. Weights are CC-BY-NC — server must set AUDIOLLA_ENABLE_NONCOMMERCIAL=1 to load. Backs /v1/audio/generate/musicgen-medium."
+    },
+    "riffusion": {
+      "executor": "riffusion",
+      "license": "CreativeML-OpenRAIL-M",
+      "cuda_only": true,
+      "description": "Text-to-music — Riffusion-model-v1, a Stable Diffusion fine-tune that generates spectrograms (converted to audio via Griffin-Lim). Lo-fi / loop-y character, ~5 s per pass, 22.05 kHz mono, ~3 GB VRAM at fp16. Backs /v1/audio/generate/riffusion."
+    },
+    "audioldm2": {
+      "executor": "audioldm2",
+      "license": "CC-BY-4.0",
+      "cuda_only": true,
+      "description": "Text-to-audio / SFX — AudioLDM 2 (cvssp/audioldm2). CC-BY 4.0 (commercial use OK, no opt-in gate). General-purpose SFX: environmental ambience, animal sounds, foley, impacts, mechanical sounds. 16 kHz mono, up to 30 s. Slow (200-step DDIM default). ~8-10 GB VRAM at fp16 with CPU offload. Backs /v1/audio/generate/audioldm2."
     }
   }
 }

@@ -54,7 +54,7 @@ asyncio_mode = "auto"
 # are invisible to the resolver, giving the community time to catch and
 # yank malicious uploads before they enter our lockfile. NEVER drift forward
 # automatically. Manual edits are fine but go through the make targets.
-exclude-newer = "2026-06-03T00:00:00Z"
+exclude-newer = "2026-06-01T00:00:00Z"
 
 [tool.mypy]
 python_version = "3.12"

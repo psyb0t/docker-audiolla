@@ -19,8 +19,14 @@ harness_start "librosa-analyze"
 
 test_loudness_curve_shape() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.curve | type == "array"' >/dev/null 2>&1; then
         echo "  FAIL: curve not an array; body: $body"; return 1
@@ -38,8 +44,14 @@ test_loudness_curve_shape() {
 
 test_loudness_curve_entry_fields() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\"}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.curve[0].time_sec | type == "number"' >/dev/null 2>&1; then
         echo "  FAIL: time_sec missing in first entry; body: $body"; return 1
@@ -53,14 +65,18 @@ test_loudness_curve_entry_fields() {
 # ── file_path staging round-trip ─────────────────────────────────────────────
 
 test_loudness_curve_file_path() {
-    curl -s --max-time 30 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "output_path=lc_test/audio.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/convert" >/dev/null
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    local _out="out/result-$$-$RANDOM.wav"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"output_path\":\"lc_test/audio.wav\"}" \
+        "${AUDIOLLA_BASE_URL}/v1/audio/convert"
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file_path=lc_test/audio.wav" \
-        "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
+    body=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"file_path\":\"lc_test/audio.wav\"}" --max-time 60 "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.curve | length > 0' >/dev/null 2>&1; then
         echo "  FAIL: no curve points; body: $body"; return 1
     fi
@@ -71,9 +87,14 @@ test_loudness_curve_file_path() {
 
 test_loudness_curve_custom_hop() {
     local body
-    body=$(curl -s --max-time 60 -X POST \
-        -F "file=@${FIXTURE}" \
-        -F "hop_length=1024" \
+    # v1.0.0: pre-stage the fixture via /v1/files, build JSON body
+    local _stage="uploads/$(basename "${FIXTURE}")"
+    curl -sf -X PUT --data-binary "@${FIXTURE}" \
+        -H "Content-Type: application/octet-stream" \
+        "${AUDIOLLA_BASE_URL}/v1/files/${_stage}" >/dev/null || true
+    body=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"file_path\":\"$_stage\",\"hop_length\":1024}" \
         "${AUDIOLLA_BASE_URL}/v1/audio/loudness/curve")
     if ! echo "$body" | jq -e '.hop_length == 1024' >/dev/null 2>&1; then
         echo "  FAIL: hop_length not reflected in response; body: $body"; return 1

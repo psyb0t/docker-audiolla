@@ -33,7 +33,11 @@ to write the result to staging or PUT to a presigned URL instead of
 returning bytes inline. See input_resolver.py / output_writer.py.
 """
 
-from __future__ import annotations
+# NOTE: `from __future__ import annotations` was removed in v1.0.0 — PEP 563
+# turns every type hint into a string, which breaks FastAPI's request-body
+# detection for the spec-first Pydantic request models (every handler gets
+# ForwardRef('SomeRequest') instead of the real class). Python 3.12's native
+# generic syntax doesn't need PEP 563.
 
 import asyncio
 import json
@@ -44,7 +48,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from . import config
@@ -106,6 +110,7 @@ from .engines import (
     is_midi_inspect_engine,
     is_midi_render_engine,
     is_midi_transform_engine,
+    is_music_gen_engine,
     is_onsets_engine,
     is_pitch_correct_engine,
     is_segments_engine,
@@ -123,11 +128,105 @@ from .engines import (
 )
 from .engines.ffmpeg_render import visualize_modes
 from .input_resolver import resolve_input
+from .schema import (
+    AudioAnalyzeRequest,
+    AudioBeatSliceRequest,
+    AudioBeatsRequest,
+    AudioBpmMatchRequest,
+    AudioChordsRequest,
+    AudioChordsToMidiRequest,
+    AudioClassifyRequest,
+    AudioClipDetectRequest,
+    AudioConcatRequest,
+    AudioConvReverbRequest,
+    AudioConvertRequest,
+    AudioDeessRequest,
+    AudioDiarizeRequest,
+    AudioDjPrepRequest,
+    AudioEmbedRequest,
+    AudioEnhanceRequest,
+    AudioEqRequest,
+    AudioFadeRequest,
+    AudioFingerprintRequest,
+    AudioFxRequest,
+    AudioInfoRequest,
+    AudioKeyMatchRequest,
+    AudioLDM2Request,
+    MusicGenRequest,
+    RiffusionRequest,
+    StableAudioOpenRequest,
+    AudioLoopPointRequest,
+    AudioLoopRequest,
+    AudioLoudnessCurveRequest,
+    AudioLoudnessRequest,
+    AudioMasterRequest,
+    AudioMelodyRequest,
+    AudioMetadataRequest,
+    AudioMidSideRequest,
+    AudioMixRequest,
+    AudioMultibandCompressRequest,
+    AudioNoiseReduceRequest,
+    AudioOnsetsRequest,
+    AudioPanRequest,
+    AudioPitchCorrectRequest,
+    AudioRemixRequest,
+    AudioRepairRequest,
+    AudioRestoreRequest,
+    AudioReverseRequest,
+    AudioSegmentsRequest,
+    AudioSeparateHpssRequest,
+    AudioSeparateRequest,
+    AudioSidechainDuckRequest,
+    AudioSilenceRequest,
+    AudioSimilarRequest,
+    AudioSpeedRequest,
+    AudioSplitRequest,
+    AudioStereoFieldRequest,
+    AudioStereoWidthRequest,
+    AudioStretchRequest,
+    AudioTagRequest,
+    AudioThumbnailRequest,
+    AudioToMidiRequest,
+    AudioTransformRequest,
+    AudioTransientRequest,
+    AudioTrimRequest,
+    AudioVadRequest,
+    AudioVisualizeImageSpectrogramRequest,
+    AudioVisualizeImageWaveformRequest,
+    AudioVisualizeVideoRequest,
+    MidiHumanizeRequest,
+    MidiInspectRequest,
+    MidiQuantizeRequest,
+    MidiRenderRequest,
+    MidiTransformRequest,
+    NormalizeRequest,
+    format_value,
+    url_to_str,
+    validate_input_xor,
+    validate_multi_input_xor,
+    validate_output_xor,
+)
 from .mcp_server import build_mcp_server
 from .output_writer import write_output
 from .schema import AnalyzeResult, HealthResponse, LoudnessResult
 
 log = logging.getLogger("audiolla.server")
+
+def _ensure_json_array(value, field_name: str) -> list:
+    """In the v1.0.0 JSON-body API the field is already a list. The old
+    Form()-based API accepted JSON-encoded strings — accept both for
+    backwards compat with handler logic. Raises HTTPException(400) for
+    anything else."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"{field_name}: invalid JSON: {exc}")
+        if isinstance(parsed, list):
+            return parsed
+    raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON array")
 
 
 def _resolve_device(req: str) -> str:
@@ -258,6 +357,54 @@ app = FastAPI(
 )
 
 
+# v1.0.0: serve the canonical openapi.yaml at /openapi.json instead of
+# FastAPI's auto-generated route introspection. The static spec carries
+# the tags, parameter components, descriptions, and oneOf constraints
+# that the auto-generated form can't fully express. The spec ships with
+# the prod image at /app/openapi.yaml (see Dockerfile COPY).
+def _spec_from_yaml():
+    """Return the parsed contents of /app/openapi.yaml as the OpenAPI dict.
+    Falls back to FastAPI's auto-generated spec if the file is missing
+    (e.g. dev container without the YAML mounted)."""
+    import os as _os  # noqa: PLC0415
+    candidates = [
+        "/app/openapi.yaml",
+        _os.path.join(_os.path.dirname(__file__), "..", "..", "openapi.yaml"),
+        "openapi.yaml",
+    ]
+    for p in candidates:
+        try:
+            import yaml as _yaml  # noqa: PLC0415
+            with open(p) as fh:
+                return _yaml.safe_load(fh)
+        except (FileNotFoundError, ImportError):
+            continue
+    return None
+
+
+_static_spec_cache = None
+
+
+def _openapi_override():
+    global _static_spec_cache
+    if _static_spec_cache is None:
+        loaded = _spec_from_yaml()
+        if loaded is None:
+            # Fall back to the auto-generated default
+            from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
+            loaded = get_openapi(
+                title=app.title,
+                version="1.0.0",
+                description=app.description,
+                routes=app.routes,
+            )
+        _static_spec_cache = loaded
+    return _static_spec_cache
+
+
+app.openapi = _openapi_override  # type: ignore[assignment]
+
+
 class _MCPSlashRewriteMiddleware:
     """Rewrite ``/v1/mcp`` to ``/v1/mcp/`` before routing.
 
@@ -382,6 +529,13 @@ _CATALOG_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ]),
     ("effects-creative", "Reverb (convolution), EFX", [
         ("POST", "/v1/audio/conv-reverb", "Apply user-supplied impulse response"),
+    ]),
+    ("generate", "Text-to-music generation", [
+        ("POST", "/v1/audio/generate/stable-audio-open", "Stability Community Licence — 47s cap, loops / SFX / textures (no vocals). CUDA-only."),
+        ("POST", "/v1/audio/generate/musicgen-small", "Meta MusicGen 300M — CC-BY-NC, 30s cap, instrumental only. Opt-in via AUDIOLLA_ENABLE_NONCOMMERCIAL=1. CUDA-only."),
+        ("POST", "/v1/audio/generate/musicgen-medium", "Meta MusicGen 1.5B — CC-BY-NC, 30s cap, higher quality than -small. Opt-in via AUDIOLLA_ENABLE_NONCOMMERCIAL=1. CUDA-only."),
+        ("POST", "/v1/audio/generate/riffusion", "Riffusion-v1 — CreativeML OpenRAIL-M, spectrogram→Griffin-Lim, ~5s per pass, lo-fi character. CUDA-only."),
+        ("POST", "/v1/audio/generate/audioldm2", "AudioLDM 2 — CC-BY 4.0 (commercial OK, no opt-in), general SFX (ambience / foley / impacts), 16 kHz mono, up to 30s, slow. CUDA-only."),
     ]),
     ("visualize", "PNG spectrogram/waveform + animated video", [
         ("POST", "/v1/audio/visualize/image/spectrogram", "Static spectrogram PNG"),
@@ -708,7 +862,14 @@ async def _submit_job(
     await JOB_QUEUE.submit(
         _wrap, job_id=job_id, endpoint=endpoint, webhook_url=webhook_url
     )
-    return JSONResponse({"job_id": job_id, "status": "pending"}, status_code=202)
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "status": "pending",
+            "status_url": f"/v1/jobs/{job_id}",
+        },
+        status_code=202,
+    )
 
 
 async def _run_with_optional_job(
@@ -859,23 +1020,25 @@ async def _evict_siblings(current_slug: str) -> None:
 
 
 @app.post("/v1/audio/separate")
-async def separate(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    engine: str = Form(...),
-    stems: list[str] = Form(default=[]),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def separate(req: AudioSeparateRequest) -> Response:
     """Stem separation. Supports Demucs engines (htdemucs, htdemucs_ft,
     htdemucs_6s, mdx_extra) and UVR separation engines (uvr-vocal-bsr,
     uvr-karaoke). The ``stems`` parameter filters which stems to return;
     omit to get all available stems for the engine.
     """
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    engine = req.engine
+    stems = req.stems
     _validate_output_format(output_format)
 
     eng = ENGINES.get(engine)
@@ -951,22 +1114,25 @@ async def separate(
 
 
 @app.post("/v1/audio/master")
-async def master(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    mode: str = Form(...),
-    reference: UploadFile | None = File(default=None),
-    reference_path: str | None = Form(default=None),
-    reference_url: str | None = Form(default=None),
-    preset: str | None = Form(default=None),
-    target_lufs: float | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def master(req: AudioMasterRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    reference = None  # v1.0.0: multipart upload var no longer exists, kept as shim
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    reference_url = url_to_str(req.reference_url)
+    mode = format_value(req.mode)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    reference_path = req.reference_path
+    reference_url = url_to_str(req.reference_url)
+    preset = req.preset
+    target_lufs = req.target_lufs
     _validate_output_format(output_format)
 
     if mode not in ("reference", "chain"):
@@ -1050,12 +1216,13 @@ async def master(
 
 
 @app.post("/v1/audio/analyze", response_model=AnalyzeResult)
-async def analyze(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    features: list[str] = Form(default=[]),
-) -> AnalyzeResult:
+async def analyze(req: AudioAnalyzeRequest) -> AnalyzeResult:
+    validate_input_xor(req.file_path, req.file_url)
+    # shim locals so the rest of the handler body stays unchanged
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    features = req.features
     _VALID_FEATURES = frozenset(
         {"bpm", "key", "loudness", "duration", "spectral_centroid", "rms", "zcr"}
     )
@@ -1094,28 +1261,24 @@ async def analyze(
 
 
 @app.post("/v1/audio/transform")
-async def transform(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    operations: str = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def transform(req: AudioTransformRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    operations = req.operations
     _validate_output_format(output_format)
 
-    try:
-        ops = json.loads(operations)
-        if not isinstance(ops, list):
-            raise ValueError("operations must be a JSON array")
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid operations JSON: {exc}",
-        ) from exc
+    ops = _ensure_json_array(operations, "operations")
+    # Operation is a Pydantic model — coerce to plain dict for downstream.
+    ops = [op.model_dump(exclude_none=True) if hasattr(op, "model_dump") else op for op in ops]
 
     _VALID_OPS = frozenset(
         {
@@ -1180,13 +1343,14 @@ async def transform(
 
 
 @app.post("/v1/audio/loudness")
-async def loudness(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-) -> LoudnessResult:
+async def loudness(req: AudioLoudnessRequest) -> LoudnessResult:
     """Measure integrated LUFS (ITU-R BS.1770-4) via pyloudnorm. Returns JSON only.
     To normalize to a target level use POST /v1/audio/normalize."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_loudness_engine(eng):
         raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
@@ -1199,37 +1363,32 @@ async def loudness(
 
 
 @app.post("/v1/audio/normalize")
-async def normalize(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    target_lufs: float = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Any:
+async def normalize(req: NormalizeRequest) -> Any:
     """Normalize audio to a target LUFS level via pyloudnorm (gain scaling).
     Common targets: -14 (Spotify/YouTube), -16 (Apple Music), -23 (broadcast EBU R128)."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    output_format = req.output_format.value if hasattr(req.output_format, "value") else req.output_format
     _validate_output_format(output_format)
-    _validate_target_lufs(target_lufs)
+    _validate_target_lufs(req.target_lufs)
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_loudness_engine(eng):
         raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
-    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    raw, filename = await resolve_input(
+        file=None,
+        file_path=req.file_path,
+        file_url=str(req.file_url) if req.file_url else None,
+    )
 
     extra_json: dict[str, Any] = {
-        "target_lufs": target_lufs, "output_format": output_format,
+        "target_lufs": req.target_lufs, "output_format": output_format,
     }
-    inline_headers: dict[str, str] = {"X-Target-LUFS": str(target_lufs)}
 
     async def _produce() -> bytes:
         audio_bytes, lufs = await eng.normalize_lufs(
-            raw, filename, target_lufs=target_lufs, output_format=output_format,
+            raw, filename, target_lufs=req.target_lufs, output_format=output_format,
         )
         extra_json["measured_lufs"] = lufs
-        inline_headers["X-Loudness-LUFS"] = str(lufs)
         return audio_bytes
 
     return await _run_with_optional_job(
@@ -1238,12 +1397,11 @@ async def normalize(
         filename=f"normalized.{output_format}",
         job_ext=output_format,
         endpoint="/v1/audio/normalize",
-        output_path=output_path,
-        output_url=output_url,
+        output_path=req.output_path,
+        output_url=str(req.output_url) if req.output_url else None,
         extra_json=extra_json,
-        extra_inline_headers=inline_headers,
-        async_job=async_job,
-        webhook_url=webhook_url,
+        async_job=req.async_job,
+        webhook_url=str(req.webhook_url) if req.webhook_url else None,
     )
 
 
@@ -1251,28 +1409,23 @@ async def normalize(
 
 
 @app.post("/v1/audio/fx")
-async def fx(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    effects: str = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def fx(req: AudioFxRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    effects = req.effects
     _validate_output_format(output_format)
 
-    try:
-        chain = json.loads(effects)
-        if not isinstance(chain, list):
-            raise ValueError("effects must be a JSON array")
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid effects JSON: {exc}",
-        ) from exc
+    chain = _ensure_json_array(effects, "effects")
+    chain = [e.model_dump(exclude_none=True) if hasattr(e, "model_dump") else e for e in chain]
 
     engine_slug = "fx-chain"
     eng = ENGINES.get(engine_slug)
@@ -1399,17 +1552,19 @@ async def midi_compose(
 
 
 @app.post("/v1/midi/render")
-async def midi_render(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    soundfont_path: str | None = Form(default=None),
-    gain: float = Form(default=0.5),
-    samplerate: int = Form(default=44100),
-    output_format: str = Form(default="wav"),
-) -> Response:
+async def midi_render(req: MidiRenderRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    soundfont_path = req.soundfont_path
+    gain = req.gain
+    samplerate = req.samplerate
     _validate_output_format(output_format)
 
     engine_slug = "midi-render"
@@ -1569,22 +1724,23 @@ async def midi_generate(
 
 
 @app.post("/v1/audio/beats")
-async def beats(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    click_track: bool = Form(default=False),
-    output_format: str = Form(default="wav"),
-    start_bpm: float | None = Form(default=None),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Any:
+async def beats(req: AudioBeatsRequest) -> Any:
     """Returns JSON with tempo + beat positions. With ``click_track=true``
     also synthesises a metronome-mixed audio render and includes a
     base64-encoded copy in the JSON.
     """
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    click_track = req.click_track
+    start_bpm = req.start_bpm
     _validate_output_format(output_format)
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_beats_engine(eng):
@@ -1623,11 +1779,12 @@ async def beats(
 
 
 @app.post("/v1/audio/onsets")
-async def onsets(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-) -> dict[str, Any]:
+async def onsets(req: AudioOnsetsRequest) -> dict[str, Any]:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_onsets_engine(eng):
         raise HTTPException(
@@ -1649,18 +1806,19 @@ async def onsets(
 
 
 @app.post("/v1/audio/melody")
-async def melody(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    fmin: float = Form(default=65.0),
-    fmax: float = Form(default=2093.0),
-    as_midi: bool = Form(default=False),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Any:
+async def melody(req: AudioMelodyRequest) -> Any:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    fmin = req.fmin
+    fmax = req.fmax
+    as_midi = req.as_midi
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_melody_engine(eng):
         raise HTTPException(
@@ -1701,12 +1859,13 @@ async def melody(
 
 
 @app.post("/v1/audio/segments")
-async def segments(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    num_segments: int = Form(default=6),
-) -> dict[str, Any]:
+async def segments(req: AudioSegmentsRequest) -> dict[str, Any]:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    num_segments = req.num_segments
     eng = ENGINES.get("librosa-analyze")
     if eng is None or not is_segments_engine(eng):
         raise HTTPException(
@@ -1728,19 +1887,20 @@ async def segments(
 
 
 @app.post("/v1/audio/silence")
-async def silence(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    threshold_db: float = Form(default=-30.0),
-    min_duration_sec: float = Form(default=0.5),
-    trim_mode: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Any:
+async def silence(req: AudioSilenceRequest) -> Any:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    threshold_db = req.threshold_db
+    min_duration_sec = req.min_duration_sec
+    trim_mode = req.trim_mode
     _validate_output_format(output_format)
     eng = ENGINES.get("silence-detect")
     if eng is None or not is_silence_engine(eng):
@@ -1784,19 +1944,21 @@ async def silence(
 
 
 @app.post("/v1/audio/visualize/image/spectrogram")
-async def visualize_spectrogram(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    width: int = Form(default=1280),
-    height: int = Form(default=720),
-    color: str = Form(default="intensity"),
-    scale: str = Form(default="log"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def visualize_spectrogram(req: AudioVisualizeImageSpectrogramRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    width = req.width
+    height = req.height
+    color = req.color
+    scale = req.scale
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
         raise HTTPException(
@@ -1823,18 +1985,20 @@ async def visualize_spectrogram(
 
 
 @app.post("/v1/audio/visualize/image/waveform")
-async def visualize_waveform(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    width: int = Form(default=1280),
-    height: int = Form(default=720),
-    color: str = Form(default="lime"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def visualize_waveform(req: AudioVisualizeImageWaveformRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    width = req.width
+    height = req.height
+    color = req.color
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
         raise HTTPException(
@@ -1861,20 +2025,21 @@ async def visualize_waveform(
 
 
 @app.post("/v1/audio/visualize/video/{mode}")
-async def visualize_video(
-    mode: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    width: int = Form(default=1280),
-    height: int = Form(default=720),
-    fps: int = Form(default=30),
-    container: str = Form(default="mp4"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def visualize_video(mode: str, req: AudioVisualizeVideoRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    width = req.width
+    height = req.height
+    fps = req.fps
+    container = req.container
     eng = ENGINES.get("ffmpeg-render")
     if eng is None or not is_ffmpeg_render_engine(eng):
         raise HTTPException(
@@ -1919,13 +2084,14 @@ async def visualize_video(
 
 
 @app.post("/v1/audio/fingerprint")
-async def fingerprint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    analyze_seconds: float = Form(default=120.0),
-    return_raw: bool = Form(default=False),
-) -> dict[str, Any]:
+async def fingerprint(req: AudioFingerprintRequest) -> dict[str, Any]:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    analyze_seconds = req.analyze_seconds
+    return_raw = req.return_raw
     eng = ENGINES.get("audio-fingerprint")
     if eng is None or not is_fingerprint_engine(eng):
         raise HTTPException(
@@ -1955,18 +2121,19 @@ async def fingerprint(
 
 
 @app.post("/v1/audio/restore/{engine}")
-async def restore(
-    engine: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    aggressive: bool = Form(default=False),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def restore(engine: str, req: AudioRestoreRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    aggressive = req.aggressive
     _validate_output_format(output_format)
     eng = ENGINES.get(engine)
     if eng is None:
@@ -2006,11 +2173,12 @@ async def restore(
 
 
 @app.post("/v1/midi/inspect")
-async def midi_inspect(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-) -> dict[str, Any]:
+async def midi_inspect(req: MidiInspectRequest) -> dict[str, Any]:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
     eng = ENGINES.get("midi-compose")
     if eng is None or not is_midi_inspect_engine(eng):
         raise HTTPException(
@@ -2032,18 +2200,20 @@ async def midi_inspect(
 
 
 @app.post("/v1/midi/transform")
-async def midi_transform(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    transpose_semitones: int = Form(default=0),
-    quantize_grid_beats: float | None = Form(default=None),
-    tempo_bpm: float | None = Form(default=None),
-    keep_channels: str | None = Form(default=None),
-    drop_channels: str | None = Form(default=None),
-) -> Response:
+async def midi_transform(req: MidiTransformRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    transpose_semitones = req.transpose_semitones
+    quantize_grid_beats = req.quantize_grid_beats
+    tempo_bpm = req.tempo_bpm
+    keep_channels = req.keep_channels
+    drop_channels = req.drop_channels
     eng = ENGINES.get("midi-compose")
     if eng is None or not is_midi_transform_engine(eng):
         raise HTTPException(
@@ -2102,24 +2272,25 @@ async def midi_transform(
 
 
 @app.post("/v1/audio/to_midi/{engine}")
-async def to_midi(
-    engine: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    onset_threshold: float = Form(default=0.5),
-    frame_threshold: float = Form(default=0.3),
-    minimum_note_length_ms: float = Form(default=58.0),
-    minimum_frequency: float | None = Form(default=None),
-    maximum_frequency: float | None = Form(default=None),
-    multiple_pitch_bends: bool = Form(default=False),
-    melodia_trick: bool = Form(default=True),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def to_midi(engine: str, req: AudioToMidiRequest) -> Response:
     """Convert audio to a polyphonic MIDI file via Spotify basic-pitch."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    onset_threshold = req.onset_threshold
+    frame_threshold = req.frame_threshold
+    minimum_note_length_ms = req.minimum_note_length_ms
+    minimum_frequency = req.minimum_frequency
+    maximum_frequency = req.maximum_frequency
+    multiple_pitch_bends = req.multiple_pitch_bends
+    melodia_trick = req.melodia_trick
     eng = ENGINES.get(engine)
     if eng is None:
         raise HTTPException(
@@ -2168,18 +2339,19 @@ async def to_midi(
 
 
 @app.post("/v1/audio/enhance/{engine}")
-async def audio_enhance(
-    engine: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def audio_enhance(engine: str, req: AudioEnhanceRequest) -> Response:
     """Neural speech and vocal enhancement via DeepFilterNet DF3."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
     _validate_output_format(output_format)
     eng = ENGINES.get(engine)
     if eng is None:
@@ -2217,17 +2389,167 @@ async def audio_enhance(
     )
 
 
+# ── /v1/audio/generate/{engine} — text-to-music / text-to-SFX generation ───
+# engine=stable-audio-open Stable Audio Open 1.0. 47s cap. Loops/SFX/textures.
+# engine=musicgen-small    Meta MusicGen 300M (CC-BY-NC). 30s cap. Instrumental.
+# engine=musicgen-medium   Meta MusicGen 1.5B (CC-BY-NC). 30s cap. Instrumental.
+# engine=riffusion         Riffusion-v1. Spectrogram→Griffin-Lim. ~5s/pass.
+# engine=audioldm2         AudioLDM 2 (CC-BY 4.0). 30s cap. General SFX.
+
+
+async def _do_generate(
+    engine_slug: str,
+    prompt: str,
+    duration_sec: float,
+    seed: int | None,
+    lyrics: str | None,
+    num_inference_steps: int | None,
+    output_format: str,
+    output_path: str | None,
+    output_url: str | None,
+    async_job: bool,
+    webhook_url: str | None,
+) -> Response:
+    """Shared generation dispatch — used by every dedicated
+    /v1/audio/generate/<engine> handler. Validators are run by each
+    handler before this is called."""
+    _validate_output_format(output_format)
+    eng = ENGINES.get(engine_slug)
+    if eng is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown engine {engine_slug!r}; configured: {list(ENGINES.keys())}",
+        )
+    if not is_music_gen_engine(eng):
+        raise HTTPException(
+            status_code=400,
+            detail=f"engine {engine_slug!r} does not support text-to-music generation",
+        )
+
+    async def _produce() -> bytes:
+        await _evict_siblings(engine_slug)
+        extra: dict[str, Any] = {}
+        if num_inference_steps is not None:
+            import inspect as _inspect  # noqa: PLC0415
+            sig = _inspect.signature(eng.generate)
+            if "num_inference_steps" in sig.parameters:
+                extra["num_inference_steps"] = num_inference_steps
+        return await eng.generate(
+            prompt,
+            duration_sec=duration_sec,
+            lyrics=lyrics,
+            seed=seed,
+            output_format=output_format,
+            **extra,
+        )
+
+    return await _run_with_optional_job(
+        _produce,
+        media_type=content_type_for(output_format),
+        filename=f"generated.{output_format}",
+        job_ext=output_format,
+        endpoint=f"/v1/audio/generate/{engine_slug}",
+        output_path=output_path,
+        output_url=output_url,
+        extra_json={
+            "engine": engine_slug,
+            "prompt": prompt,
+            "duration_sec": duration_sec,
+            "seed": seed,
+            "output_format": output_format,
+        },
+        async_job=async_job,
+        webhook_url=webhook_url,
+    )
+
+
+@app.post("/v1/audio/generate/stable-audio-open")
+async def generate_stable_audio_open(req: StableAudioOpenRequest = Body(...)) -> Response:
+    """Stability Stable Audio Open 1.0 — 47s cap, 44.1kHz stereo, no vocals."""
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    return await _do_generate(
+        "stable-audio-open",
+        prompt=req.prompt, duration_sec=req.duration_sec, seed=req.seed,
+        lyrics=None,
+        num_inference_steps=getattr(req, "num_inference_steps", None),
+        output_format=format_value(req.output_format),
+        output_path=req.output_path, output_url=url_to_str(req.output_url),
+        async_job=req.async_job, webhook_url=url_to_str(req.webhook_url),
+    )
+
+
+@app.post("/v1/audio/generate/musicgen-small")
+async def generate_musicgen_small(req: MusicGenRequest = Body(...)) -> Response:
+    """Meta MusicGen 300M — CC-BY-NC, requires AUDIOLLA_ENABLE_NONCOMMERCIAL=1."""
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    return await _do_generate(
+        "musicgen-small",
+        prompt=req.prompt, duration_sec=req.duration_sec, seed=req.seed,
+        lyrics=getattr(req, "lyrics", None),
+        num_inference_steps=None,
+        output_format=format_value(req.output_format),
+        output_path=req.output_path, output_url=url_to_str(req.output_url),
+        async_job=req.async_job, webhook_url=url_to_str(req.webhook_url),
+    )
+
+
+@app.post("/v1/audio/generate/musicgen-medium")
+async def generate_musicgen_medium(req: MusicGenRequest = Body(...)) -> Response:
+    """Meta MusicGen 1.5B — CC-BY-NC, same opt-in gate."""
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    return await _do_generate(
+        "musicgen-medium",
+        prompt=req.prompt, duration_sec=req.duration_sec, seed=req.seed,
+        lyrics=getattr(req, "lyrics", None),
+        num_inference_steps=None,
+        output_format=format_value(req.output_format),
+        output_path=req.output_path, output_url=url_to_str(req.output_url),
+        async_job=req.async_job, webhook_url=url_to_str(req.webhook_url),
+    )
+
+
+@app.post("/v1/audio/generate/riffusion")
+async def generate_riffusion(req: RiffusionRequest = Body(...)) -> Response:
+    """Riffusion v1 — Stable Diffusion spectrogram → Griffin-Lim audio."""
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    return await _do_generate(
+        "riffusion",
+        prompt=req.prompt, duration_sec=req.duration_sec, seed=req.seed,
+        lyrics=None,
+        num_inference_steps=None,
+        output_format=format_value(req.output_format),
+        output_path=req.output_path, output_url=url_to_str(req.output_url),
+        async_job=req.async_job, webhook_url=url_to_str(req.webhook_url),
+    )
+
+
+@app.post("/v1/audio/generate/audioldm2")
+async def generate_audioldm2(req: AudioLDM2Request = Body(...)) -> Response:
+    """AudioLDM 2 — CC-BY 4.0 commercial-OK, general SFX."""
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    return await _do_generate(
+        "audioldm2",
+        prompt=req.prompt, duration_sec=req.duration_sec, seed=req.seed,
+        lyrics=None,
+        num_inference_steps=getattr(req, "num_inference_steps", None),
+        output_format=format_value(req.output_format),
+        output_path=req.output_path, output_url=url_to_str(req.output_url),
+        async_job=req.async_job, webhook_url=url_to_str(req.webhook_url),
+    )
+
+
 # ── /v1/audio/chords — chord + key detection via librosa ─────────────────────
 
 
 @app.post("/v1/audio/chords")
-async def chords(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    hop_length: int = Form(default=512),
-    segment_min_duration_sec: float = Form(default=0.5),
-) -> JSONResponse:
+async def chords(req: AudioChordsRequest) -> JSONResponse:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    hop_length = req.hop_length
+    segment_min_duration_sec = req.segment_min_duration_sec
     eng = ENGINES.get("chord-detect")
     if eng is None:
         raise HTTPException(
@@ -2260,14 +2582,15 @@ async def chords(
 
 
 @app.post("/v1/audio/vad")
-async def vad(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    threshold: float = Form(default=0.5),
-    min_speech_duration_ms: float = Form(default=250.0),
-    min_silence_duration_ms: float = Form(default=100.0),
-) -> JSONResponse:
+async def vad(req: AudioVadRequest) -> JSONResponse:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    threshold = req.threshold
+    min_speech_duration_ms = req.min_speech_duration_ms
+    min_silence_duration_ms = req.min_silence_duration_ms
     eng = ENGINES.get("silero-vad")
     if eng is None:
         raise HTTPException(
@@ -2301,15 +2624,15 @@ async def vad(
 
 
 @app.post("/v1/audio/diarize/{engine}")
-async def diarize(
-    engine: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    num_speakers: int | None = Form(default=None),
-    min_speakers: int | None = Form(default=None),
-    max_speakers: int | None = Form(default=None),
-) -> JSONResponse:
+async def diarize(engine: str, req: AudioDiarizeRequest) -> JSONResponse:
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    num_speakers = req.num_speakers
+    min_speakers = req.min_speakers
+    max_speakers = req.max_speakers
     eng = ENGINES.get(engine)
     if eng is None:
         raise HTTPException(
@@ -2343,20 +2666,22 @@ async def diarize(
 
 
 @app.post("/v1/audio/stretch")
-async def stretch(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    tempo_factor: float = Form(default=1.0),
-    pitch_semitones: float = Form(default=0.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def stretch(req: AudioStretchRequest) -> Response:
     """Independently control playback speed (tempo_factor) and key (pitch_semitones).
     tempo_factor=0.5 = half speed; pitch_semitones=12 = one octave up."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    tempo_factor = req.tempo_factor
+    pitch_semitones = req.pitch_semitones
     _validate_output_format(output_format)
     eng = ENGINES.get("stretch")
     if eng is None or not is_stretch_engine(eng):
@@ -2388,14 +2713,15 @@ async def stretch(
 
 
 @app.post("/v1/audio/tag")
-async def tag(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    top_k: int = Form(default=10),
-) -> JSONResponse:
+async def tag(req: AudioTagRequest) -> JSONResponse:
     """Top-K AudioSet label predictions via Audio Spectrogram Transformer.
     Requires model cache (set HF_HUB_OFFLINE=0 on first run to download)."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    top_k = req.top_k
     eng = ENGINES.get("ast-tag")
     if eng is None or not is_tag_engine(eng):
         raise HTTPException(status_code=404, detail="ast-tag engine not configured")
@@ -2411,15 +2737,16 @@ async def tag(
 
 
 @app.post("/v1/audio/embed")
-async def embed(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    query_text: str | None = Form(default=None),
-) -> JSONResponse:
+async def embed(req: AudioEmbedRequest) -> JSONResponse:
     """512-dim L2-normalised audio embedding via LAION CLAP. With query_text,
     also returns cosine similarity to the text description.
     Requires model cache (set HF_HUB_OFFLINE=0 on first run to download)."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    query_text = req.query_text
     eng = ENGINES.get("clap-embed")
     if eng is None or not is_embed_engine(eng):
         raise HTTPException(status_code=404, detail="clap-embed engine not configured")
@@ -2435,21 +2762,23 @@ async def embed(
 
 
 @app.post("/v1/audio/separate/hpss")
-async def hpss(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    margin: float = Form(default=1.0),
-    kernel_size: int = Form(default=31),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def hpss(req: AudioSeparateHpssRequest) -> Response:
     """Harmonic/percussive source separation via librosa HPSS median filter.
     Returns a ZIP containing harmonic.<fmt> (tonal content) and
     percussive.<fmt> (transients/drums). margin > 1 sharpens the separation."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    margin = req.margin
+    kernel_size = req.kernel_size
     _validate_output_format(output_format)
     eng = ENGINES.get("hpss")
     if eng is None or not is_hpss_engine(eng):
@@ -2489,19 +2818,20 @@ async def hpss(
 
 
 @app.post("/v1/audio/noise-reduce/{engine}")
-async def noise_reduce(
-    engine: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    stationary: bool = Form(default=False),
-    prop_decrease: float = Form(default=1.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def noise_reduce(engine: str, req: AudioNoiseReduceRequest) -> Response:
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    stationary = req.stationary
+    prop_decrease = req.prop_decrease
     _validate_output_format(output_format)
     eng = ENGINES.get(engine)
     if eng is None:
@@ -2556,12 +2886,13 @@ async def noise_reduce(
 
 
 @app.post("/v1/audio/info")
-async def audio_info_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-) -> JSONResponse:
+async def audio_info_endpoint(req: AudioInfoRequest) -> JSONResponse:
     """Probe audio file: duration, sample_rate, channels, codec, bit_depth, format."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
     try:
         result = await asyncio.to_thread(audio_info, raw, filename)
@@ -2574,19 +2905,21 @@ async def audio_info_endpoint(
 
 
 @app.post("/v1/audio/trim")
-async def trim(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    start_sec: float = Form(default=0.0),
-    end_sec: float = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def trim(req: AudioTrimRequest) -> Response:
     """Cut audio to [start_sec, end_sec). end_sec required."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    start_sec = req.start_sec
+    end_sec = req.end_sec
     _validate_output_format(output_format)
     if start_sec < 0:
         raise HTTPException(status_code=400, detail="start_sec must be >= 0")
@@ -2617,43 +2950,40 @@ async def trim(
 
 
 @app.post("/v1/audio/mix")
-async def mix(
-    tracks: str = Form(...),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
-    """Mix multiple staged/URL tracks with per-track gain.
-    tracks is a JSON array: [{"file_path":"...", "gain_db": 0.0}, ...]
-    Each entry has file_path OR file_url plus optional gain_db (default 0.0).
-    Requires at least 2 tracks."""
+async def mix(req: AudioMixRequest) -> Response:
+    """Mix multiple staged/URL tracks.
+    file_paths: list of FILES_DIR-relative paths, OR
+    file_urls: list of HTTP URLs the server fetches.
+    Requires at least 2 inputs."""
+    validate_multi_input_xor(req.file_paths, req.file_urls)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
     _validate_output_format(output_format)
-    try:
-        track_specs = json.loads(tracks)
-        if not isinstance(track_specs, list) or len(track_specs) < 2:
-            raise ValueError("tracks must be a JSON array with at least 2 entries")
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"invalid tracks JSON: {exc}") from exc
+
+    inputs_iter: list[tuple[str | None, str | None]]
+    if req.file_paths is not None and len(req.file_paths) > 0:
+        inputs_iter = [(fp, None) for fp in req.file_paths]
+    else:
+        inputs_iter = [(None, url_to_str(fu)) for fu in (req.file_urls or [])]
+    if len(inputs_iter) < 2:
+        raise HTTPException(
+            status_code=400, detail="mix requires at least 2 inputs",
+        )
 
     mix_inputs: list[tuple[bytes, str, float]] = []
-    for i, spec in enumerate(track_specs):
-        if not isinstance(spec, dict):
-            raise HTTPException(status_code=400, detail=f"track {i}: must be an object")
-        fp = spec.get("file_path") or None
-        fu = spec.get("file_url") or None
-        try:
-            gain_db = float(spec.get("gain_db", 0.0))
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"track {i}: invalid gain_db") from exc
+    for i, (fp, fu) in enumerate(inputs_iter):
         try:
             raw, filename = await resolve_input(file=None, file_path=fp, file_url=fu)
         except HTTPException as exc:
             raise HTTPException(
                 status_code=exc.status_code, detail=f"track {i}: {exc.detail}"
             ) from exc
-        mix_inputs.append((raw, filename, gain_db))
+        mix_inputs.append((raw, filename, 0.0))
 
     async def _produce() -> bytes:
         return await asyncio.to_thread(mix_audio, mix_inputs, output_format)
@@ -2676,31 +3006,33 @@ async def mix(
 
 
 @app.post("/v1/audio/concat")
-async def concat(
-    files: str = Form(...),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def concat(req: AudioConcatRequest) -> Response:
     """Concatenate N audio files in order.
-    files is a JSON array: [{"file_path": "..."}, {"file_url": "..."}, ...]
-    Each entry has file_path OR file_url. Requires at least 2."""
+    file_paths: list of FILES_DIR-relative paths, OR
+    file_urls: list of HTTP URLs the server fetches.
+    Requires at least 2 inputs."""
+    validate_multi_input_xor(req.file_paths, req.file_urls)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
     _validate_output_format(output_format)
-    try:
-        file_specs = json.loads(files)
-        if not isinstance(file_specs, list) or len(file_specs) < 2:
-            raise ValueError("files must be a JSON array with at least 2 entries")
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"invalid files JSON: {exc}") from exc
+
+    inputs_iter: list[tuple[str | None, str | None]]
+    if req.file_paths is not None and len(req.file_paths) > 0:
+        inputs_iter = [(fp, None) for fp in req.file_paths]
+    else:
+        inputs_iter = [(None, url_to_str(fu)) for fu in (req.file_urls or [])]
+    if len(inputs_iter) < 2:
+        raise HTTPException(
+            status_code=400, detail="concat requires at least 2 inputs",
+        )
 
     concat_inputs: list[tuple[bytes, str]] = []
-    for i, spec in enumerate(file_specs):
-        if not isinstance(spec, dict):
-            raise HTTPException(status_code=400, detail=f"file {i}: must be an object")
-        fp = spec.get("file_path") or None
-        fu = spec.get("file_url") or None
+    for i, (fp, fu) in enumerate(inputs_iter):
         try:
             raw, filename = await resolve_input(file=None, file_path=fp, file_url=fu)
         except HTTPException as exc:
@@ -2730,19 +3062,21 @@ async def concat(
 
 
 @app.post("/v1/audio/speed")
-async def speed(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    speed: float = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def speed(req: AudioSpeedRequest) -> Response:
     """Change playback speed without pitch shift via ffmpeg atempo.
     speed=0.5 halves speed; speed=2.0 doubles. Range: 0.1–10.0."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    speed = req.speed
     _validate_output_format(output_format)
     if not (0.1 <= speed <= 10.0):
         raise HTTPException(
@@ -2772,19 +3106,21 @@ async def speed(
 
 
 @app.post("/v1/audio/convert")
-async def convert(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    sample_rate: int | None = Form(default=None),
-    channels: int | None = Form(default=None),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def convert(req: AudioConvertRequest) -> Response:
     """Re-encode audio to a different format, sample rate, or channel count."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    sample_rate = req.sample_rate
+    channels = req.channels
     _validate_output_format(output_format)
     if sample_rate is not None and sample_rate <= 0:
         raise HTTPException(
@@ -2825,15 +3161,17 @@ async def convert(
 
 
 @app.post("/v1/audio/similar")
-async def similar(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    reference_file: UploadFile | None = File(default=None),
-    reference_file_path: str | None = Form(default=None),
-    reference_file_url: str | None = Form(default=None),
-) -> JSONResponse:
+async def similar(req: AudioSimilarRequest) -> JSONResponse:
     """Cosine similarity between two audio files via CLAP embeddings."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    reference_file = None  # v1.0.0: multipart upload var no longer exists, kept as shim
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    reference_file_url = url_to_str(req.reference_file_url)
+    reference_file_path = req.reference_file_path
+    reference_file_url = url_to_str(req.reference_file_url)
     eng = ENGINES.get("clap-embed")
     if eng is None or not is_embed_engine(eng):
         raise HTTPException(status_code=404, detail="clap-embed engine not configured")
@@ -2855,17 +3193,19 @@ async def similar(
 
 
 @app.post("/v1/midi/quantize")
-async def midi_quantize(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    grid_beats: float = Form(default=0.25),
-) -> Response:
+async def midi_quantize(req: MidiQuantizeRequest) -> Response:
     """Snap MIDI note timings to the nearest rhythmic grid.
     grid_beats: grid size in beats (0.25=16th, 0.5=8th, 1.0=quarter).
     Wraps /v1/midi/transform with only quantize_grid_beats set."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    grid_beats = req.grid_beats
     if grid_beats <= 0:
         raise HTTPException(
             status_code=400,
@@ -2900,18 +3240,24 @@ async def midi_quantize(
 
 
 @app.post("/v1/audio/classify")
-async def classify(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    labels: str = Form(...),
-) -> JSONResponse:
+async def classify(req: AudioClassifyRequest) -> JSONResponse:
     """Zero-shot audio classification via CLAP. labels is a JSON array of strings.
     Returns results sorted by descending similarity score.
     Example labels: ["jazz", "hip-hop", "classical"] or ["male voice", "female voice"].
     Requires clap-embed model cache."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    labels = req.labels
     try:
-        label_list = json.loads(labels)
+        # Pydantic gives us a list[str] from JSON body; legacy form-encoded
+        # path used to deliver a JSON-encoded string, so still accept that.
+        if isinstance(labels, (str, bytes)):
+            label_list = json.loads(labels)
+        else:
+            label_list = list(labels) if labels is not None else []
         if not isinstance(label_list, list) or len(label_list) < 1:
             raise ValueError("labels must be a non-empty JSON array of strings")
         if not all(isinstance(lb, str) for lb in label_list):
@@ -2934,21 +3280,23 @@ async def classify(
 
 
 @app.post("/v1/audio/fade")
-async def fade(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    fade_in: float = Form(default=0.0),
-    fade_out: float = Form(default=0.0),
-    curve: str = Form(default="tri"),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def fade(req: AudioFadeRequest) -> Response:
     """Apply fade-in and/or fade-out. curve options: tri, qsin, esin, hsin, log, ipar,
     qua, cub, squ, cbr, par, exp, lin. At least one of fade_in/fade_out must be > 0."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    fade_in = req.fade_in
+    fade_out = req.fade_out
+    curve = req.curve
     _validate_output_format(output_format)
     if fade_in <= 0.0 and fade_out <= 0.0:
         raise HTTPException(
@@ -2981,17 +3329,19 @@ async def fade(
 
 
 @app.post("/v1/audio/reverse")
-async def reverse(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def reverse(req: AudioReverseRequest) -> Response:
     """Reverse audio playback direction via ffmpeg areverse."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
@@ -3016,18 +3366,20 @@ async def reverse(
 
 
 @app.post("/v1/audio/loop")
-async def loop(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    count: int = Form(default=2),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def loop(req: AudioLoopRequest) -> Response:
     """Repeat audio count times (minimum 2). Uses ffmpeg aloop filter."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    count = req.count
     _validate_output_format(output_format)
     if count < 2:
         raise HTTPException(
@@ -3057,20 +3409,22 @@ async def loop(
 
 
 @app.post("/v1/audio/bpm-match")
-async def bpm_match(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    target_bpm: float = Form(...),
-    pitch_semitones: float = Form(default=0.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def bpm_match(req: AudioBpmMatchRequest) -> Response:
     """Detect source BPM via librosa then time-stretch to target_bpm.
     Requires both librosa-analyze and stretch engines."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    target_bpm = req.target_bpm
+    pitch_semitones = req.pitch_semitones
     _validate_output_format(output_format)
     if target_bpm <= 0:
         raise HTTPException(
@@ -3130,19 +3484,21 @@ async def bpm_match(
 
 
 @app.post("/v1/audio/stereo-width")
-async def stereo_width(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    width: float = Form(default=1.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def stereo_width(req: AudioStereoWidthRequest) -> Response:
     """Adjust stereo width via M/S processing. width=0.0 → mono, 1.0 → original,
     >1.0 → wider. Range: [0.0, 3.0]."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    width = req.width
     _validate_output_format(output_format)
     if not (0.0 <= width <= 3.0):
         raise HTTPException(
@@ -3203,23 +3559,25 @@ def _parse_key_root(key_str: str) -> int:
 
 
 @app.post("/v1/audio/split")
-async def split(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    mode: str = Form(default="equal"),
-    count: int | None = Form(default=None),
-    threshold_db: float = Form(default=-30.0),
-    min_duration_sec: float = Form(default=0.5),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def split(req: AudioSplitRequest) -> Response:
     """Split audio into segments. mode=equal (requires count>=2) or mode=silence
     (uses threshold_db/min_duration_sec via silence-detect engine).
     Returns a ZIP of numbered segment files."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    mode = format_value(req.mode)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    count = req.count
+    threshold_db = req.threshold_db
+    min_duration_sec = req.min_duration_sec
     if mode not in ("equal", "silence"):
         raise HTTPException(status_code=400, detail="mode must be 'equal' or 'silence'")
     _validate_output_format(output_format)
@@ -3290,18 +3648,20 @@ async def split(
 
 
 @app.post("/v1/audio/pan")
-async def pan(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    position: float = Form(default=0.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def pan(req: AudioPanRequest) -> Response:
     """Pan audio in the stereo field. position: -1.0=hard left, 0.0=center, 1.0=hard right."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    position = req.position
     _validate_output_format(output_format)
     if not (-1.0 <= position <= 1.0):
         raise HTTPException(
@@ -3331,29 +3691,23 @@ async def pan(
 
 
 @app.post("/v1/audio/eq")
-async def eq(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    bands: str = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def eq(req: AudioEqRequest) -> Response:
     """Parametric EQ via ffmpeg equalizer filter.
     bands is a JSON array: [{"freq": 1000, "gain_db": 3.0, "width_hz": 100}, ...]"""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    bands = req.bands
     _validate_output_format(output_format)
-    try:
-        band_list = json.loads(bands)
-        if not isinstance(band_list, list):
-            raise ValueError("bands must be a JSON array")
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid bands JSON: {exc}",
-        ) from exc
+    band_list = _ensure_json_array(bands, "bands")
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
     async def _produce() -> bytes:
@@ -3377,20 +3731,22 @@ async def eq(
 
 
 @app.post("/v1/audio/key-match")
-async def key_match(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    target_key: str = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def key_match(req: AudioKeyMatchRequest) -> Response:
     """Detect source key via chord-detect then pitch-shift to target_key.
     target_key: note name, e.g. C, F#, Bb, D#. Case-insensitive.
     Requires chord-detect and stretch engines."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    target_key = req.target_key
     _validate_output_format(output_format)
     target_semitone = _parse_key_root(target_key)
     chord_detect_eng = ENGINES.get("chord-detect")
@@ -3442,25 +3798,27 @@ async def key_match(
 
 
 @app.post("/v1/audio/sidechain-duck")
-async def sidechain_duck_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    trigger_file: UploadFile | None = File(default=None),
-    trigger_file_path: str | None = Form(default=None),
-    trigger_file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    threshold_db: float = Form(default=-20.0),
-    ratio: float = Form(default=4.0),
-    attack_ms: float = Form(default=10.0),
-    release_ms: float = Form(default=200.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def sidechain_duck_endpoint(req: AudioSidechainDuckRequest) -> Response:
     """Duck primary audio when trigger audio is loud (voiceover-over-music effect).
     threshold_db: trigger level. ratio: compression ratio. attack_ms/release_ms: timing."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    trigger_file = None  # v1.0.0: multipart upload var no longer exists, kept as shim
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    trigger_file_url = url_to_str(req.trigger_file_url)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    trigger_file_path = req.trigger_file_path
+    threshold_db = req.threshold_db
+    ratio = req.ratio
+    attack_ms = req.attack_ms
+    release_ms = req.release_ms
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
     trigger_raw, trigger_filename = await resolve_input(
@@ -3495,15 +3853,16 @@ async def sidechain_duck_endpoint(
 
 
 @app.post("/v1/audio/metadata")
-async def audio_metadata(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    tags: str | None = Form(default=None),
-) -> JSONResponse:
+async def audio_metadata(req: AudioMetadataRequest) -> JSONResponse:
     """Read or write audio file tags (ID3, Vorbis, FLAC) via mutagen.
     If tags is provided (JSON object), writes those tags and returns the updated
     tag set. Without tags, reads and returns all tags."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    tags = req.tags
     eng = ENGINES.get("metadata")
     if eng is None or not is_metadata_engine(eng):
         raise HTTPException(status_code=404, detail="metadata engine not configured")
@@ -3533,13 +3892,14 @@ async def audio_metadata(
 
 
 @app.post("/v1/audio/clip-detect")
-async def clip_detect_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-) -> JSONResponse:
+async def clip_detect_endpoint(req: AudioClipDetectRequest) -> JSONResponse:
     """Detect digital clipping via numpy. Returns clipped, clip_count, clip_ratio,
     peak_db, duration_sec, sample_rate, channels."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
     try:
         result = await asyncio.to_thread(clip_detect, raw, filename)
@@ -3552,19 +3912,21 @@ async def clip_detect_endpoint(
 
 
 @app.post("/v1/audio/mid-side")
-async def mid_side(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    mode: str = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def mid_side(req: AudioMidSideRequest) -> Response:
     """Encode stereo to Mid/Side or decode M/S back to stereo.
     mode: 'encode' (L/R → M/S) or 'decode' (M/S → L/R)."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    mode = format_value(req.mode)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
     if mode not in ("encode", "decode"):
         raise HTTPException(status_code=400, detail="mode must be 'encode' or 'decode'")
     _validate_output_format(output_format)
@@ -3593,18 +3955,20 @@ async def mid_side(
 
 
 @app.post("/v1/audio/beat-slice")
-async def beat_slice_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def beat_slice_endpoint(req: AudioBeatSliceRequest) -> Response:
     """Slice audio at beat positions detected by librosa-analyze.
     Returns a ZIP of numbered beat slices. Requires librosa-analyze engine."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
     _validate_output_format(output_format)
     librosa_eng = ENGINES.get("librosa-analyze")
     if librosa_eng is None or not is_beats_engine(librosa_eng):
@@ -3639,22 +4003,25 @@ async def beat_slice_endpoint(
 
 
 @app.post("/v1/audio/conv-reverb")
-async def conv_reverb_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    ir_file: UploadFile | None = File(default=None),
-    ir_file_path: str | None = Form(default=None),
-    ir_file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    wet_mix: float = Form(default=0.3),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def conv_reverb_endpoint(req: AudioConvReverbRequest) -> Response:
     """Convolution reverb using an impulse response (IR) file.
     wet_mix: 0.0=dry only, 1.0=wet only. Range [0.0, 1.0]."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    ir_file = None  # v1.0.0: multipart upload var no longer exists, kept as shim
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    ir_file_url = url_to_str(req.ir_file_url)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    ir_file_path = req.ir_file_path
+    ir_file_url = url_to_str(req.ir_file_url)
+    wet_mix = req.wet_mix
     _validate_output_format(output_format)
     if not (0.0 <= wet_mix <= 1.0):
         raise HTTPException(
@@ -3693,21 +4060,23 @@ async def conv_reverb_endpoint(
 
 
 @app.post("/v1/audio/transient")
-async def transient_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    attack_gain_db: float = Form(default=0.0),
-    sustain_gain_db: float = Form(default=0.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def transient_endpoint(req: AudioTransientRequest) -> Response:
     """Transient shaper via dual-compressor attack/sustain blending.
     attack_gain_db: boost/cut transient attack (positive=punchier, negative=softer).
     sustain_gain_db: boost/cut sustain (positive=sustain boost, negative=sustain cut)."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    attack_gain_db = req.attack_gain_db
+    sustain_gain_db = req.sustain_gain_db
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
@@ -3740,18 +4109,7 @@ async def transient_endpoint(
 
 
 @app.post("/v1/audio/multiband-compress")
-async def multiband_compress_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    crossovers_hz: str = Form(...),
-    bands: str = Form(...),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def multiband_compress_endpoint(req: AudioMultibandCompressRequest) -> Response:
     """Multiband compression.
 
     crossovers_hz: JSON array of ascending crossover frequencies (Hz),
@@ -3761,15 +4119,22 @@ async def multiband_compress_endpoint(
 
     Bands split with zero-phase LR4-equivalent filters; sum reconstructs
     when bypassed. Output is the summed compressed signal."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    crossovers_hz = req.crossovers_hz
+    bands = req.bands
     _validate_output_format(output_format)
-    try:
-        xo = json.loads(crossovers_hz)
-        bds = json.loads(bands)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"crossovers_hz and bands must be valid JSON: {exc}",
-        ) from exc
+    xo = _ensure_json_array(crossovers_hz, 'crossovers_hz')
+    bds = _ensure_json_array(bands, 'bands')
 
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
@@ -3798,26 +4163,33 @@ async def multiband_compress_endpoint(
 
 
 @app.post("/v1/audio/remix")
-async def remix(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    engine: str = Form(default="htdemucs"),
-    stem_mix: str = Form(default="{}"),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def remix(req: AudioRemixRequest) -> Response:
     """Separate audio into stems then bounce back with per-stem gain/mute control.
     stem_mix is a JSON object: {"vocals": {"gain_db": -6}, "drums": {"mute": true}, ...}
     Missing stems use gain_db=0.0, mute=false. Requires a separation engine."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    engine = req.engine
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    stem_mix = req.stem_mix
     _validate_output_format(output_format)
-    try:
-        _parsed = json.loads(stem_mix)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"invalid stem_mix JSON: {exc}") from exc
+    if isinstance(stem_mix, (str, bytes)):
+        try:
+            _parsed = json.loads(stem_mix)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid stem_mix JSON: {exc}"
+            ) from exc
+    else:
+        _parsed = stem_mix if stem_mix is not None else {}
     if not isinstance(_parsed, dict):
         raise HTTPException(status_code=400, detail="stem_mix must be a JSON object")
     stem_mix_spec: dict = _parsed
@@ -3888,13 +4260,14 @@ _CAMELOT: dict[str, str] = {
 
 
 @app.post("/v1/audio/dj-prep")
-async def dj_prep(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-) -> JSONResponse:
+async def dj_prep(req: AudioDjPrepRequest) -> JSONResponse:
     """DJ track analysis: BPM, key (+ Camelot wheel position), integrated LUFS.
     Requires librosa-analyze + chord-detect + pedalboard-chain or matchering engines."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
     librosa_eng = ENGINES.get("librosa-analyze")
     if librosa_eng is None or not is_beats_engine(librosa_eng):
         raise HTTPException(status_code=404, detail="librosa-analyze engine not configured")
@@ -3934,14 +4307,15 @@ async def dj_prep(
 
 
 @app.post("/v1/audio/loudness/curve")
-async def loudness_curve_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    hop_length: int = Form(default=512),
-) -> JSONResponse:
+async def loudness_curve_endpoint(req: AudioLoudnessCurveRequest) -> JSONResponse:
     """Compute the RMS loudness envelope as a time series.
     Returns {curve: [{time_sec, rms_db}, ...], duration, sample_rate, points}."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    hop_length = req.hop_length
     if hop_length < 64 or hop_length > 8192:
         raise HTTPException(
             status_code=400,
@@ -3959,19 +4333,21 @@ async def loudness_curve_endpoint(
 
 
 @app.post("/v1/audio/pitch-correct")
-async def pitch_correct_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    strength: float = Form(default=1.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def pitch_correct_endpoint(req: AudioPitchCorrectRequest) -> Response:
     """Pitch-correct audio toward the nearest chromatic semitone via pyin F0 detection.
     strength=1.0 is full correction, 0.0 is bypass. Requires librosa-analyze engine."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    strength = req.strength
     _validate_output_format(output_format)
     if not (0.0 <= strength <= 1.0):
         raise HTTPException(
@@ -4004,22 +4380,24 @@ async def pitch_correct_endpoint(
 
 
 @app.post("/v1/audio/repair")
-async def repair_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    declip: bool = Form(default=True),
-    dehum: bool = Form(default=False),
-    hum_freq: float = Form(default=50.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def repair_endpoint(req: AudioRepairRequest) -> Response:
     """Repair audio: interpolate clipped samples and/or remove mains hum.
     declip: fix digital clipping. dehum: notch-filter 50/60 Hz hum.
     hum_freq: fundamental hum frequency (50 for EU, 60 for US)."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    declip = req.declip
+    dehum = req.dehum
+    hum_freq = req.hum_freq
     _validate_output_format(output_format)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
@@ -4048,15 +4426,16 @@ async def repair_endpoint(
 
 
 @app.post("/v1/audio/loop-point")
-async def loop_point_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    min_loop_bars: int = Form(default=4),
-    num_candidates: int = Form(default=5),
-) -> JSONResponse:
+async def loop_point_endpoint(req: AudioLoopPointRequest) -> JSONResponse:
     """Find the best seamless loop point in audio using beat-grid MFCC similarity.
     Returns loop_start_sec, loop_end_sec, bars, score, tempo_bpm, candidates."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    min_loop_bars = req.min_loop_bars
+    num_candidates = req.num_candidates
     if min_loop_bars < 1 or min_loop_bars > 64:
         raise HTTPException(
             status_code=400,
@@ -4138,19 +4517,21 @@ async def midi_drum(
 
 
 @app.post("/v1/audio/chords-to-midi")
-async def chords_to_midi(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    tempo_bpm: float | None = Form(default=None),
-    velocity: int = Form(default=80),
-    octave: int = Form(default=4),
-) -> Response:
+async def chords_to_midi(req: AudioChordsToMidiRequest) -> Response:
     """Detect chord progression in audio and export as a MIDI file.
     Each chord segment becomes a held chord (root + third + fifth) at the given octave.
     Requires chord-detect engine."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    tempo_bpm = req.tempo_bpm
+    velocity = req.velocity
+    octave = req.octave
     if velocity < 1 or velocity > 127:
         raise HTTPException(
             status_code=400,
@@ -4209,23 +4590,25 @@ async def chords_to_midi(
 
 
 @app.post("/v1/audio/deess")
-async def deess_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    threshold_db: float = Form(default=-20.0),
-    frequency_hz: float = Form(default=6000.0),
-    ratio: float = Form(default=4.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def deess_endpoint(req: AudioDeessRequest) -> Response:
     """Split-band de-esser: compress sibilance above frequency_hz.
     threshold_db: level at which compression begins (dBFS, default -20).
     frequency_hz: highpass cutoff that isolates sibilance (default 6000 Hz).
     ratio: compression ratio (default 4.0)."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    threshold_db = req.threshold_db
+    frequency_hz = req.frequency_hz
+    ratio = req.ratio
     _validate_output_format(output_format)
     if not (1.0 <= ratio <= 50.0):
         raise HTTPException(
@@ -4263,12 +4646,13 @@ async def deess_endpoint(
 
 
 @app.post("/v1/audio/stereo-field")
-async def stereo_field_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-) -> JSONResponse:
+async def stereo_field_endpoint(req: AudioStereoFieldRequest) -> JSONResponse:
     """Analyse the stereo field: L/R correlation, width, balance, mono compatibility."""
+    validate_input_xor(req.file_path, req.file_url)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
     try:
         result = await asyncio.to_thread(stereo_field, raw, filename)
@@ -4281,19 +4665,21 @@ async def stereo_field_endpoint(
 
 
 @app.post("/v1/audio/thumbnail")
-async def thumbnail_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    duration_sec: float = Form(default=30.0),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def thumbnail_endpoint(req: AudioThumbnailRequest) -> Response:
     """Extract the most energetically interesting segment of duration_sec.
     Uses onset strength to locate the peak-activity region. Requires librosa-analyze."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format)
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    duration_sec = req.duration_sec
     _validate_output_format(output_format)
     if not (1.0 <= duration_sec <= 300.0):
         raise HTTPException(
@@ -4332,19 +4718,21 @@ async def thumbnail_endpoint(
 
 
 @app.post("/v1/midi/humanize")
-async def midi_humanize(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    timing_ms: float = Form(default=10.0),
-    velocity_pct: float = Form(default=10.0),
-    seed: int | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-) -> Response:
+async def midi_humanize(req: MidiHumanizeRequest) -> Response:
     """Add random timing jitter and velocity variation to MIDI notes.
     timing_ms: max ±timing offset per note in milliseconds (default 10).
     velocity_pct: max ±velocity change as % of 127 (default 10).
     seed: optional RNG seed for reproducibility."""
+    validate_input_xor(req.file_path, req.file_url)
+    validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
+    # ── shim locals so the rest of the handler body stays unchanged ──
+    file = None
+    file_path = req.file_path
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    timing_ms = req.timing_ms
+    velocity_pct = req.velocity_pct
+    seed = req.seed
     if not (0.0 <= timing_ms <= 500.0):
         raise HTTPException(
             status_code=400, detail=f"timing_ms must be in [0, 500], got {timing_ms}"
