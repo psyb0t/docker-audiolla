@@ -12,6 +12,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
+import logging
+
+_log = logging.getLogger("audiolla.jobs")
 
 
 class JobStatus(str, enum.Enum):
@@ -84,18 +87,33 @@ class JobQueue:
     async def _run(self, job: Job, coro_fn: Callable[[], Awaitable[Any]]) -> None:
         job.status = JobStatus.running
         job.started_at = time.time()
+        _log.info("job %s started: endpoint=%s", job.id, job.endpoint)
         try:
             result = await coro_fn()
             job.result = result if isinstance(result, dict) else {"value": result}
             job.status = JobStatus.completed
         except asyncio.CancelledError:
             job.status = JobStatus.cancelled
+            _log.warning("job %s cancelled (endpoint=%s)", job.id, job.endpoint)
             raise
         except Exception as exc:
             job.status = JobStatus.failed
             job.error = str(exc)
+            _log.exception(
+                "job %s failed (endpoint=%s): %s",
+                job.id, job.endpoint, exc,
+            )
         finally:
             job.completed_at = time.time()
+            duration = (
+                round(job.completed_at - job.started_at, 3)
+                if job.started_at else 0.0
+            )
+            if job.status == JobStatus.completed:
+                _log.info(
+                    "job %s %s in %.3fs (endpoint=%s)",
+                    job.id, job.status.value, duration, job.endpoint,
+                )
 
         if job.status == JobStatus.completed and job.webhook_url:
             asyncio.create_task(
@@ -119,12 +137,27 @@ class JobQueue:
                     try:
                         resp = await client.post(url, json=payload)
                         if resp.status_code < 500:
+                            _log.info(
+                                "webhook delivered for job %s (status=%d, attempt=%d)",
+                                job.id, resp.status_code, attempt + 1,
+                            )
                             return
-                    except httpx.TransportError:
+                        _log.warning(
+                            "webhook attempt %d for job %s got %d; retrying",
+                            attempt + 1, job.id, resp.status_code,
+                        )
+                    except httpx.TransportError as exc:
+                        _log.warning(
+                            "webhook attempt %d for job %s failed: %s",
+                            attempt + 1, job.id, exc,
+                        )
                         if attempt == 3:
                             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning(
+                "webhook delivery for job %s gave up after retries: %s",
+                job.id, exc,
+            )
 
     async def cancel(self, job_id: str) -> bool:
         job = self._jobs.get(job_id)

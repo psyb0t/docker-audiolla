@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 from ..audio import AudioConversionError, to_wav_float32
 from .base import EngineBase
@@ -24,9 +25,13 @@ class DiarizeEngine(EngineBase):
 
         token = os.environ.get("HUGGINGFACE_TOKEN", "")
         if not token:
+            self._log.warning(
+                "diarize load failed: HUGGINGFACE_TOKEN not set",
+            )
             raise DiarizeError(
                 "HUGGINGFACE_TOKEN env var is required for pyannote diarization"
             )
+        self._log.info("loading pyannote/speaker-diarization-3.1")
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
             use_auth_token=token,
@@ -44,6 +49,12 @@ class DiarizeEngine(EngineBase):
         min_speakers: int | None = None,
         max_speakers: int | None = None,
     ) -> dict:
+        self._log.info(
+            "diarize start: filename=%s input_bytes=%d num_speakers=%s "
+            "min_speakers=%s max_speakers=%s",
+            filename, len(raw), num_speakers, min_speakers, max_speakers,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -56,6 +67,12 @@ class DiarizeEngine(EngineBase):
             max_speakers,
         )
         self._touch()
+        self._log.info(
+            "diarize done: filename=%s duration_ms=%.1f n_speakers=%d n_segments=%d",
+            filename, (time.perf_counter() - t0) * 1000.0,
+            int(result.get("num_speakers", 0)),
+            len(result.get("segments", [])),
+        )
         return result
 
     def _diarize_sync(
@@ -101,6 +118,9 @@ class DiarizeEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception(
+                "speaker diarization failed for %s", filename,
+            )
             raise DiarizeError(f"speaker diarization failed: {exc}") from exc
         finally:
             if wav_path and os.path.exists(wav_path):

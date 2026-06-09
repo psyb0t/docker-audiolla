@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
 from .base import EngineBase
@@ -23,11 +24,24 @@ class HpssEngine(EngineBase):
         kernel_size: int = 31,
         output_format: str = "wav",
     ) -> dict[str, bytes]:
+        self._log.info(
+            "hpss start: filename=%s input_bytes=%d margin=%.3f "
+            "kernel_size=%d output_format=%s",
+            filename, len(raw), margin, kernel_size, output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._hpss_sync, raw, filename, margin, kernel_size, output_format
             )
             self._touch()
+            self._log.info(
+                "hpss done: filename=%s duration_ms=%.1f "
+                "harmonic_bytes=%d percussive_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                len(result.get("harmonic", b"")),
+                len(result.get("percussive", b"")),
+            )
             return result
 
     def _hpss_sync(
@@ -80,6 +94,7 @@ class HpssEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("HPSS failed for %s", filename)
             raise AudioConversionError(f"HPSS failed: {exc}") from exc
         finally:
             try:

@@ -7,11 +7,15 @@ mutagen is imported lazily so that import errors surface only at runtime.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
+import time
 
 from ..audio import AudioConversionError, encode_audio, write_temp_input
 from .base import EngineBase
+
+_log = logging.getLogger("audiolla.engine.metadata")
 
 _SENTINEL = "metadata-engine-no-model"
 
@@ -47,6 +51,7 @@ def _import_mutagen():
         import mutagen
         return mutagen
     except ImportError as exc:
+        _log.exception("mutagen import failed")
         raise AudioConversionError(
             "mutagen is not installed; add it to the image"
         ) from exc
@@ -60,6 +65,7 @@ def _read_tags_sync(raw: bytes, filename: str) -> dict:
     try:
         mf = MFile(in_path)
         if mf is None:
+            _log.warning("mutagen could not parse %r", filename)
             raise AudioConversionError(f"mutagen could not parse {filename!r}")
 
         raw_tags: dict = {}
@@ -137,6 +143,7 @@ def _write_tags_sync(
     try:
         mf = MFile(in_path)
         if mf is None:
+            _log.warning("mutagen could not parse %r for tag write", filename)
             raise AudioConversionError(f"mutagen could not parse {filename!r}")
 
         if mf.tags is None:
@@ -191,6 +198,10 @@ def _write_tags_sync(
                     capture_output=True, timeout=120,
                 )
                 if proc.returncode != 0:
+                    _log.warning(
+                        "ffmpeg decode failed after tag write rc=%d",
+                        proc.returncode,
+                    )
                     raise AudioConversionError(
                         "ffmpeg decode failed after tag write: "
                         + proc.stderr.decode("utf-8", errors="replace").strip()
@@ -217,8 +228,18 @@ class MetadataEngine(EngineBase):
 
     async def read_tags(self, raw: bytes, filename: str) -> dict:
         _import_mutagen()
+        self._log.info(
+            "read_tags start: filename=%s input_bytes=%d", filename, len(raw),
+        )
+        t0 = time.perf_counter()
         self._touch()
-        return await asyncio.to_thread(_read_tags_sync, raw, filename)
+        result = await asyncio.to_thread(_read_tags_sync, raw, filename)
+        self._log.info(
+            "read_tags done: filename=%s duration_ms=%.1f tag_keys=%d",
+            filename, (time.perf_counter() - t0) * 1000.0,
+            len(result.get("raw_tags", {})),
+        )
+        return result
 
     async def write_tags(
         self,
@@ -228,7 +249,18 @@ class MetadataEngine(EngineBase):
         output_format: str | None = None,
     ) -> bytes:
         _import_mutagen()
+        self._log.info(
+            "write_tags start: filename=%s input_bytes=%d tag_keys=%d "
+            "output_format=%s",
+            filename, len(raw), len(tags) if tags else 0, output_format,
+        )
+        t0 = time.perf_counter()
         self._touch()
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             _write_tags_sync, raw, filename, tags, output_format
         )
+        self._log.info(
+            "write_tags done: filename=%s duration_ms=%.1f output_bytes=%d",
+            filename, (time.perf_counter() - t0) * 1000.0, len(result),
+        )
+        return result

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from typing import Any
 
 from ..audio import AudioConversionError, encode_audio, write_temp_input
@@ -20,6 +21,7 @@ class StretchEngine(EngineBase):
         import librosa  # noqa: PLC0415
         import soundfile as sf  # noqa: PLC0415
 
+        self._log.info("loading librosa stretch engine")
         self._librosa = librosa
         self._sf = sf
         self._log.info("StretchEngine ready (librosa %s)", librosa.__version__)
@@ -34,11 +36,21 @@ class StretchEngine(EngineBase):
         pitch_semitones: float = 0.0,
         output_format: str = "wav",
     ) -> bytes:
+        self._log.info(
+            "stretch start: filename=%s input_bytes=%d tempo_factor=%.3f "
+            "pitch_semitones=%.3f output_format=%s",
+            filename, len(raw), tempo_factor, pitch_semitones, output_format,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         result = await asyncio.to_thread(
             self._stretch_sync, raw, filename, tempo_factor, pitch_semitones, output_format
         )
         self._touch()
+        self._log.info(
+            "stretch done: filename=%s duration_ms=%.1f output_bytes=%d",
+            filename, (time.perf_counter() - t0) * 1000.0, len(result),
+        )
         return result
 
     def _stretch_sync(
@@ -86,6 +98,7 @@ class StretchEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("stretch failed for %s", filename)
             raise AudioConversionError(f"stretch failed: {exc}") from exc
         finally:
             if in_path and os.path.exists(in_path):

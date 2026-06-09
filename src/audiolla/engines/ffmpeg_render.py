@@ -29,12 +29,16 @@ images. fps defaults to 30 for video.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
 import tempfile
+import time
 
 from ..audio import AudioConversionError, to_wav_float32
 from .base import EngineBase
+
+_log = logging.getLogger("audiolla.engine.ffmpeg_render")
 
 
 class FfmpegRenderError(AudioConversionError):
@@ -78,11 +82,20 @@ class FfmpegRenderEngine(EngineBase):
         color: str = "intensity",
         scale: str = "log",
     ) -> bytes:
+        self._log.info(
+            "spectrogram start: filename=%s input_bytes=%d dims=%dx%d color=%s scale=%s",
+            filename, len(raw), width, height, color, scale,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._spectrogram_sync, raw, filename, width, height, color, scale,
             )
             self._touch()
+            self._log.info(
+                "spectrogram done: filename=%s duration_ms=%.1f png_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _spectrogram_sync(
@@ -124,11 +137,20 @@ class FfmpegRenderEngine(EngineBase):
         height: int = 320,
         color: str = "lime",
     ) -> bytes:
+        self._log.info(
+            "waveform start: filename=%s input_bytes=%d dims=%dx%d color=%s",
+            filename, len(raw), width, height, color,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._waveform_sync, raw, filename, width, height, color,
             )
             self._touch()
+            self._log.info(
+                "waveform done: filename=%s duration_ms=%.1f png_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _waveform_sync(
@@ -171,20 +193,36 @@ class FfmpegRenderEngine(EngineBase):
         container: str = "mp4",
     ) -> bytes:
         if mode not in _VISUALIZE_FILTERS:
+            self._log.warning(
+                "visualize rejected: unknown mode=%s filename=%s", mode, filename,
+            )
             raise FfmpegRenderError(
                 f"unknown visualize mode {mode!r}; "
                 f"supported: {sorted(_VISUALIZE_FILTERS)}"
             )
         if container not in _VIDEO_CONTAINERS:
+            self._log.warning(
+                "visualize rejected: unknown container=%s filename=%s",
+                container, filename,
+            )
             raise FfmpegRenderError(
                 f"unknown container {container!r}; supported: mp4, webm"
             )
+        self._log.info(
+            "visualize start: filename=%s input_bytes=%d mode=%s dims=%dx%d fps=%d container=%s",
+            filename, len(raw), mode, width, height, fps, container,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._visualize_sync,
                 raw, filename, mode, width, height, fps, container,
             )
             self._touch()
+            self._log.info(
+                "visualize done: filename=%s mode=%s duration_ms=%.1f output_bytes=%d",
+                filename, mode, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _visualize_sync(
@@ -252,15 +290,20 @@ def _run_ffmpeg(cmd: list[str], *, timeout: int = 300) -> None:
             cmd, check=False, capture_output=True, text=True, timeout=timeout,
         )
     except FileNotFoundError as exc:
+        _log.exception("ffmpeg binary not found on PATH")
         raise FfmpegRenderError(
             "ffmpeg binary not found on PATH"
         ) from exc
     except subprocess.TimeoutExpired as exc:
+        _log.warning("ffmpeg render exceeded %ds timeout", timeout)
         raise FfmpegRenderError(
             f"ffmpeg render exceeded {timeout}s timeout"
         ) from exc
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-3:] or ["<no stderr>"]
+        _log.warning(
+            "ffmpeg exit=%d stderr_tail=%s", proc.returncode, " | ".join(tail),
+        )
         raise FfmpegRenderError(
             f"ffmpeg exit={proc.returncode}: {' | '.join(tail)}"
         )

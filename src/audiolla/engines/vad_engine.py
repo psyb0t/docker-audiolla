@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 from ..audio import AudioConversionError, to_wav_float32
 from .base import EngineBase
@@ -22,6 +23,7 @@ class VADEngine(EngineBase):
         import torch  # noqa: PLC0415
         from silero_vad import get_speech_timestamps, load_silero_vad, read_audio  # noqa: PLC0415
 
+        self._log.info("loading silero-vad ...")
         model = load_silero_vad()
         self._model = model
         self._torch = torch
@@ -39,6 +41,13 @@ class VADEngine(EngineBase):
         min_speech_duration_ms: float = 250.0,
         min_silence_duration_ms: float = 100.0,
     ) -> dict:
+        self._log.info(
+            "detect_voice start: filename=%s input_bytes=%d threshold=%.3f "
+            "min_speech_ms=%.1f min_silence_ms=%.1f",
+            filename, len(raw), threshold,
+            min_speech_duration_ms, min_silence_duration_ms,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -51,6 +60,13 @@ class VADEngine(EngineBase):
             min_silence_duration_ms,
         )
         self._touch()
+        self._log.info(
+            "detect_voice done: filename=%s duration_ms=%.1f "
+            "speech_segments=%d speech_ratio=%.3f",
+            filename, (time.perf_counter() - t0) * 1000.0,
+            len(result.get("speech_segments", [])),
+            result.get("speech_ratio", 0.0),
+        )
         return result
 
     def _detect_voice_sync(
@@ -113,6 +129,7 @@ class VADEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("voice activity detection failed for %s", filename)
             raise VADError(f"voice activity detection failed: {exc}") from exc
         finally:
             if wav_path and os.path.exists(wav_path):

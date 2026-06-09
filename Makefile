@@ -149,9 +149,24 @@ test-unit-cov-gate: dev-image ## Enforce ≥80% line coverage on support modules
 
 # Integration suite — runs on the host (NOT inside the dev container) because
 # it spawns sibling docker containers and pokes the audiolla HTTP port directly.
-# Builds the CPU image first unless AUDIOLLA_SKIP_BUILD=1.
-test-integration: ## Run integration tests (host-side, spawns docker containers)
-	@bash tests/integration/run.sh
+# The pytest session-scoped fixture (tests/integration/conftest.py) builds the
+# CPU image first unless HARNESS_SKIP_BUILD=1, computes the union of engines
+# needed by collected tests, spawns ONE container, and tears it down at
+# session end (with atexit + SIGINT/SIGTERM/SIGHUP guards for interrupted
+# sessions).
+#
+# Markers + env knobs:
+#   HARNESS_GPU=1                              run CUDA tests (gpu marker)
+#   HARNESS_IMAGE=psyb0t/audiolla:local-cuda   override the docker image
+#   HF_TOKEN / HUGGINGFACE_TOKEN               unlock hf_gated tests
+#   AUDIOLLA_ENABLE_NONCOMMERCIAL=1            unlock noncommercial (MusicGen)
+#   HARNESS_KEEP=1                             leave container running on exit
+#   HARNESS_SKIP_BUILD=1                       skip `make build` preflight
+#
+# Run subsets via pytest's own selection: `pytest tests/integration/ -k generate`,
+# `pytest tests/integration/test_audio_enhance_deepfilter.py`, etc.
+test-integration: ## Run integration tests (host-side; spawns docker containers via pytest)
+	@pytest tests/integration/ -v
 
 lint: dev-image ## Lint python sources
 	$(DEV_RUN) flake8 src

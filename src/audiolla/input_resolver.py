@@ -17,6 +17,11 @@ from fastapi import HTTPException, UploadFile
 
 from . import config, fetch
 from . import files as files_mod
+import logging
+
+_log = logging.getLogger("audiolla.input_resolver")
+
+_log = logging.getLogger("audiolla.input_resolver")
 
 
 def _has_upload(file: UploadFile | None) -> bool:

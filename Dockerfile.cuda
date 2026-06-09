@@ -88,6 +88,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fluidsynth \
         fluid-soundfont-gm \
         libchromaprint-tools \
+        git \
     && rm -rf /var/lib/apt/lists/* \
     && (userdel -r ubuntu 2>/dev/null || true) \
     && useradd -u 1000 --create-home --shell /bin/bash audiolla \
@@ -104,6 +105,7 @@ COPY --chown=audiolla:audiolla src ./src
 COPY --chown=audiolla:audiolla pyproject.toml ./
 COPY --chown=audiolla:audiolla engines.json /app/engines.json
 COPY --chown=audiolla:audiolla openapi.yaml /app/openapi.yaml
+COPY --chown=audiolla:audiolla presets /app/presets
 COPY --chown=audiolla:audiolla entrypoint.sh /usr/local/bin/audiolla-entrypoint
 RUN chmod +x /usr/local/bin/audiolla-entrypoint
 

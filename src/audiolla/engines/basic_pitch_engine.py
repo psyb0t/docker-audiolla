@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 
 from ..audio import AudioConversionError, to_wav_float32
 from .base import EngineBase
@@ -27,9 +28,13 @@ class BasicPitchEngine(EngineBase):
         from basic_pitch import ICASSP_2022_MODEL_PATH  # noqa: PLC0415
         from basic_pitch.inference import predict as _predict  # noqa: PLC0415
 
+        self._log.info("loading basic-pitch ICASSP 2022 (ONNX backend)")
         self._predict = _predict
         self._model_path = ICASSP_2022_MODEL_PATH
-        self._log.info("basic-pitch engine ready (ONNX backend)")
+        self._log.info(
+            "basic-pitch engine ready (ONNX backend, model_path=%s)",
+            self._model_path,
+        )
         return _predict
 
     async def to_midi(
@@ -49,6 +54,13 @@ class BasicPitchEngine(EngineBase):
 
         Returns raw MIDI bytes.
         """
+        self._log.info(
+            "basic-pitch to_midi start: filename=%s input_bytes=%d "
+            "onset_threshold=%.2f frame_threshold=%.2f min_note_ms=%.1f",
+            filename, len(raw), onset_threshold, frame_threshold,
+            minimum_note_length_ms,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         async with self._lock:
             result = await asyncio.to_thread(
@@ -64,6 +76,10 @@ class BasicPitchEngine(EngineBase):
                 melodia_trick,
             )
             self._touch()
+            self._log.info(
+                "basic-pitch to_midi done: filename=%s duration_ms=%.1f midi_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _to_midi_sync(
@@ -105,6 +121,9 @@ class BasicPitchEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception(
+                "basic-pitch inference failed for %s", filename,
+            )
             raise BasicPitchError(f"basic-pitch inference failed: {exc}") from exc
         finally:
             if wav_path and os.path.exists(wav_path):

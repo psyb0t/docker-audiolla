@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 from ..audio import AudioConversionError, write_temp_input
 from .base import EngineBase
@@ -22,6 +23,7 @@ class EmbedEngine(EngineBase):
         from transformers import ClapModel, ClapProcessor  # noqa: PLC0415
         import torch  # noqa: PLC0415
 
+        self._log.info("loading CLAP model %s", _MODEL_ID)
         self._processor = ClapProcessor.from_pretrained(_MODEL_ID)
         model = ClapModel.from_pretrained(_MODEL_ID)
         model.eval()
@@ -32,8 +34,8 @@ class EmbedEngine(EngineBase):
     def _release_model(self, model: object) -> None:
         try:
             model.cpu()  # type: ignore[union-attr]
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001
+            self._log.exception("CLAP model.cpu() failed")
 
     async def embed(
         self,
@@ -42,9 +44,20 @@ class EmbedEngine(EngineBase):
         *,
         query_text: str | None = None,
     ) -> dict:
+        qt_display = (query_text or "")[:80]
+        self._log.info(
+            "embed start: filename=%s input_bytes=%d query_text_len=%d query_text_head=%r",
+            filename, len(raw), len(query_text or ""), qt_display,
+        )
+        t0 = time.perf_counter()
         model = await self.get_model()
         result = await asyncio.to_thread(self._embed_sync, raw, filename, query_text, model)
         self._touch()
+        self._log.info(
+            "embed done: filename=%s duration_ms=%.1f dim=%d has_similarity=%s",
+            filename, (time.perf_counter() - t0) * 1000.0,
+            int(result.get("dim", 0)), "similarity" in result,
+        )
         return result
 
     def _embed_sync(
@@ -84,6 +97,7 @@ class EmbedEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("audio embedding failed for %s", filename)
             raise AudioConversionError(f"audio embedding failed: {exc}") from exc
         finally:
             if in_path and os.path.exists(in_path):
@@ -96,11 +110,21 @@ class EmbedEngine(EngineBase):
     ) -> dict:
         """Cosine similarity between two audio files via CLAP embeddings.
         Both embeddings are L2-normalised so cosine similarity = dot product."""
+        self._log.info(
+            "similar start: file_a=%s bytes_a=%d file_b=%s bytes_b=%d",
+            filename_a, len(raw_a), filename_b, len(raw_b),
+        )
+        t0 = time.perf_counter()
         model = await self.get_model()
         result = await asyncio.to_thread(
             self._similar_sync, raw_a, filename_a, raw_b, filename_b, model
         )
         self._touch()
+        self._log.info(
+            "similar done: file_a=%s file_b=%s duration_ms=%.1f similarity=%.4f",
+            filename_a, filename_b, (time.perf_counter() - t0) * 1000.0,
+            float(result.get("similarity", 0.0)),
+        )
         return result
 
     def _similar_sync(
@@ -133,6 +157,10 @@ class EmbedEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception(
+                "audio similarity failed: file_a=%s file_b=%s",
+                filename_a, filename_b,
+            )
             raise AudioConversionError(f"audio similarity failed: {exc}") from exc
         finally:
             if path_a and os.path.exists(path_a):
@@ -147,9 +175,20 @@ class EmbedEngine(EngineBase):
         *,
         labels: list[str],
     ) -> dict:
+        self._log.info(
+            "classify start: filename=%s input_bytes=%d n_labels=%d",
+            filename, len(raw), len(labels),
+        )
+        t0 = time.perf_counter()
         model = await self.get_model()
         result = await asyncio.to_thread(self._classify_sync, raw, filename, labels, model)
         self._touch()
+        top = (result.get("results") or [{}])[0]
+        self._log.info(
+            "classify done: filename=%s duration_ms=%.1f top_label=%s top_score=%.4f",
+            filename, (time.perf_counter() - t0) * 1000.0,
+            top.get("label"), float(top.get("score", 0.0)),
+        )
         return result
 
     def _classify_sync(
@@ -191,6 +230,7 @@ class EmbedEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("audio classification failed for %s", filename)
             raise AudioConversionError(f"audio classification failed: {exc}") from exc
         finally:
             if in_path and os.path.exists(in_path):

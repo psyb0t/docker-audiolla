@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
 from .base import EngineBase
@@ -27,6 +28,7 @@ class DeepFilterNetEngine(EngineBase):
     def _load_sync(self) -> object:
         from df.enhance import enhance, init_df  # noqa: PLC0415
 
+        self._log.info("loading DeepFilterNet (DF3)")
         self._model, self._df_state, _ = init_df()
         self._enhance = enhance
         self._log.info(
@@ -45,6 +47,11 @@ class DeepFilterNetEngine(EngineBase):
 
         Returns enhanced audio bytes in ``output_format``.
         """
+        self._log.info(
+            "deepfilter enhance start: filename=%s input_bytes=%d output_format=%s",
+            filename, len(raw), output_format,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         async with self._lock:
             result = await asyncio.to_thread(
@@ -54,6 +61,10 @@ class DeepFilterNetEngine(EngineBase):
                 output_format,
             )
             self._touch()
+            self._log.info(
+                "deepfilter enhance done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _enhance_sync(
@@ -96,6 +107,9 @@ class DeepFilterNetEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception(
+                "DeepFilterNet inference failed for %s", filename,
+            )
             raise DeepFilterError(
                 f"DeepFilterNet inference failed: {exc}"
             ) from exc

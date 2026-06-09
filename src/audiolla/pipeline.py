@@ -50,6 +50,9 @@ from .engines import (
     is_transform_engine,
     is_uvr_restore_engine,
 )
+import logging
+
+_log = logging.getLogger("audiolla.pipeline")
 
 
 class PipelineError(Exception):
@@ -334,6 +337,7 @@ async def run_pipeline(
     if not isinstance(steps, list) or not steps:
         raise PipelineError("steps must be a non-empty list")
 
+    _log.info("pipeline starting: %d step(s), input=%s bytes", len(steps), len(raw))
     step_log: list[dict] = []
     current = raw
     for i, step in enumerate(steps):
@@ -348,16 +352,20 @@ async def run_pipeline(
         if not isinstance(params, dict):
             raise PipelineError(f"step {i} ({op_name}): params must be an object")
         fn = OPS[op_name]
+        _log.debug("pipeline step %d: op=%s params=%s", i, op_name, params)
         try:
             current = await fn(engines, current, filename, **params)
         except PipelineError as exc:
+            _log.warning("pipeline step %d (%s) failed: %s", i, op_name, exc)
             # The op already raised a PipelineError (e.g. missing engine).
             # Wrap it with the step index so the caller can pinpoint which
             # step in a long pipeline failed.
             raise PipelineError(f"step {i} ({op_name}): {exc}") from exc
         except AudioConversionError as exc:
+            _log.warning("pipeline step %d (%s) AudioConversionError: %s", i, op_name, exc)
             raise PipelineError(f"step {i} ({op_name}): {exc}") from exc
         except TypeError as exc:
+            _log.warning("pipeline step %d (%s) bad params: %s", i, op_name, exc)
             # Wrong kwargs — clarify the offending step
             raise PipelineError(f"step {i} ({op_name}): bad params: {exc}") from exc
         step_log.append({
@@ -367,4 +375,5 @@ async def run_pipeline(
             "size_after": len(current),
         })
 
+    _log.info("pipeline done: %d step(s), output=%d bytes", len(steps), len(current))
     return current, step_log

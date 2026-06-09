@@ -20,12 +20,16 @@ before returning so the FastAPI JSON encoder doesn't trip on numpy types.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
+import time
 from typing import Any
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
 from .base import EngineBase
+
+_log = logging.getLogger("audiolla.engine.librosa_analyze")
 
 # Krumhansl-Schmuckler reference profiles (major + minor). Indexed by pitch
 # class 0..11 (C..B). The chroma vector of the input is correlated against
@@ -45,11 +49,20 @@ class LibrosaAnalyzeEngine(EngineBase):
         filename: str,
         features: list[str],
     ) -> dict[str, Any]:
+        self._log.info(
+            "analyze start: filename=%s input_bytes=%d features=%s",
+            filename, len(raw), features,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._analyze_sync, raw, filename, features
             )
             self._touch()
+            self._log.info(
+                "analyze done: filename=%s duration_ms=%.1f keys=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _analyze_sync(
@@ -124,9 +137,17 @@ class LibrosaAnalyzeEngine(EngineBase):
                 pass
 
     async def measure_lufs(self, raw: bytes, filename: str) -> float:
+        self._log.info(
+            "measure_lufs start: filename=%s input_bytes=%d", filename, len(raw),
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(self._measure_sync, raw, filename)
             self._touch()
+            self._log.info(
+                "measure_lufs done: filename=%s duration_ms=%.1f lufs=%.2f",
+                filename, (time.perf_counter() - t0) * 1000.0, result,
+            )
             return result
 
     def _measure_sync(self, raw: bytes, filename: str) -> float:
@@ -147,11 +168,24 @@ class LibrosaAnalyzeEngine(EngineBase):
         target_lufs: float,
         output_format: str = "wav",
     ) -> tuple[bytes, float]:
+        self._log.info(
+            "normalize_lufs start: filename=%s input_bytes=%d target_lufs=%.2f "
+            "output_format=%s",
+            filename, len(raw), target_lufs, output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._normalize_sync, raw, filename, target_lufs, output_format
             )
             self._touch()
+            out_bytes, measured = result
+            self._log.info(
+                "normalize_lufs done: filename=%s duration_ms=%.1f "
+                "measured_lufs=%.2f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                measured, len(out_bytes),
+            )
             return result
 
     # ── beats ──────────────────────────────────────────────────────────────
@@ -168,11 +202,22 @@ class LibrosaAnalyzeEngine(EngineBase):
         """Full beat tracking — returns BPM + per-beat times. With
         ``click_track=True``, also returns a base64-encoded audio rendering
         of the input mixed with a metronome click on each beat."""
+        self._log.info(
+            "beats start: filename=%s input_bytes=%d click_track=%s "
+            "output_format=%s start_bpm=%s",
+            filename, len(raw), click_track, output_format, start_bpm,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._beats_sync, raw, filename, click_track, output_format, start_bpm,
             )
             self._touch()
+            self._log.info(
+                "beats done: filename=%s duration_ms=%.1f beats=%d tempo_bpm=%.2f",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                result.get("beat_count", 0), result.get("tempo_bpm", 0.0),
+            )
             return result
 
     def _beats_sync(
@@ -239,9 +284,18 @@ class LibrosaAnalyzeEngine(EngineBase):
         """Onset (transient) detection — returns time + relative strength
         for each detected attack. Useful for sample slicing, drum hit
         detection, and rhythm analysis."""
+        self._log.info(
+            "onsets start: filename=%s input_bytes=%d", filename, len(raw),
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(self._onsets_sync, raw, filename)
             self._touch()
+            self._log.info(
+                "onsets done: filename=%s duration_ms=%.1f count=%d",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                result.get("count", 0),
+            )
             return result
 
     def _onsets_sync(self, raw: bytes, filename: str) -> dict[str, Any]:
@@ -293,11 +347,22 @@ class LibrosaAnalyzeEngine(EngineBase):
         also quantises the voiced segments into MIDI notes (note_on
         when pitch becomes voiced, note_off when it goes unvoiced or
         the rounded MIDI note changes) and returns base64 MIDI."""
+        self._log.info(
+            "melody start: filename=%s input_bytes=%d fmin=%.2f fmax=%.2f as_midi=%s",
+            filename, len(raw), fmin, fmax, as_midi,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._melody_sync, raw, filename, fmin, fmax, as_midi,
             )
             self._touch()
+            self._log.info(
+                "melody done: filename=%s duration_ms=%.1f contour=%d midi_notes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                len(result.get("contour", [])),
+                len(result.get("midi_notes", [])) if as_midi else 0,
+            )
             return result
 
     def _melody_sync(
@@ -316,6 +381,7 @@ class LibrosaAnalyzeEngine(EngineBase):
         import numpy as np
 
         if fmin >= fmax:
+            self._log.warning("melody: fmin %.2f >= fmax %.2f", fmin, fmax)
             raise AudioConversionError(
                 f"fmin ({fmin}) must be less than fmax ({fmax})"
             )
@@ -447,11 +513,21 @@ class LibrosaAnalyzeEngine(EngineBase):
         recurrence matrix. Returns ``num_segments`` non-overlapping ranges
         labelled A/B/C/... by cluster, so structurally similar regions
         share a label (good for spotting verse/chorus repetition)."""
+        self._log.info(
+            "segments start: filename=%s input_bytes=%d num_segments=%d",
+            filename, len(raw), num_segments,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._segments_sync, raw, filename, num_segments,
             )
             self._touch()
+            self._log.info(
+                "segments done: filename=%s duration_ms=%.1f segments=%d",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                len(result.get("segments", [])),
+            )
             return result
 
     def _segments_sync(
@@ -464,6 +540,9 @@ class LibrosaAnalyzeEngine(EngineBase):
         import numpy as np
 
         if num_segments < 2 or num_segments > 32:
+            self._log.warning(
+                "segments: num_segments out of range: %d", num_segments,
+            )
             raise AudioConversionError(
                 f"num_segments must be in [2, 32], got {num_segments}"
             )
@@ -592,10 +671,19 @@ class LibrosaAnalyzeEngine(EngineBase):
         hop_length: int = 512,
     ) -> dict:
         """RMS envelope as loudness curve over time."""
+        self._log.info(
+            "loudness_curve start: filename=%s input_bytes=%d hop_length=%d",
+            filename, len(raw), hop_length,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             from ..audio import loudness_curve  # noqa: PLC0415
             result = await asyncio.to_thread(loudness_curve, raw, filename, hop_length=hop_length)
             self._touch()
+            self._log.info(
+                "loudness_curve done: filename=%s duration_ms=%.1f",
+                filename, (time.perf_counter() - t0) * 1000.0,
+            )
             return result
 
     # ── pitch_correct ──────────────────────────────────────────────────────
@@ -614,11 +702,21 @@ class LibrosaAnalyzeEngine(EngineBase):
         applies librosa pitch_shift to move toward the nearest semitone.
         strength=1.0 is full correction, 0.0 is dry pass-through.
         """
+        self._log.info(
+            "pitch_correct start: filename=%s input_bytes=%d strength=%.3f "
+            "output_format=%s",
+            filename, len(raw), strength, output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._pitch_correct_sync, raw, filename, strength, output_format,
             )
             self._touch()
+            self._log.info(
+                "pitch_correct done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _pitch_correct_sync(
@@ -635,10 +733,16 @@ class LibrosaAnalyzeEngine(EngineBase):
         from ..audio import SUPPORTED_OUTPUT_FORMATS  # noqa: PLC0415
 
         if not (0.0 <= strength <= 1.0):
+            self._log.warning(
+                "pitch_correct: strength out of range: %.3f", strength,
+            )
             raise AudioConversionError(
                 f"strength must be in [0.0, 1.0], got {strength}"
             )
         if output_format not in SUPPORTED_OUTPUT_FORMATS:
+            self._log.warning(
+                "pitch_correct: unsupported output format %r", output_format,
+            )
             raise AudioConversionError(
                 f"unsupported output format {output_format!r}; "
                 f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
@@ -714,11 +818,22 @@ class LibrosaAnalyzeEngine(EngineBase):
         Quantizes to beat grid, computes MFCC spectral similarity between
         loop start and end points, returns the highest-scoring candidate.
         """
+        self._log.info(
+            "loop_point start: filename=%s input_bytes=%d min_loop_bars=%d "
+            "num_candidates=%d",
+            filename, len(raw), min_loop_bars, num_candidates,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._loop_point_sync, raw, filename, min_loop_bars, num_candidates,
             )
             self._touch()
+            self._log.info(
+                "loop_point done: filename=%s duration_ms=%.1f candidates=%d",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                len(result.get("candidates", [])),
+            )
             return result
 
     def _loop_point_sync(
@@ -732,6 +847,9 @@ class LibrosaAnalyzeEngine(EngineBase):
         import numpy as np
 
         if min_loop_bars < 1 or min_loop_bars > 64:
+            self._log.warning(
+                "loop_point: min_loop_bars out of range: %d", min_loop_bars,
+            )
             raise AudioConversionError(
                 f"min_loop_bars must be in [1, 64], got {min_loop_bars}"
             )
@@ -848,9 +966,23 @@ class LibrosaAnalyzeEngine(EngineBase):
         duration_sec: float = 30.0,
         output_format: str = "wav",
     ) -> tuple[bytes, dict]:
-        return await asyncio.to_thread(
+        self._log.info(
+            "thumbnail start: filename=%s input_bytes=%d duration_sec=%.2f "
+            "output_format=%s",
+            filename, len(raw), duration_sec, output_format,
+        )
+        t0 = time.perf_counter()
+        result = await asyncio.to_thread(
             self._thumbnail_sync, raw, filename, duration_sec, output_format
         )
+        out_bytes, info = result
+        self._log.info(
+            "thumbnail done: filename=%s duration_ms=%.1f output_bytes=%d "
+            "start_sec=%.2f end_sec=%.2f",
+            filename, (time.perf_counter() - t0) * 1000.0, len(out_bytes),
+            info.get("start_sec", 0.0), info.get("end_sec", 0.0),
+        )
+        return result
 
     def _thumbnail_sync(
         self,

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from typing import Any
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
@@ -86,11 +87,23 @@ class SoxTransformEngine(EngineBase):
         operations: list[dict[str, Any]],
         output_format: str = "wav",
     ) -> bytes:
+        self._log.info(
+            "transform start: filename=%s input_bytes=%d operations=%d "
+            "output_format=%s",
+            filename, len(raw),
+            len(operations) if isinstance(operations, list) else -1,
+            output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._transform_sync, raw, filename, operations, output_format,
             )
             self._touch()
+            self._log.info(
+                "transform done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _transform_sync(
@@ -112,6 +125,9 @@ class SoxTransformEngine(EngineBase):
                 params = op_item.get("params") or {}
                 handler = _OP_HANDLERS.get(op_name)
                 if handler is None:
+                    self._log.warning(
+                        "transform: op[%d] unknown name %r", idx, op_name,
+                    )
                     raise AudioConversionError(
                         f"operation {idx}: unknown op {op_name!r}; "
                         f"valid: {sorted(_OP_HANDLERS)}"
@@ -119,6 +135,9 @@ class SoxTransformEngine(EngineBase):
                 try:
                     handler(tfm, params)
                 except (KeyError, ValueError, TypeError) as exc:
+                    self._log.warning(
+                        "transform: op[%d] (%s) bad params: %s", idx, op_name, exc,
+                    )
                     raise AudioConversionError(
                         f"operation {idx} ({op_name}): bad params {params!r}: {exc}"
                     ) from exc
@@ -126,6 +145,7 @@ class SoxTransformEngine(EngineBase):
             try:
                 tfm.build_file(wav_in, wav_out)
             except Exception as exc:  # noqa: BLE001
+                self._log.exception("sox build_file failed")
                 raise AudioConversionError(f"sox build_file failed: {exc}") from exc
 
             audio_bytes, _ct = encode_audio(wav_out, output_format)

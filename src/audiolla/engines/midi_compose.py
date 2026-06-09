@@ -39,11 +39,15 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import re
+import time
 from typing import Any
 
 from ..audio import AudioConversionError
 from .base import EngineBase
+
+_log = logging.getLogger("audiolla.engine.midi_compose")
 
 _KEY_SIG_RE = re.compile(r"^[A-G][#b]?m?$")
 
@@ -96,15 +100,23 @@ class MidiComposeEngine(EngineBase):
         super().__init__(slug, entry)
 
     async def compose(self, spec: dict[str, Any]) -> bytes:
+        spec_tracks = len(spec.get("tracks", [])) if isinstance(spec, dict) else 0
+        self._log.info("compose start: tracks=%d", spec_tracks)
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(self._compose_sync, spec)
             self._touch()
+            self._log.info(
+                "compose done: duration_ms=%.1f output_bytes=%d",
+                (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _compose_sync(self, spec: dict[str, Any]) -> bytes:
         import mido
 
         if not isinstance(spec, dict):
+            self._log.warning("compose: spec is not a dict (got %s)", type(spec).__name__)
             raise MidiComposeError("spec must be a JSON object")
 
         tempo_bpm = _bounded_float(
@@ -266,9 +278,16 @@ class MidiComposeEngine(EngineBase):
         """Parse a Standard MIDI File and return JSON describing its
         structure — tempo events, time signature, per-track note counts,
         program changes, total duration in beats + seconds."""
+        self._log.info("inspect start: input_bytes=%d", len(midi_bytes))
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(self._inspect_sync, midi_bytes)
             self._touch()
+            self._log.info(
+                "inspect done: duration_ms=%.1f tracks=%d",
+                (time.perf_counter() - t0) * 1000.0,
+                result.get("track_count", 0),
+            )
             return result
 
     def _inspect_sync(self, midi_bytes: bytes) -> dict[str, Any]:
@@ -277,14 +296,17 @@ class MidiComposeEngine(EngineBase):
         import mido
 
         if not midi_bytes:
+            self._log.warning("MIDI input is empty")
             raise MidiComposeError("MIDI input is empty")
         if not midi_bytes.startswith(b"MThd"):
+            self._log.warning("input missing MThd header")
             raise MidiComposeError(
                 "input does not look like a Standard MIDI File (missing 'MThd')"
             )
         try:
             mid = mido.MidiFile(file=_io.BytesIO(midi_bytes))
         except (ValueError, EOFError, IndexError, OSError) as exc:
+            self._log.warning("failed to parse MIDI: %s", exc)
             raise MidiComposeError(f"failed to parse MIDI: {exc}") from exc
 
         # Collect global meta events (tempo + time signature + key sig)
@@ -388,21 +410,36 @@ class MidiComposeEngine(EngineBase):
           blacklist; supply only one.
         """
         if keep_channels is not None and drop_channels is not None:
+            self._log.warning("transform: both keep/drop channels supplied")
             raise MidiComposeError(
                 "supply either keep_channels or drop_channels, not both"
             )
         if quantize_grid_beats is not None and quantize_grid_beats <= 0:
+            self._log.warning(
+                "transform: quantize_grid_beats must be > 0, got %s",
+                quantize_grid_beats,
+            )
             raise MidiComposeError(
                 f"quantize_grid_beats must be > 0, got {quantize_grid_beats}"
             )
         if tempo_bpm is not None and not (1.0 <= tempo_bpm <= 999.0):
+            self._log.warning("transform: tempo_bpm out of range: %s", tempo_bpm)
             raise MidiComposeError(
                 f"tempo_bpm must be in [1, 999], got {tempo_bpm}"
             )
         if not (-48 <= transpose_semitones <= 48):
+            self._log.warning(
+                "transform: transpose_semitones out of range: %d",
+                transpose_semitones,
+            )
             raise MidiComposeError(
                 f"transpose_semitones must be in [-48, 48], got {transpose_semitones}"
             )
+        self._log.info(
+            "transform start: input_bytes=%d transpose=%d quantize=%s tempo_bpm=%s",
+            len(midi_bytes), transpose_semitones, quantize_grid_beats, tempo_bpm,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._transform_sync,
@@ -414,6 +451,10 @@ class MidiComposeEngine(EngineBase):
                 drop_channels,
             )
             self._touch()
+            self._log.info(
+                "transform done: duration_ms=%.1f output_bytes=%d",
+                (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _transform_sync(
@@ -430,14 +471,17 @@ class MidiComposeEngine(EngineBase):
         import mido
 
         if not midi_bytes:
+            self._log.warning("MIDI input is empty")
             raise MidiComposeError("MIDI input is empty")
         if not midi_bytes.startswith(b"MThd"):
+            self._log.warning("input missing MThd header")
             raise MidiComposeError(
                 "input does not look like a Standard MIDI File (missing 'MThd')"
             )
         try:
             mid = mido.MidiFile(file=_io.BytesIO(midi_bytes))
         except (ValueError, EOFError, IndexError, OSError) as exc:
+            self._log.warning("failed to parse MIDI: %s", exc)
             raise MidiComposeError(f"failed to parse MIDI: {exc}") from exc
 
         tpb = mid.ticks_per_beat
@@ -541,15 +585,27 @@ class MidiComposeEngine(EngineBase):
             }
         }
         """
+        self._log.info(
+            "drum_pattern start: pattern_keys=%d",
+            len(spec.get("pattern", {})) if isinstance(spec, dict) else 0,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(self._drum_pattern_sync, spec)
             self._touch()
+            self._log.info(
+                "drum_pattern done: duration_ms=%.1f output_bytes=%d",
+                (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _drum_pattern_sync(self, spec: dict) -> bytes:
         import mido
 
         if not isinstance(spec, dict):
+            self._log.warning(
+                "drum_pattern: spec is not a dict (got %s)", type(spec).__name__,
+            )
             raise MidiComposeError("spec must be a JSON object")
 
         tempo_bpm = _bounded_float("tempo_bpm", spec.get("tempo_bpm", 120), 1.0, 999.0)
@@ -628,9 +684,19 @@ class MidiComposeEngine(EngineBase):
         return buf.getvalue()
 
     async def humanize(self, midi_bytes: bytes, *, timing_ms: float = 10.0, velocity_pct: float = 10.0, seed: int | None = None) -> bytes:
-        return await asyncio.to_thread(
+        self._log.info(
+            "humanize start: input_bytes=%d timing_ms=%.2f velocity_pct=%.2f seed=%s",
+            len(midi_bytes), timing_ms, velocity_pct, seed,
+        )
+        t0 = time.perf_counter()
+        result = await asyncio.to_thread(
             self._humanize_sync, midi_bytes, timing_ms, velocity_pct, seed
         )
+        self._log.info(
+            "humanize done: duration_ms=%.1f output_bytes=%d",
+            (time.perf_counter() - t0) * 1000.0, len(result),
+        )
+        return result
 
     def _humanize_sync(
         self,
@@ -643,10 +709,12 @@ class MidiComposeEngine(EngineBase):
         import mido
 
         if timing_ms < 0 or timing_ms > 500:
+            self._log.warning("humanize: timing_ms out of range: %s", timing_ms)
             raise MidiComposeError(
                 f"timing_ms must be in [0, 500], got {timing_ms}"
             )
         if velocity_pct < 0 or velocity_pct > 50:
+            self._log.warning("humanize: velocity_pct out of range: %s", velocity_pct)
             raise MidiComposeError(
                 f"velocity_pct must be in [0, 50], got {velocity_pct}"
             )

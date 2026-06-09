@@ -17,10 +17,13 @@ After lexical sanitization the candidate is joined with ``FILES_DIR``,
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterator
+
+_log = logging.getLogger("audiolla.files")
 
 
 class FilePathError(ValueError):
@@ -72,6 +75,10 @@ def resolve_under(base: Path, rel: PurePosixPath) -> Path:
     base_real = base.resolve()
     candidate = (base_real / Path(*rel.parts)).resolve()
     if not candidate.is_relative_to(base_real):
+        _log.warning(
+            "path traversal rejected: rel=%s resolves outside base=%s",
+            rel, base_real,
+        )
         raise FilePathError("path escapes base directory")
     return candidate
 

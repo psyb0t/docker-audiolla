@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+_log = logging.getLogger("audiolla.auth")
 
 _EXEMPT_PATHS = frozenset({"/healthz"})
 _BEARER_PREFIX = "Bearer "
@@ -46,9 +48,17 @@ class BearerAuthMiddleware:
 
         token = _extract_bearer(scope)
         if token is None:
+            _log.warning(
+                "auth: missing bearer header on %s %s",
+                scope.get("method", "?"), path,
+            )
             await _send_401(send, "missing Authorization: Bearer header")
             return
         if not hmac.compare_digest(token, self.token):
+            _log.warning(
+                "auth: invalid bearer token on %s %s",
+                scope.get("method", "?"), path,
+            )
             await _send_401(send, "invalid bearer token")
             return
         await self.app(scope, receive, send)

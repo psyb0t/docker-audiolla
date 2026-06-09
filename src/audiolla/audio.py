@@ -22,6 +22,9 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import logging
+
+_log = logging.getLogger("audiolla.audio")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -27,6 +27,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
+import time
 
 from .. import config
 from .. import files as files_mod
@@ -55,12 +56,22 @@ class MidiRenderEngine(EngineBase):
         gain: float = 0.5,
         samplerate: int = 44100,
     ) -> bytes:
+        self._log.info(
+            "render start: filename=%s input_bytes=%d soundfont=%s "
+            "output_format=%s gain=%.2f samplerate=%d",
+            filename, len(raw), soundfont_path, output_format, gain, samplerate,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._render_sync,
                 raw, filename, soundfont_path, output_format, gain, samplerate,
             )
             self._touch()
+            self._log.info(
+                "render done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _resolve_soundfont(self, override: str | None) -> str:
@@ -74,20 +85,30 @@ class MidiRenderEngine(EngineBase):
                 rel = files_mod.sanitize_path(override)
                 src = files_mod.resolve_under(config.FILES_DIR, rel)
             except files_mod.FilePathError as exc:
+                self._log.warning(
+                    "render: bad soundfont_path %r: %s", override, exc,
+                )
                 raise MidiRenderError(
                     f"soundfont_path {override!r}: {exc}"
                 ) from exc
             if src.is_symlink() or not src.is_file():
+                self._log.warning(
+                    "render: soundfont not found in staging: %s", rel,
+                )
                 raise MidiRenderError(
                     f"soundfont_path not found in staging: {rel}"
                 )
             return str(src)
         if not config.SOUNDFONT_PATH:
+            self._log.warning("render: no default SoundFont configured")
             raise MidiRenderError(
                 "no default SoundFont configured — set AUDIOLLA_SOUNDFONT "
                 "or pass soundfont_path on the request"
             )
         if not os.path.isfile(config.SOUNDFONT_PATH):
+            self._log.warning(
+                "render: AUDIOLLA_SOUNDFONT=%r not a file", config.SOUNDFONT_PATH,
+            )
             raise MidiRenderError(
                 f"AUDIOLLA_SOUNDFONT={config.SOUNDFONT_PATH!r} is not a file"
             )
@@ -103,10 +124,12 @@ class MidiRenderEngine(EngineBase):
         samplerate: int,
     ) -> bytes:
         if not raw:
+            self._log.warning("render: MIDI input empty")
             raise MidiRenderError("MIDI input is empty")
         if not raw.startswith(b"MThd"):
             # Standard MIDI header — quick fail before invoking fluidsynth
             # so a misuploaded WAV doesn't produce a confusing error.
+            self._log.warning("render: input missing MThd header")
             raise MidiRenderError(
                 "input does not look like a Standard MIDI File (missing 'MThd')"
             )
@@ -114,8 +137,10 @@ class MidiRenderEngine(EngineBase):
         sf2 = self._resolve_soundfont(soundfont_override)
 
         if not (0.0 <= gain <= 5.0):
+            self._log.warning("render: gain out of range: %.2f", gain)
             raise MidiRenderError(f"gain must be in [0.0, 5.0], got {gain}")
         if samplerate not in (22050, 44100, 48000, 88200, 96000):
+            self._log.warning("render: samplerate %d unsupported", samplerate)
             raise MidiRenderError(
                 f"samplerate {samplerate} unsupported (use 22050/44100/48000/88200/96000)"
             )
@@ -151,20 +176,26 @@ class MidiRenderEngine(EngineBase):
                     timeout=300,  # 5 min hard cap per render
                 )
             except FileNotFoundError as exc:
+                self._log.exception("fluidsynth binary missing")
                 raise MidiRenderError(
                     "fluidsynth binary not found on PATH — is the prod "
                     "image being used? (Dev image doesn't ship it.)"
                 ) from exc
             except subprocess.TimeoutExpired as exc:
+                self._log.warning("fluidsynth render exceeded 300s timeout")
                 raise MidiRenderError(
                     "fluidsynth render exceeded 300s timeout"
                 ) from exc
             if proc.returncode != 0:
                 stderr = (proc.stderr or "").strip().splitlines()[-1:] or ["<no stderr>"]
+                self._log.warning(
+                    "fluidsynth exit=%d stderr=%s", proc.returncode, stderr[0],
+                )
                 raise MidiRenderError(
                     f"fluidsynth exit={proc.returncode}: {stderr[0]}"
                 )
             if not os.path.isfile(out_wav) or os.path.getsize(out_wav) == 0:
+                self._log.warning("fluidsynth produced no output WAV")
                 raise MidiRenderError(
                     "fluidsynth produced no output WAV (silent MIDI?)"
                 )

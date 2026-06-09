@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from typing import Any
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
@@ -72,22 +73,39 @@ class FxChainEngine(EngineBase):
         effects: list[dict[str, Any]],
         output_format: str = "wav",
     ) -> bytes:
+        self._log.info(
+            "fx start: filename=%s input_bytes=%d effects=%d output_format=%s",
+            filename, len(raw), len(effects) if isinstance(effects, list) else -1,
+            output_format,
+        )
+        t0 = time.perf_counter()
         if not isinstance(effects, list):
+            self._log.warning("fx: effects is not a list (got %s)", type(effects).__name__)
             raise FxChainError("effects must be a list of {type, params}")
         # Validate up-front so a malformed entry doesn't fire mid-render.
         for i, eff in enumerate(effects):
             if not isinstance(eff, dict):
+                self._log.warning(
+                    "fx: effects[%d] not an object (got %s)", i, type(eff).__name__,
+                )
                 raise FxChainError(
                     f"effects[{i}] must be an object, got {type(eff).__name__}"
                 )
             t = eff.get("type")
             if not isinstance(t, str) or t not in _ALLOWED_EFFECTS:
+                self._log.warning(
+                    "fx: effects[%d].type %r not in allowlist", i, t,
+                )
                 raise FxChainError(
                     f"effects[{i}].type {t!r} is not allowed; "
                     f"valid: {sorted(_ALLOWED_EFFECTS)}"
                 )
             params = eff.get("params", {})
             if not isinstance(params, dict):
+                self._log.warning(
+                    "fx: effects[%d].params not an object (got %s)",
+                    i, type(params).__name__,
+                )
                 raise FxChainError(
                     f"effects[{i}].params must be an object, got "
                     f"{type(params).__name__}"
@@ -97,6 +115,10 @@ class FxChainEngine(EngineBase):
                 self._fx_sync, raw, filename, effects, output_format,
             )
             self._touch()
+            self._log.info(
+                "fx done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _fx_sync(
@@ -139,6 +161,9 @@ class FxChainEngine(EngineBase):
             cls_name = eff["type"]
             cls = getattr(pedalboard, cls_name, None)
             if cls is None:
+                self._log.warning(
+                    "fx: effects[%d].type %r missing from pedalboard", i, cls_name,
+                )
                 raise FxChainError(
                     f"effects[{i}].type {cls_name!r} is not present in this "
                     "version of pedalboard"
@@ -149,11 +174,17 @@ class FxChainEngine(EngineBase):
             except TypeError as exc:
                 # Wrong/extra kwargs — surface the pedalboard error verbatim
                 # so the caller can see which param was bad.
+                self._log.warning(
+                    "fx: effects[%d] (%s) bad kwargs: %s", i, cls_name, exc,
+                )
                 raise FxChainError(
                     f"effects[{i}] ({cls_name}): {exc}"
                 ) from exc
             except Exception as exc:  # noqa: BLE001
                 # ValueError for bad ranges, etc.
+                self._log.warning(
+                    "fx: effects[%d] (%s) construction failed: %s", i, cls_name, exc,
+                )
                 raise FxChainError(
                     f"effects[{i}] ({cls_name}): {exc}"
                 ) from exc

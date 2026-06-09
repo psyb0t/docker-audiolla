@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from typing import Any
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
@@ -44,14 +45,25 @@ class PedalboardChainEngine(EngineBase):
         output_format: str = "wav",
     ) -> bytes:
         if preset not in _PRESET_TARGET_LUFS:
+            self._log.warning("master_chain: unknown preset %r", preset)
             raise AudioConversionError(
                 f"unknown preset {preset!r}; available: {list(_PRESET_TARGET_LUFS)}"
             )
+        self._log.info(
+            "master_chain start: filename=%s input_bytes=%d preset=%s "
+            "target_lufs=%s output_format=%s",
+            filename, len(raw), preset, target_lufs, output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._master_sync, raw, filename, preset, target_lufs, output_format,
             )
             self._touch()
+            self._log.info(
+                "master_chain done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _master_sync(

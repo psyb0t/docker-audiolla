@@ -6,6 +6,11 @@ import json
 import os
 import re
 from pathlib import Path
+import logging
+
+_log = logging.getLogger("audiolla.config")
+
+_log = logging.getLogger("audiolla.config")
 
 
 def _int_env(name: str, default: int) -> int:

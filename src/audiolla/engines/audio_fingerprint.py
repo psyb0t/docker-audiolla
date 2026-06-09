@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 
 from ..audio import AudioConversionError, to_wav_float32
 from .base import EngineBase
@@ -53,14 +54,31 @@ class AudioFingerprintEngine(EngineBase):
         to the response (much larger than the base64 string).
         """
         if analyze_seconds < 0:
+            self._log.warning(
+                "rejecting fingerprint request: analyze_seconds=%s must be >= 0",
+                analyze_seconds,
+            )
             raise FingerprintError(
                 f"analyze_seconds must be >= 0, got {analyze_seconds}"
             )
+        self._log.info(
+            "fingerprint start: filename=%s input_bytes=%d analyze_seconds=%s return_raw=%s",
+            filename, len(raw), analyze_seconds, return_raw,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._compute_sync, raw, filename, analyze_seconds, return_raw,
             )
             self._touch()
+            dt = time.perf_counter() - t0
+            self._log.info(
+                "fingerprint done: filename=%s duration_ms=%.1f fp_len=%d raw_len=%d audio_duration=%.2f",
+                filename, dt * 1000.0,
+                len(result.get("fingerprint", "")),
+                len(result.get("fingerprint_raw", []) or []),
+                float(result.get("duration", 0.0)),
+            )
             return result
 
     def _compute_sync(
@@ -82,6 +100,7 @@ class AudioFingerprintEngine(EngineBase):
                     timeout=300,
                 )
             except FileNotFoundError as exc:
+                self._log.exception("fpcalc binary not found on PATH")
                 raise FingerprintError(
                     "fpcalc binary not found on PATH — is this the prod "
                     "image? (libchromaprint-tools provides it.)"
@@ -94,9 +113,17 @@ class AudioFingerprintEngine(EngineBase):
             except json.JSONDecodeError:
                 if proc.returncode != 0:
                     tail = (proc.stderr or "").strip().splitlines()[-1:] or ["<no stderr>"]
+                    self._log.warning(
+                        "fpcalc exit=%d filename=%s stderr_tail=%s",
+                        proc.returncode, filename, tail[0],
+                    )
                     raise FingerprintError(
                         f"fpcalc exit={proc.returncode}: {tail[0]}"
                     )
+                self._log.warning(
+                    "fpcalc stdout not JSON; filename=%s stdout_head=%r",
+                    filename, proc.stdout[:200],
+                )
                 raise FingerprintError(
                     f"fpcalc stdout was not JSON; output: {proc.stdout[:200]!r}"
                 )

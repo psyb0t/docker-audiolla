@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -78,12 +79,24 @@ class DemucsEngine(EngineBase):
         stems: list[str],
         output_format: str = "wav",
     ) -> dict[str, bytes]:
+        self._log.info(
+            "demucs separate start: variant=%s filename=%s input_bytes=%d "
+            "stems=%s output_format=%s",
+            self._variant, filename, len(raw), stems, output_format,
+        )
+        t0 = time.perf_counter()
         model = await self.get_model()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._separate_sync, model, raw, filename, stems, output_format,
             )
             self._touch()
+            self._log.info(
+                "demucs separate done: variant=%s filename=%s duration_ms=%.1f "
+                "stems=%s total_bytes=%d",
+                self._variant, filename, (time.perf_counter() - t0) * 1000.0,
+                sorted(result.keys()), sum(len(v) for v in result.values()),
+            )
             return result
 
     def _separate_sync(
@@ -113,6 +126,10 @@ class DemucsEngine(EngineBase):
             except Exception as exc:  # noqa: BLE001
                 # AudioFile can fall back to torchaudio if ffmpeg fails — but
                 # we already normalised, so this path is a hard fail.
+                self._log.exception(
+                    "demucs failed to read audio: variant=%s filename=%s",
+                    self._variant, filename,
+                )
                 raise AudioConversionError(f"demucs failed to read audio: {exc}") from exc
 
             # Reference normalisation — matches demucs' separate.py CLI.
@@ -128,6 +145,10 @@ class DemucsEngine(EngineBase):
             available_sources = list(model.sources)
             invalid = [s for s in stems if s not in available_sources]
             if invalid:
+                self._log.warning(
+                    "demucs unknown stems requested: variant=%s requested=%s available=%s invalid=%s",
+                    self._variant, stems, available_sources, invalid,
+                )
                 raise AudioConversionError(
                     f"engine {self.slug!r} model.sources={available_sources}; "
                     f"requested {invalid} are not available"

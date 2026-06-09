@@ -58,12 +58,16 @@ re-encodes to the caller's ``output_format`` via the existing
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
+import time
 from typing import Any
 
 from ..audio import AudioConversionError, encode_audio
 from .base import EngineBase
+
+_log = logging.getLogger("audiolla.engine.music_gen")
 
 
 class MusicGenError(AudioConversionError):
@@ -75,8 +79,12 @@ class MusicGenError(AudioConversionError):
 
 def _validate_duration(duration_sec: float, *, max_sec: float, engine: str) -> None:
     if duration_sec <= 0:
+        _log.warning("%s: duration_sec must be > 0, got %s", engine, duration_sec)
         raise MusicGenError(f"{engine}: duration_sec must be > 0, got {duration_sec}")
     if duration_sec > max_sec:
+        _log.warning(
+            "%s: duration_sec %s exceeds cap %s", engine, duration_sec, max_sec,
+        )
         raise MusicGenError(
             f"{engine}: duration_sec {duration_sec} exceeds engine cap {max_sec}"
         )
@@ -155,8 +163,16 @@ class StableAudioOpenEngine(EngineBase):
     ) -> bytes:
         _validate_duration(duration_sec, max_sec=self.MAX_DURATION_SEC, engine="stable-audio-open")
         if not prompt or not isinstance(prompt, str):
+            self._log.warning("%s: empty/non-string prompt", self.slug)
             raise MusicGenError("stable-audio-open: prompt must be a non-empty string")
         del lyrics  # this engine doesn't support vocals
+        self._log.info(
+            "%s generate start: prompt=%r duration_sec=%.2f seed=%s steps=%d "
+            "output_format=%s",
+            self.slug, prompt[:80], duration_sec, seed, num_inference_steps,
+            output_format,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         async with self._lock:
             audio_bytes = await asyncio.to_thread(
@@ -164,6 +180,10 @@ class StableAudioOpenEngine(EngineBase):
                 num_inference_steps, output_format,
             )
             self._touch()
+            self._log.info(
+                "%s generate done: duration_ms=%.1f output_bytes=%d",
+                self.slug, (time.perf_counter() - t0) * 1000.0, len(audio_bytes),
+            )
             return audio_bytes
 
     def _generate_sync(
@@ -190,6 +210,7 @@ class StableAudioOpenEngine(EngineBase):
                 generator=gen,
             )
         except Exception as exc:  # noqa: BLE001
+            self._log.exception("stable-audio-open inference failed")
             raise MusicGenError(f"stable-audio-open inference failed: {exc}") from exc
         audio = result.audios[0] if hasattr(result, "audios") else result["audios"][0]
         if hasattr(audio, "cpu"):
@@ -221,6 +242,10 @@ def _require_noncommercial_optin(engine_slug: str) -> None:
     image, conscious opt-in to actually use it."""
     raw = os.environ.get("AUDIOLLA_ENABLE_NONCOMMERCIAL", "").strip().lower()
     if raw not in ("1", "true", "yes", "on"):
+        _log.warning(
+            "%s: noncommercial opt-in missing (AUDIOLLA_ENABLE_NONCOMMERCIAL)",
+            engine_slug,
+        )
         raise MusicGenError(
             f"{engine_slug}: weights are CC-BY-NC-licensed. Set "
             "AUDIOLLA_ENABLE_NONCOMMERCIAL=1 in the server's environment "
@@ -277,14 +302,24 @@ class _MusicGenBase(EngineBase):
     ) -> bytes:
         _validate_duration(duration_sec, max_sec=self.MAX_DURATION_SEC, engine=self.slug)
         if not prompt or not isinstance(prompt, str):
+            self._log.warning("%s: empty/non-string prompt", self.slug)
             raise MusicGenError(f"{self.slug}: prompt must be a non-empty string")
         del lyrics  # MusicGen is instrumental-only, no vocal stack
+        self._log.info(
+            "%s generate start: prompt=%r duration_sec=%.2f seed=%s output_format=%s",
+            self.slug, prompt[:80], duration_sec, seed, output_format,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         async with self._lock:
             audio_bytes = await asyncio.to_thread(
                 self._generate_sync, prompt, duration_sec, seed, output_format,
             )
             self._touch()
+            self._log.info(
+                "%s generate done: duration_ms=%.1f output_bytes=%d",
+                self.slug, (time.perf_counter() - t0) * 1000.0, len(audio_bytes),
+            )
             return audio_bytes
 
     def _generate_sync(
@@ -320,6 +355,7 @@ class _MusicGenBase(EngineBase):
                     guidance_scale=3.0,
                 )
         except Exception as exc:  # noqa: BLE001
+            self._log.exception("%s inference failed", self.slug)
             raise MusicGenError(f"{self.slug} inference failed: {exc}") from exc
 
         audio = tokens[0, 0].float().cpu().numpy()
@@ -403,14 +439,24 @@ class RiffusionEngine(EngineBase):
     ) -> bytes:
         _validate_duration(duration_sec, max_sec=self.MAX_DURATION_SEC, engine="riffusion")
         if not prompt or not isinstance(prompt, str):
+            self._log.warning("%s: empty/non-string prompt", self.slug)
             raise MusicGenError("riffusion: prompt must be a non-empty string")
         del lyrics  # no vocals
+        self._log.info(
+            "%s generate start: prompt=%r duration_sec=%.2f seed=%s output_format=%s",
+            self.slug, prompt[:80], duration_sec, seed, output_format,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         async with self._lock:
             audio_bytes = await asyncio.to_thread(
                 self._generate_sync, prompt, duration_sec, seed, output_format,
             )
             self._touch()
+            self._log.info(
+                "%s generate done: duration_ms=%.1f output_bytes=%d",
+                self.slug, (time.perf_counter() - t0) * 1000.0, len(audio_bytes),
+            )
             return audio_bytes
 
     def _generate_sync(
@@ -437,6 +483,7 @@ class RiffusionEngine(EngineBase):
                 generator=gen,
             )
         except Exception as exc:  # noqa: BLE001
+            self._log.exception("riffusion inference failed")
             raise MusicGenError(f"riffusion inference failed: {exc}") from exc
 
         # result.images[0] is a PIL.Image (RGB spectrogram). Convert to mono
@@ -546,8 +593,16 @@ class AudioLDM2Engine(EngineBase):
     ) -> bytes:
         _validate_duration(duration_sec, max_sec=self.MAX_DURATION_SEC, engine="audioldm2")
         if not prompt or not isinstance(prompt, str):
+            self._log.warning("%s: empty/non-string prompt", self.slug)
             raise MusicGenError("audioldm2: prompt must be a non-empty string")
         del lyrics  # AudioLDM2 has no vocal stack
+        self._log.info(
+            "%s generate start: prompt=%r duration_sec=%.2f seed=%s steps=%d "
+            "output_format=%s",
+            self.slug, prompt[:80], duration_sec, seed, num_inference_steps,
+            output_format,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         async with self._lock:
             audio_bytes = await asyncio.to_thread(
@@ -555,6 +610,10 @@ class AudioLDM2Engine(EngineBase):
                 num_inference_steps, output_format,
             )
             self._touch()
+            self._log.info(
+                "%s generate done: duration_ms=%.1f output_bytes=%d",
+                self.slug, (time.perf_counter() - t0) * 1000.0, len(audio_bytes),
+            )
             return audio_bytes
 
     def _generate_sync(
@@ -584,6 +643,7 @@ class AudioLDM2Engine(EngineBase):
                 generator=gen,
             )
         except Exception as exc:  # noqa: BLE001
+            self._log.exception("audioldm2 inference failed")
             raise MusicGenError(f"audioldm2 inference failed: {exc}") from exc
         audio = result.audios[0] if hasattr(result, "audios") else result["audios"][0]
         if hasattr(audio, "cpu"):

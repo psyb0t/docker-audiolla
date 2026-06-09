@@ -11,11 +11,15 @@ Distribution of the image as a product requires GPL compliance review.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
+import time
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
 from .base import EngineBase
+
+_log = logging.getLogger("audiolla.engine.matchering")
 
 
 class MatcheringEngine(EngineBase):
@@ -32,6 +36,13 @@ class MatcheringEngine(EngineBase):
         target_lufs: float | None = None,
         output_format: str = "wav",
     ) -> bytes:
+        self._log.info(
+            "master_reference start: filename=%s input_bytes=%d "
+            "ref_filename=%s ref_bytes=%d target_lufs=%s output_format=%s",
+            filename, len(raw), ref_filename, len(ref_raw),
+            target_lufs, output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._master_sync,
@@ -39,6 +50,10 @@ class MatcheringEngine(EngineBase):
                 target_lufs, output_format,
             )
             self._touch()
+            self._log.info(
+                "master_reference done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _master_sync(
@@ -67,11 +82,18 @@ class MatcheringEngine(EngineBase):
             except Exception as exc:  # noqa: BLE001
                 msg = str(exc).lower()
                 if "validation" in msg or "fft_size" in msg or "short" in msg:
+                    self._log.warning(
+                        "matchering validation failed for %s/%s: %s",
+                        filename, ref_filename, exc,
+                    )
                     raise AudioConversionError(
                         f"matchering validation failed: {exc}. "
                         "Both target and reference must be stereo, ≥ ~5 seconds, "
                         "and a supported audio format."
                     ) from exc
+                self._log.exception(
+                    "matchering process failed for %s/%s", filename, ref_filename,
+                )
                 raise AudioConversionError(f"matchering failed: {exc}") from exc
 
             if target_lufs is not None:

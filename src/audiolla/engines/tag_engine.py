@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 from ..audio import AudioConversionError, write_temp_input
 from .base import EngineBase
@@ -24,6 +25,7 @@ class TagEngine(EngineBase):
         )
         import torch  # noqa: PLC0415
 
+        self._log.info("loading %s ...", _MODEL_ID)
         self._extractor = AutoFeatureExtractor.from_pretrained(_MODEL_ID)
         model = AutoModelForAudioClassification.from_pretrained(_MODEL_ID)
         model.eval()
@@ -44,9 +46,19 @@ class TagEngine(EngineBase):
         *,
         top_k: int = 10,
     ) -> dict:
+        self._log.info(
+            "tag start: filename=%s input_bytes=%d top_k=%d",
+            filename, len(raw), top_k,
+        )
+        t0 = time.perf_counter()
         model = await self.get_model()
         result = await asyncio.to_thread(self._tag_sync, raw, filename, top_k, model)
         self._touch()
+        self._log.info(
+            "tag done: filename=%s duration_ms=%.1f tags=%d",
+            filename, (time.perf_counter() - t0) * 1000.0,
+            len(result.get("tags", [])),
+        )
         return result
 
     def _tag_sync(self, raw: bytes, filename: str, top_k: int, model: object) -> dict:
@@ -77,6 +89,7 @@ class TagEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("audio tagging failed for %s", filename)
             raise AudioConversionError(f"audio tagging failed: {exc}") from exc
         finally:
             if in_path and os.path.exists(in_path):

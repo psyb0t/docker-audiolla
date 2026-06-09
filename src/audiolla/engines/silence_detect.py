@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 
 from ..audio import AudioConversionError, encode_audio, write_temp_input
 from .base import EngineBase
@@ -54,17 +55,27 @@ class SilenceDetectEngine(EngineBase):
         output_format: str = "wav",
     ) -> dict:
         if threshold_db > 0:
+            self._log.warning("detect: threshold_db > 0: %s", threshold_db)
             raise SilenceDetectError(
                 f"threshold_db must be <= 0 dBFS, got {threshold_db}"
             )
         if min_duration_sec <= 0:
+            self._log.warning("detect: min_duration_sec <= 0: %s", min_duration_sec)
             raise SilenceDetectError(
                 f"min_duration_sec must be > 0, got {min_duration_sec}"
             )
         if trim_mode is not None and trim_mode not in ("edges", "all"):
+            self._log.warning("detect: bad trim_mode %r", trim_mode)
             raise SilenceDetectError(
                 f"trim_mode must be 'edges' or 'all' (or omit), got {trim_mode!r}"
             )
+        self._log.info(
+            "detect start: filename=%s input_bytes=%d threshold_db=%.2f "
+            "min_duration_sec=%.3f trim_mode=%s output_format=%s",
+            filename, len(raw), threshold_db, min_duration_sec, trim_mode,
+            output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._detect_sync,
@@ -72,6 +83,11 @@ class SilenceDetectEngine(EngineBase):
                 trim_mode, output_format,
             )
             self._touch()
+            self._log.info(
+                "detect done: filename=%s duration_ms=%.1f silent_ranges=%d",
+                filename, (time.perf_counter() - t0) * 1000.0,
+                len(result.get("silent_ranges", [])),
+            )
             return result
 
     def _detect_sync(
@@ -101,10 +117,12 @@ class SilenceDetectEngine(EngineBase):
                     timeout=300,
                 )
             except FileNotFoundError as exc:
+                self._log.exception("ffmpeg binary missing")
                 raise SilenceDetectError(
                     "ffmpeg binary not found on PATH"
                 ) from exc
             if proc.returncode != 0:
+                self._log.warning("ffmpeg detect exit=%d", proc.returncode)
                 raise SilenceDetectError(
                     f"ffmpeg exit={proc.returncode}: "
                     f"{(proc.stderr or '').splitlines()[-1:]}"
@@ -130,11 +148,13 @@ class SilenceDetectEngine(EngineBase):
             spans: list[tuple[float, float]]
             if trim_mode == "edges":
                 if not non_silent:
+                    self._log.warning("detect/edges: entire file silent")
                     raise SilenceDetectError("entire file is silent — nothing to keep")
                 spans = [(non_silent[0]["start_sec"], non_silent[-1]["end_sec"])]
             else:  # "all"
                 spans = [(s["start_sec"], s["end_sec"]) for s in non_silent]
                 if not spans:
+                    self._log.warning("detect/all: entire file silent")
                     raise SilenceDetectError("entire file is silent — nothing to keep")
 
             trimmed = _ffmpeg_concat_spans(wav_path, spans)

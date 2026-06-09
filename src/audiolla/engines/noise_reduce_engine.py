@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 
 from ..audio import AudioConversionError, encode_audio, to_wav_float32
 from .base import EngineBase
@@ -25,11 +26,21 @@ class NoiseReduceEngine(EngineBase):
         prop_decrease: float = 1.0,
         output_format: str = "wav",
     ) -> bytes:
+        self._log.info(
+            "reduce start: filename=%s input_bytes=%d stationary=%s "
+            "prop_decrease=%.3f output_format=%s",
+            filename, len(raw), stationary, prop_decrease, output_format,
+        )
+        t0 = time.perf_counter()
         async with self._lock:
             result = await asyncio.to_thread(
                 self._reduce_sync, raw, filename, stationary, prop_decrease, output_format
             )
             self._touch()
+            self._log.info(
+                "reduce done: filename=%s duration_ms=%.1f output_bytes=%d",
+                filename, (time.perf_counter() - t0) * 1000.0, len(result),
+            )
             return result
 
     def _reduce_sync(
@@ -72,6 +83,7 @@ class NoiseReduceEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("noise reduction failed for %s", filename)
             raise AudioConversionError(f"noise reduction failed: {exc}") from exc
         finally:
             try:

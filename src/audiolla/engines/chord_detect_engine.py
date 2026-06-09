@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Any
 
 from ..audio import AudioConversionError, to_wav_float32
@@ -30,6 +31,7 @@ class ChordDetectEngine(EngineBase):
         import librosa  # noqa: PLC0415
         import numpy as np  # noqa: PLC0415
 
+        self._log.info("loading ChordDetectEngine (librosa-backed)")
         self._librosa = librosa
         self._np = np
         self._log.info("ChordDetectEngine ready (librosa %s)", librosa.__version__)
@@ -43,6 +45,12 @@ class ChordDetectEngine(EngineBase):
         hop_length: int = 512,
         segment_min_duration_sec: float = 0.5,
     ) -> dict:
+        self._log.info(
+            "chord detect start: filename=%s input_bytes=%d hop_length=%d "
+            "segment_min_duration_sec=%.3f",
+            filename, len(raw), hop_length, segment_min_duration_sec,
+        )
+        t0 = time.perf_counter()
         await self.get_model()
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -54,6 +62,14 @@ class ChordDetectEngine(EngineBase):
             segment_min_duration_sec,
         )
         self._touch()
+        self._log.info(
+            "chord detect done: filename=%s duration_ms=%.1f key=%s "
+            "key_confidence=%.3f n_chords=%d audio_duration=%.2f",
+            filename, (time.perf_counter() - t0) * 1000.0,
+            result.get("key"), float(result.get("key_confidence", 0.0)),
+            len(result.get("chords", [])),
+            float(result.get("duration", 0.0)),
+        )
         return result
 
     def _detect_chords_sync(
@@ -168,6 +184,7 @@ class ChordDetectEngine(EngineBase):
         except AudioConversionError:
             raise
         except Exception as exc:
+            self._log.exception("chord detection failed for %s", filename)
             raise ChordDetectError(f"chord detection failed: {exc}") from exc
         finally:
             if wav_path and os.path.exists(wav_path):

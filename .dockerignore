@@ -4,6 +4,7 @@
 .github/
 .vscode/
 .idea/
+.claude/
 
 # Secrets
 .env
@@ -11,6 +12,7 @@
 *.env
 .envrc
 .direnv/
+.git-credentials
 secrets/
 credentials.json
 *.pem
@@ -44,8 +46,11 @@ htmlcov/
 *.log
 *.swp
 *.swo
+*~
 .DS_Store
 Thumbs.db
+.tool-versions
+.python-version
 
 # Dev-level markdown — never enters image
 CLAUDE.md
@@ -95,7 +100,46 @@ docker-compose.override.yml
 docker-compose.dev.yaml
 docker-compose.dev.yml
 
-# Local model snapshots
+# Local model snapshots & ML weights — under no circumstances should
+# weights enter the build context. The e2e cache (.e2e-cache/, 29 GB on
+# disk after a CUDA UVR run) holds the on-disk HF/torch model store; if
+# this glob ever failed open, every build would balloon to GB context
+# transfer + bake weights into the layer cache.
 /models/
+/data/
 *.safetensors
 *.bin
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.h5
+*.tflite
+*.pb
+*.mlmodel
+*.gguf
+*.npz
+
+# Archives — never enter the image; if you need a file, COPY it
+# explicitly.
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.zip
+*.7z
+*.rar
+
+# Node / JS — should never appear in this repo, but cheap insurance
+# against an accidental tooling install.
+node_modules/
+
+# HF / torch caches that might appear at top level if someone runs the
+# server without the container's HF_HOME bind-mount. Belt + braces over
+# the .e2e-cache/ + /data/ excludes above.
+.hf_cache/
+hf_cache/
+huggingface/
+.torch/
+torch_cache/

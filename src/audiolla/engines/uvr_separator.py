@@ -126,18 +126,35 @@ class UVRSeparatorEngine(EngineBase):
 
             sep.output_dir = tmpdir
             output_files: list[str] = sep.separate(in_path)
+            self._log.info(
+                "restore separate done: output_files=%s tmpdir=%s",
+                output_files, sorted(os.listdir(tmpdir)),
+            )
 
-            if not output_files:
+            # audio-separator claims success and returns a filename even
+            # when the model produced silence (nothing to extract from a
+            # synthetic sine, e.g.). Filter to files that actually exist
+            # on disk under tmpdir.
+            existing = [
+                fn for fn in output_files
+                if os.path.exists(
+                    fn if os.path.isabs(fn)
+                    else os.path.join(tmpdir, os.path.basename(fn))
+                )
+            ]
+            if not existing:
                 raise UVRSeparatorError(
-                    f"model produced no output files"
+                    "model produced no output files"
                 )
 
-            target = output_files[0]
-            if self._primary_stem and len(output_files) > 1:
-                match = _find_stem_file(output_files, self._primary_stem)
+            target = existing[0]
+            if self._primary_stem and len(existing) > 1:
+                match = _find_stem_file(existing, self._primary_stem)
                 if match:
                     target = match
-
+            base = os.path.basename(target)
+            candidate = os.path.join(tmpdir, base)
+            target = candidate if os.path.exists(candidate) else target
             audio_bytes, _ = encode_audio(target, output_format)
             return audio_bytes
 
@@ -176,6 +193,10 @@ class UVRSeparatorEngine(EngineBase):
 
             self._model.output_dir = tmpdir
             output_files: list[str] = self._model.separate(in_path)
+            self._log.info(
+                "separate done: output_files=%s tmpdir=%s",
+                output_files, sorted(os.listdir(tmpdir)),
+            )
 
             if not output_files:
                 raise UVRSeparatorError(
@@ -184,12 +205,25 @@ class UVRSeparatorEngine(EngineBase):
 
             result: dict[str, bytes] = {}
             for f in output_files:
-                stem_name = _extract_stem_name(f)
+                # Same dance as _restore_sync_with_sep — audio-separator
+                # claims successful output for files it never actually
+                # wrote (silence / no-content cases on synthetic input),
+                # so re-resolve against tmpdir and skip if the file
+                # doesn't actually exist there.
+                base = os.path.basename(f)
+                candidate = os.path.join(tmpdir, base)
+                if os.path.exists(candidate):
+                    abs_path = candidate
+                elif os.path.isabs(f) and os.path.exists(f):
+                    abs_path = f
+                else:
+                    continue  # phantom output — model claimed it but didn't write
+                stem_name = _extract_stem_name(abs_path)
                 if stem_name is None:
                     continue
                 if stems and stem_name not in stems:
                     continue
-                audio_bytes, _ = encode_audio(f, output_format)
+                audio_bytes, _ = encode_audio(abs_path, output_format)
                 result[stem_name] = audio_bytes
 
             if not result:
@@ -200,12 +234,17 @@ class UVRSeparatorEngine(EngineBase):
             return result
 
 
-_STEM_RE = re.compile(r"\(([^)]+)\)\.\w+$")
+# Newer audio-separator releases append the model filename after the
+# stem tag: ``name_(Vocals)_model_bs_roformer_ep_317_sdr_12.wav`` instead
+# of the older ``name_(Vocals).wav``. Match any parenthesised tag in the
+# basename and take the LAST one — the stem name is always the trailing
+# parenthesised group before any suffix.
+_STEM_RE = re.compile(r"\(([^()]+)\)")
 
 
 def _extract_stem_name(filepath: str) -> str | None:
-    m = _STEM_RE.search(os.path.basename(filepath))
-    return m.group(1) if m else None
+    matches = _STEM_RE.findall(os.path.basename(filepath))
+    return matches[-1] if matches else None
 
 
 def _find_stem_file(files: list[str], stem_name: str) -> str | None:

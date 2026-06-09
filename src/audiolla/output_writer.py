@@ -24,6 +24,11 @@ from fastapi.responses import JSONResponse, Response
 
 from . import config, fetch
 from . import files as files_mod
+import logging
+
+_log = logging.getLogger("audiolla.output_writer")
+
+_log = logging.getLogger("audiolla.output_writer")
 
 
 async def write_output(
@@ -81,8 +86,13 @@ def _write_staged(
         rel = files_mod.sanitize_path(output_path)
         dest = files_mod.resolve_under(config.FILES_DIR, rel)
     except files_mod.FilePathError as exc:
+        _log.warning("output_path rejected: %r → %s", output_path, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if len(payload) > config.MAX_UPLOAD_BYTES:
+        _log.warning(
+            "output too large to stage: %d bytes > %d cap",
+            len(payload), config.MAX_UPLOAD_BYTES,
+        )
         raise HTTPException(
             status_code=413,
             detail=(
@@ -91,6 +101,7 @@ def _write_staged(
             ),
         )
     files_mod.write_atomic(dest, payload)
+    _log.info("staged output: path=%s size=%d", rel, len(payload))
     body: dict = {"path": str(rel), "size": len(payload)}
     if extra_json:
         body.update(extra_json)
@@ -107,7 +118,15 @@ async def _write_url(
     try:
         await fetch.upload_bytes(output_url, payload, media_type)
     except fetch.FetchError as exc:
+        _log.warning(
+            "output_url upload failed: url=%s size=%d err=%s",
+            output_url, len(payload), exc,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log.info(
+        "uploaded output to url: size=%d media_type=%s",
+        len(payload), media_type,
+    )
     body: dict = {"url": output_url, "size": len(payload)}
     if extra_json:
         body.update(extra_json)
