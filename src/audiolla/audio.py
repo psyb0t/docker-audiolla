@@ -707,11 +707,19 @@ def eq_audio(
     codec_args = _FORMAT_FFMPEG_CODEC[output_format]
     filter_parts: list[str] = []
     for i, band in enumerate(bands):
+        # Accept "freq" (canonical) or "frequency" (common client typo).
         freq = band.get("freq")
+        if freq is None:
+            freq = band.get("frequency")
         gain_db = band.get("gain_db")
-        width_hz = band.get("width_hz", 100)
+        # Accept "width_hz" (canonical) or "q" (common client typo —
+        # really Q-factor != bandwidth, but ffmpeg's `equalizer` filter
+        # accepts width in Hz and that's what we pass through).
+        width_hz = band.get("width_hz", band.get("q", 100))
         if freq is None or not (float(freq) > 0):
-            raise AudioConversionError(f"band {i}: freq must be > 0")
+            raise AudioConversionError(
+                f"band {i}: freq (or frequency) must be > 0"
+            )
         if gain_db is None or not (-30 <= float(gain_db) <= 30):
             raise AudioConversionError(
                 f"band {i}: gain_db must be in [-30, 30]"

@@ -143,6 +143,22 @@ class UVRSeparatorEngine(EngineBase):
                 )
             ]
             if not existing:
+                # Recursive tmpdir listing so operators can diagnose
+                # "audio-separator claimed an output file but didn't
+                # write it" — usually means the model output was
+                # silent / all zeros and the library dropped it. The
+                # log line carries both what the library SAID it wrote
+                # and what's actually on disk.
+                _on_disk: list[str] = []
+                for root, _, files in os.walk(tmpdir):
+                    for f in files:
+                        _on_disk.append(os.path.relpath(
+                            os.path.join(root, f), tmpdir,
+                        ))
+                self._log.warning(
+                    "phantom output: library reported %s; tmpdir tree=%s",
+                    output_files, _on_disk,
+                )
                 raise UVRSeparatorError(
                     "model produced no output files"
                 )

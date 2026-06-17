@@ -325,16 +325,69 @@ components:
               default: []
               description: Subset of stems to return. Empty = all available stems.
 
+    PresetRunRequest:
+      type: object
+      description: |
+        Body for ``POST /v1/presets/{name}``. The preset's steps are
+        baked into the server-side preset definition; the request only
+        specifies the input + output destination and optional per-step
+        param overrides.
+      properties:
+        file_path: { type: string, nullable: true }
+        file_url: { type: string, format: uri, nullable: true }
+        output_path: { type: string, nullable: true }
+        output_url: { type: string, format: uri, nullable: true }
+        output_format: { $ref: "#/components/schemas/OutputFormat" }
+        async_job: { type: boolean, default: false }
+        webhook_url: { type: string, format: uri, nullable: true }
+        params:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Override values for parameters the preset declares.
+
+    PipelineRunRequest:
+      type: object
+      required: [steps]
+      description: |
+        Body for ``POST /v1/pipeline``. Apply N transforms in order to
+        one input. Intermediates stay in memory between steps — no
+        re-upload required.
+      properties:
+        file_path: { type: string, nullable: true }
+        file_url: { type: string, format: uri, nullable: true }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [op]
+            properties:
+              op: { type: string }
+              params:
+                type: object
+                additionalProperties: true
+        output_path: { type: string, nullable: true }
+        output_url: { type: string, format: uri, nullable: true }
+        output_format: { $ref: "#/components/schemas/OutputFormat" }
+        async_job: { type: boolean, default: false }
+        webhook_url: { type: string, format: uri, nullable: true }
+
     AudioMasterRequest:
       allOf:
         - $ref: "#/components/schemas/BaseAudioInputRequest"
         - $ref: "#/components/schemas/BaseAudioOutputRequest"
         - type: object
-          required: [mode]
           properties:
             mode:
               type: string
               enum: [reference, chain]
+              nullable: true
+              description: |
+                Either `reference` (match against a reference track via
+                matchering) or `chain` (run a pedalboard preset chain).
+                Optional — auto-detected from the request: if
+                reference_path or reference_url is set, mode=reference;
+                else if preset is set, mode=chain; else 400.
             reference_path:
               type: string
               nullable: true
@@ -345,6 +398,11 @@ components:
             preset:
               type: string
               nullable: true
+              description: |
+                For mode=chain, the pedalboard preset to run. Currently
+                'transparent' or 'loud'. (Note: this is distinct from the
+                workflow presets listed at GET /v1/presets — those are
+                multi-step pipelines invoked via POST /v1/presets/{name}.)
             target_lufs:
               type: number
               nullable: true
@@ -774,9 +832,26 @@ components:
             reference_file_path:
               type: string
               nullable: true
+              description: |
+                Reference (second) file to compare against. Also
+                accepted as `file_path_b` for the "compare two files"
+                shape that's intuitive when the API is read out of
+                context.
             reference_file_url:
               type: string
               nullable: true
+              description: |
+                Same as reference_file_path but for an HTTP URL the
+                server fetches (subject to AUDIOLLA_FETCH_MODE policy).
+                Also accepted as `file_url_b`.
+            file_path_b:
+              type: string
+              nullable: true
+              description: Alias for reference_file_path.
+            file_url_b:
+              type: string
+              nullable: true
+              description: Alias for reference_file_url.
 
     MidiQuantizeRequest:
       allOf:
@@ -808,9 +883,24 @@ components:
             fade_in:
               type: number
               default: 0.0
+              description: |
+                Fade-in length in seconds (0 disables). Also accepted as
+                `fade_in_sec` — the `_sec` suffix matches the rest of
+                the API (`start_sec`, `end_sec`, etc.).
+            fade_in_sec:
+              type: number
+              nullable: true
+              description: Alias for fade_in. Wins if both are set.
             fade_out:
               type: number
               default: 0.0
+              description: |
+                Fade-out length in seconds (0 disables). Also accepted
+                as `fade_out_sec`.
+            fade_out_sec:
+              type: number
+              nullable: true
+              description: Alias for fade_out. Wins if both are set.
             curve:
               type: string
               default: tri
@@ -3540,25 +3630,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [steps]
-              properties:
-                file_path: { type: string, nullable: true }
-                file_url: { type: string, format: uri, nullable: true }
-                steps:
-                  type: array
-                  items:
-                    type: object
-                    required: [op]
-                    properties:
-                      op: { type: string }
-                      params: { type: object, additionalProperties: true }
-                output_path: { type: string, nullable: true }
-                output_url: { type: string, format: uri, nullable: true }
-                output_format: { $ref: "#/components/schemas/OutputFormat" }
-                async_job: { type: boolean, default: false }
-                webhook_url: { type: string, format: uri, nullable: true }
+            schema: { $ref: "#/components/schemas/PipelineRunRequest" }
       responses:
         "200":
           description: Pipeline executed.
@@ -3630,20 +3702,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                file_path: { type: string, nullable: true }
-                file_url: { type: string, format: uri, nullable: true }
-                output_path: { type: string, nullable: true }
-                output_url: { type: string, format: uri, nullable: true }
-                output_format: { $ref: "#/components/schemas/OutputFormat" }
-                async_job: { type: boolean, default: false }
-                webhook_url: { type: string, format: uri, nullable: true }
-                params:
-                  type: object
-                  additionalProperties: true
-                  description: Override values for parameters the preset declares.
+            schema: { $ref: "#/components/schemas/PresetRunRequest" }
       responses:
         "200":
           description: Preset executed.

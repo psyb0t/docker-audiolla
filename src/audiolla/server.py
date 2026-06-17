@@ -200,6 +200,8 @@ from .schema import (
     MidiRenderRequest,
     MidiTransformRequest,
     NormalizeRequest,
+    PipelineRunRequest,
+    PresetRunRequest,
     format_value,
     url_to_str,
     validate_input_xor,
@@ -577,6 +579,25 @@ class _RequestLogMiddleware:
             self._LOG.info(msg, *args, extra=extra)
 
 
+# Global 500-handler: turn any uncaught exception into a JSON
+# ``{"detail": "<message>"}`` body instead of FastAPI's default plain-
+# text ``Internal Server Error``. Without this, downstream clients
+# that parse ``response.json()`` on every error get a confusing
+# JSONDecodeError on 5xx instead of a clean machine-readable detail.
+# The traceback still lands in the audiolla.request log via the
+# request-log middleware's ``except Exception: _LOG.exception(...)``
+# branch — this handler is purely about response shape.
+@app.exception_handler(Exception)
+async def _unhandled_exception_to_json(  # type: ignore[no-untyped-def]
+    request, exc,
+):  # pragma: no cover — exercised via integration tests
+    log.exception("unhandled %s on %s %s", type(exc).__name__, request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+
+
 # Optional bearer auth covers every route — mounted MCP transport included.
 app.add_middleware(BearerAuthMiddleware, token=config.AUTH_TOKEN)
 # Per-request log line at the right level (DEBUG for healthz, INFO for 2xx,
@@ -807,22 +828,23 @@ def describe_preset(name: str) -> dict[str, Any]:
 
 
 @app.post("/v1/presets/{name}")
-async def run_preset(
-    name: str,
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
+async def run_preset(name: str, req: PresetRunRequest) -> Response:
     """Run a curated preset pipeline against an input file. The preset's
     steps are executed in order; intermediate audio stays in memory between
     steps. Returns the final audio (or routes to output_path / output_url
     same as any audio-producing endpoint)."""
     from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
+
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format) if req.output_format else "wav"
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    file = None  # multipart no longer accepted; resolve_input still uses the shim
+    validate_input_xor(file_path, file_url)
+    validate_output_xor(output_path, output_url, async_job=async_job)
 
     preset = PRESETS.get(name)
     if preset is None:
@@ -863,28 +885,34 @@ async def run_preset(
 
 
 @app.post("/v1/pipeline")
-async def run_pipeline_endpoint(
-    file: UploadFile | None = File(default=None),
-    file_path: str | None = Form(default=None),
-    file_url: str | None = Form(default=None),
-    output_path: str | None = Form(default=None),
-    output_url: str | None = Form(default=None),
-    output_format: str = Form(default="wav"),
-    steps: str = Form(...),
-    async_job: bool = Form(default=False),
-    webhook_url: str | None = Form(default=None),
-) -> Response:
-    """Run an ad-hoc pipeline of ops against an input file. `steps` is a
-    JSON array: `[{"op": "<slug>", "params": {...}}, ...]`. See `/v1/ops`
-    for available op slugs. Each step's output feeds the next step's input.
-    Server-side chaining — no intermediate HTTP roundtrips."""
+async def run_pipeline_endpoint(req: PipelineRunRequest) -> Response:
+    """Run an ad-hoc pipeline of ops against an input file. ``steps`` is
+    a JSON array: ``[{"op": "<slug>", "params": {...}}, ...]``. See
+    ``/v1/ops`` for available op slugs. Each step's output feeds the
+    next step's input. Server-side chaining — no intermediate HTTP
+    roundtrips."""
     from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
 
+    file_path = req.file_path
+    file_url = url_to_str(req.file_url)
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format) if req.output_format else "wav"
+    async_job = req.async_job
+    webhook_url = url_to_str(req.webhook_url)
+    file = None  # multipart no longer accepted; resolve_input still uses the shim
+    validate_input_xor(file_path, file_url)
+    validate_output_xor(output_path, output_url, async_job=async_job)
     _validate_output_format(output_format)
-    try:
-        parsed_steps = json.loads(steps)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"invalid steps JSON: {exc}") from exc
+    # `steps` is a typed list of `{op, params?}` dicts via Pydantic; no
+    # JSON string parsing needed anymore.
+    parsed_steps = [
+        {"op": s.op, "params": (s.params or {})} for s in (req.steps or [])
+    ]
+    if not parsed_steps:
+        raise HTTPException(
+            status_code=400, detail="steps must be a non-empty list"
+        )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
     step_log: list[dict] = []
@@ -1281,7 +1309,9 @@ async def master(req: AudioMasterRequest) -> Response:
     output_url = url_to_str(req.output_url)
     output_format = format_value(req.output_format)
     reference_url = url_to_str(req.reference_url)
-    mode = format_value(req.mode)
+    # `mode` is now nullable in the schema — pass through None instead
+    # of stringifying to "None" via format_value.
+    mode = format_value(req.mode) if req.mode is not None else None
     async_job = req.async_job
     webhook_url = url_to_str(req.webhook_url)
     reference_path = req.reference_path
@@ -1290,6 +1320,24 @@ async def master(req: AudioMasterRequest) -> Response:
     target_lufs = req.target_lufs
     _validate_output_format(output_format)
 
+    # Auto-detect mode when not supplied:
+    #   - reference / reference_url set → mode=reference
+    #   - preset set → mode=chain
+    #   - neither → 400
+    if not mode:
+        if reference_path or reference_url:
+            mode = "reference"
+        elif preset:
+            mode = "chain"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "mode is required (or supply reference_path / "
+                    "reference_url for mode=reference, or preset for "
+                    "mode=chain)"
+                ),
+            )
     if mode not in ("reference", "chain"):
         raise HTTPException(
             status_code=400, detail="mode must be 'reference' or 'chain'"
@@ -3340,9 +3388,14 @@ async def similar(req: AudioSimilarRequest) -> JSONResponse:
     reference_file = None  # v1.0.0: multipart upload var no longer exists, kept as shim
     file_path = req.file_path
     file_url = url_to_str(req.file_url)
-    reference_file_url = url_to_str(req.reference_file_url)
-    reference_file_path = req.reference_file_path
-    reference_file_url = url_to_str(req.reference_file_url)
+    # Accept either reference_file_path / reference_file_url (canonical
+    # — matches the docs that explicitly distinguish "primary" from
+    # "reference") or file_path_b / file_url_b (intuitive when the
+    # endpoint is read as "compare two files").
+    reference_file_path = req.reference_file_path or getattr(req, "file_path_b", None)
+    reference_file_url = url_to_str(
+        req.reference_file_url or getattr(req, "file_url_b", None)
+    )
     eng = ENGINES.get("clap-embed")
     if eng is None or not is_embed_engine(eng):
         raise HTTPException(status_code=404, detail="clap-embed engine not configured")
@@ -3465,14 +3518,21 @@ async def fade(req: AudioFadeRequest) -> Response:
     output_format = format_value(req.output_format)
     async_job = req.async_job
     webhook_url = url_to_str(req.webhook_url)
-    fade_in = req.fade_in
-    fade_out = req.fade_out
+    # Accept either `fade_in` / `fade_out` (canonical) or
+    # `fade_in_sec` / `fade_out_sec` (consistent with the rest of the
+    # API's `_sec`-suffixed numeric fields). The _sec alias wins if both
+    # are set explicitly.
+    fade_in = req.fade_in_sec if req.fade_in_sec is not None else req.fade_in
+    fade_out = req.fade_out_sec if req.fade_out_sec is not None else req.fade_out
     curve = req.curve
     _validate_output_format(output_format)
     if fade_in <= 0.0 and fade_out <= 0.0:
         raise HTTPException(
             status_code=400,
-            detail="at least one of fade_in or fade_out must be > 0",
+            detail=(
+                "at least one of fade_in / fade_in_sec / fade_out / "
+                "fade_out_sec must be > 0"
+            ),
         )
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
@@ -4382,13 +4442,45 @@ async def remix(req: AudioRemixRequest) -> Response:
 
     async def _produce() -> bytes:
         await _evict_siblings(engine)
+        import math  # noqa: PLC0415
+
         stems = await eng.separate(raw, filename, output_format=output_format)
         mix_inputs: list[tuple[bytes, str, float]] = []
         for stem_name, stem_bytes in stems.items():
-            spec = stem_mix_spec.get(stem_name, {})
-            if spec.get("mute", False):
-                continue
-            gain_db = float(spec.get("gain_db", 0.0))
+            spec = stem_mix_spec.get(stem_name)
+            # Accept three shapes:
+            #   {"vocals": {"gain_db": -6, "mute": false}}  — canonical
+            #   {"vocals": -6}                              — gain_db shorthand
+            #   {"vocals": 0.0}                             — linear gain
+            #                                                 (0=mute, 1=unity);
+            #                                                 inferred when the
+            #                                                 value is in [0,1].
+            if spec is None:
+                gain_db = 0.0
+            elif isinstance(spec, dict):
+                if spec.get("mute", False):
+                    continue
+                gain_db = float(spec.get("gain_db", 0.0))
+            elif isinstance(spec, (int, float)):
+                val = float(spec)
+                if val == 0.0:
+                    continue  # mute
+                if 0.0 < val <= 1.0:
+                    # Linear-gain shorthand. 1.0 = 0 dB, anything in (0,1)
+                    # maps via 20*log10. Negative numbers fall through to
+                    # the gain_db interpretation.
+                    gain_db = 20.0 * math.log10(val)
+                else:
+                    gain_db = val  # treat as gain_db
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"stem_mix[{stem_name!r}] must be a dict "
+                        "({gain_db, mute}) or a number (gain_db); got "
+                        f"{type(spec).__name__}"
+                    ),
+                )
             mix_inputs.append((stem_bytes, f"{stem_name}.{output_format}", gain_db))
         if not mix_inputs:
             raise HTTPException(status_code=400, detail="all stems are muted")

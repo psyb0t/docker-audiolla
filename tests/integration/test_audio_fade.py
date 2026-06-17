@@ -137,3 +137,42 @@ def test_fade_output_path(
     fetched = client.get(f"/v1/files/{body['path']}")
     assert fetched.status_code == 200
     assert_wav(fetched.content, min_bytes=100)
+
+
+def test_fade_accepts_sec_suffix_aliases(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """Both `fade_in_sec` and `fade_out_sec` work as aliases of the
+    canonical `fade_in` / `fade_out` fields. Consistent with the rest
+    of the API (`start_sec`, `end_sec`, `duration_sec`, etc.)."""
+    r = client.post(
+        "/v1/audio/fade",
+        json={
+            "file_path": staged_audio,
+            "fade_in_sec": 1.0,
+            "fade_out_sec": 1.0,
+            "output_format": "mp3",
+            "output_path": "out/fade_sec.mp3",
+        },
+    )
+    assert r.status_code == 200, r.text
+    fetched = client.get(f"/v1/files/{r.json()['path']}")
+    assert fetched.status_code == 200
+    assert_mp3(fetched.content)
+
+
+def test_fade_sec_alias_wins_over_legacy(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """If both `fade_in` and `fade_in_sec` are supplied, the _sec alias
+    wins (per the schema docstring)."""
+    r = client.post(
+        "/v1/audio/fade",
+        json={
+            "file_path": staged_audio,
+            "fade_in": 0.0,
+            "fade_in_sec": 0.5,
+            "output_path": "out/fade_alias.wav",
+        },
+    )
+    assert r.status_code == 200, r.text

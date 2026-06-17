@@ -5,6 +5,22 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.7 — 2026-06-17
+
+**Field-name compatibility aliases + master mode auto-detect + preset/pipeline JSON body + JSON 500 envelope + remix gain shorthand.** No API contract removed — every change is either additive (new accepted field name, optional field made optional) or a strict-superset fix (handler accepts more shapes than before).
+
+- **Fix: `/v1/audio/fade` accepts `fade_in_sec` / `fade_out_sec`.** The rest of the API uses `_sec` suffix (`start_sec`, `end_sec`, `duration_sec`); fade was inconsistent. Schema now declares both pairs as nullable aliases; the `_sec` form wins when both are supplied.
+- **Fix: `/v1/audio/eq` accepts `band.frequency` and `band.q`.** Common client typos for the canonical `band.freq` / `band.width_hz`. Audio-side parser falls back to the alias when the canonical key is absent.
+- **Fix: `/v1/audio/similar` accepts `file_path_b` / `file_url_b`.** Aliases for `reference_file_path` / `reference_file_url` — the "compare two files" reading is more intuitive for similarity checks than "primary vs reference".
+- **Fix: `/v1/audio/master` `mode` is now optional with auto-detect.** Schema drops `mode` from `required`. Handler infers: `reference_path` / `reference_url` set → `mode=reference`; `preset` set → `mode=chain`; neither → 400 with a helpful detail that lists both inferences. Schema docstring also clarifies that `preset` here is the pedalboard chain set (`transparent`/`loud`), distinct from the workflow presets at `GET /v1/presets`.
+- **Fix: `POST /v1/presets/{name}` now takes a JSON body (was Form/File).** The v1.0.0 spec-first refactor missed this endpoint. New `PresetRunRequest` schema component; handler reads `req.file_path` / `req.output_path` / `req.params` directly.
+- **Fix: `POST /v1/pipeline` now takes a JSON body (was Form/File).** Same as presets — missed by the v1.0.0 sweep. New `PipelineRunRequest` schema component with a typed `steps` array (`list[{op, params?}]`) — no more JSON-string parsing. Existing pipeline tests migrated from `data=` to `json=`.
+- **Fix: every uncaught exception is now wrapped in `{"detail": "<message>"}` JSON.** Previously FastAPI's default plain-text `Internal Server Error` body would slip through for non-`HTTPException` failures, breaking downstream clients that parse `response.json()` on every error. A global `@app.exception_handler(Exception)` now logs the exception via `audiolla.request` (with traceback) and returns the JSON envelope at `500`.
+- **Fix: `/v1/audio/remix` plain-text 500 on `stem_mix={"vocals": 1.0}`.** The handler did `spec.get("mute")` on a float (because the user sent linear-gain shorthand) → `AttributeError` → unhandled 500. Handler now accepts three shapes: `{stem: {gain_db, mute}}` (canonical), `{stem: <number>}` (treated as `gain_db`), `{stem: <[0,1]>}` (linear gain — `0.0` = mute, `1.0` = unity, intermediate → `20*log10(val)` dB). Anything else → 400 with a clear detail.
+- **Diagnostic: UVR phantom-output logging.** When `audio-separator` reports a filename it didn't actually write (synthetic-sine or sometimes real-audio edge case), the engine now logs the recursive tmpdir listing alongside the library's claimed output at WARNING level so operators can diagnose without strace.
+
+New tests: fade `_sec` aliases (both happy path + alias-wins rule), eq `frequency` alias, similar `file_path_b` alias, master auto-detect via preset / reference / neither, preset+pipeline JSON-body happy paths, remix linear-gain shorthand JSON-shape guard, remix non-numeric value JSON 422 (no plain-text 500 regression). Existing pipeline tests (4 functions) migrated from `data=` to `json=`.
+
 ## v1.0.6 — 2026-06-09
 
 **Bug fixes surfaced by downstream consumer + container-name unification + trim UX.**

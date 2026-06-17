@@ -84,3 +84,23 @@ def test_similar_missing_primary(
         },
     )
     assert r.status_code in (400, 404, 422, 500), r.text
+
+
+def test_similar_accepts_file_path_b_alias(
+    client: httpx.Client, staged_audio: str, staged_reference: str,
+) -> None:
+    """`file_path_b` works as an alias for `reference_file_path` — the
+    "compare two files" reading is more intuitive than primary +
+    reference framing for a similarity check."""
+    r = client.post(
+        "/v1/audio/similar",
+        json={
+            "file_path": staged_audio,
+            "file_path_b": staged_reference,
+        },
+        timeout=120.0,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "similarity" in body
+    assert isinstance(body["similarity"], (int, float))

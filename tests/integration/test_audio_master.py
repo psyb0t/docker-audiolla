@@ -194,3 +194,50 @@ def test_master_requires_output(
         },
     )
     assert r.status_code == 400, r.text
+
+
+def test_master_auto_detect_mode_chain_from_preset(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """Omitting `mode` is OK when `preset` is supplied — handler
+    infers `mode=chain`."""
+    r = client.post(
+        "/v1/audio/master",
+        json={
+            "file_path": staged_audio,
+            "preset": "transparent",
+            "output_format": "mp3",
+            "output_path": "out/master_auto_chain.mp3",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_master_auto_detect_mode_reference_from_reference_path(
+    client: httpx.Client, staged_audio: str, staged_reference: str,
+) -> None:
+    """Omitting `mode` is OK when `reference_path` is supplied — handler
+    infers `mode=reference`."""
+    r = client.post(
+        "/v1/audio/master",
+        json={
+            "file_path": staged_audio,
+            "reference_path": staged_reference,
+            "output_path": "out/master_auto_ref.wav",
+        },
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_master_no_mode_no_preset_no_ref_400(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """No mode + no preset + no reference → 400 with a helpful detail."""
+    r = client.post(
+        "/v1/audio/master",
+        json={
+            "file_path": staged_audio,
+            "output_path": "out/x.wav",
+        },
+    )
+    assert r.status_code == 400, r.text

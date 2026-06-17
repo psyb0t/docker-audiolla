@@ -93,16 +93,14 @@ def test_engines_includes_load_status(client: httpx.Client) -> None:
 def test_pipeline_run_2step(client: httpx.Client, staged_audio: str) -> None:
     """Ad-hoc pipeline (trim → reverse) produces a usable WAV smaller than input."""
     dest = f"pipe/out-{secrets.token_hex(4)}.wav"
-    steps = json.dumps([
-        {"op": "trim", "params": {"start_sec": 0, "end_sec": 2}},
-        {"op": "reverse", "params": {}},
-    ])
-
     r = client.post(
         "/v1/pipeline",
-        data={
+        json={
             "file_path": staged_audio,
-            "steps": steps,
+            "steps": [
+                {"op": "trim", "params": {"start_sec": 0, "end_sec": 2}},
+                {"op": "reverse", "params": {}},
+            ],
             "output_path": dest,
         },
     )
@@ -121,9 +119,9 @@ def test_pipeline_output_path_step_log(
     dest = f"pipe/log-{secrets.token_hex(4)}.wav"
     r = client.post(
         "/v1/pipeline",
-        data={
+        json={
             "file_path": staged_audio,
-            "steps": json.dumps([{"op": "reverse", "params": {}}]),
+            "steps": [{"op": "reverse", "params": {}}],
             "output_path": dest,
         },
     )
@@ -140,24 +138,22 @@ def test_pipeline_unknown_op_400(
     """Unknown op slug → 400/422."""
     r = client.post(
         "/v1/pipeline",
-        data={
+        json={
             "file_path": staged_audio,
-            "steps": json.dumps([
-                {"op": "this_op_does_not_exist", "params": {}},
-            ]),
+            "steps": [{"op": "this_op_does_not_exist", "params": {}}],
             "output_path": f"pipe/bad-{secrets.token_hex(4)}.wav",
         },
     )
     assert r.status_code in (400, 422), r.text
 
 
-def test_pipeline_bad_json_400(
+def test_pipeline_bad_steps_400(
     client: httpx.Client, staged_audio: str,
 ) -> None:
-    """Steps that aren't valid JSON → 400/422."""
+    """Malformed `steps` (string instead of array) → 422."""
     r = client.post(
         "/v1/pipeline",
-        data={
+        json={
             "file_path": staged_audio,
             "steps": "{not valid json",
             "output_path": f"pipe/bad-{secrets.token_hex(4)}.wav",
@@ -179,3 +175,46 @@ def test_pipeline_empty_steps_400(
         },
     )
     assert r.status_code in (400, 422), r.text
+
+
+def test_preset_run_accepts_json_body(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """`POST /v1/presets/{name}` now takes a JSON body (was Form/File
+    in older versions). Pick the first registered preset to exercise."""
+    presets = client.get("/v1/presets").json()
+    names = [p.get("name") for p in presets.get("data", presets.get("presets", []))]
+    if not names:
+        import pytest as _pt
+        _pt.skip("no presets registered on this image")
+    name = names[0]
+    r = client.post(
+        f"/v1/presets/{name}",
+        json={
+            "file_path": staged_audio,
+            "output_format": "mp3",
+            "output_path": "out/preset_run.mp3",
+        },
+        timeout=180.0,
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_pipeline_accepts_json_body(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """`POST /v1/pipeline` now takes a JSON body. Typed `steps` array."""
+    r = client.post(
+        "/v1/pipeline",
+        json={
+            "file_path": staged_audio,
+            "steps": [
+                {"op": "normalize", "params": {"target_lufs": -14}},
+                {"op": "trim", "params": {"start_sec": 0, "end_sec": 4}},
+            ],
+            "output_format": "wav",
+            "output_path": "out/pipe_json.wav",
+        },
+        timeout=180.0,
+    )
+    assert r.status_code == 200, r.text

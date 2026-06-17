@@ -129,3 +129,23 @@ def test_eq_output_path(client: httpx.Client, staged_audio: str) -> None:
     fetched = client.get(f"/v1/files/{body['path']}")
     assert fetched.status_code == 200
     assert_wav(fetched.content, min_bytes=100)
+
+
+def test_eq_accepts_frequency_alias(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """Band dict accepts `frequency` as an alias for `freq` — common
+    client-side typo since `frequency` reads more naturally than the
+    abbreviated `freq`."""
+    r = client.post(
+        "/v1/audio/eq",
+        json={
+            "file_path": staged_audio,
+            "bands": [{"frequency": 1000, "gain_db": 6, "width_hz": 200}],
+            "output_path": "out/eq_freq_alias.wav",
+        },
+    )
+    assert r.status_code == 200, r.text
+    fetched = client.get(f"/v1/files/{r.json()['path']}")
+    assert fetched.status_code == 200
+    assert_wav(fetched.content)
