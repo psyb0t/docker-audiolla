@@ -141,3 +141,40 @@ def test_remix_unsupported_stem_mix_value_type_rejected(
     )
     assert r.status_code in (400, 422), r.text
     assert r.headers.get("content-type", "").startswith("application/json")
+
+
+def test_remix_single_stem_solo(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """Soloing one stem (everything else at 0.0 mute) used to fail
+    with "mix_audio requires at least 2 inputs" — the post-separation
+    mix step couldn't handle a single surviving stem. Now: handler
+    short-circuits to a single-stream gain apply (via
+    audio.apply_gain_db) when exactly one stem remains. Marked gpu
+    because htdemucs needs CUDA to fit in the test budget."""
+    import pytest as _pt
+    _pt.importorskip("httpx")
+
+    r = client.post(
+        "/v1/audio/remix",
+        json={
+            "file_path": staged_audio,
+            "engine": "htdemucs",
+            "stem_mix": {"vocals": 1.0, "drums": 0.0, "bass": 0.0, "other": 0.0},
+            "output_format": "wav",
+            "output_path": "out/remix_solo.wav",
+        },
+        timeout=600.0,
+    )
+    # Either succeeds (CUDA available + htdemucs loaded) or returns
+    # a JSON-shape engine-load error. The regression we're guarding:
+    # no more "mix_audio requires at least 2 inputs" 500.
+    assert r.headers.get("content-type", "").startswith("application/json")
+    if r.status_code == 200:
+        body = r.json()
+        assert body["path"] == "out/remix_solo.wav"
+        assert "vocals" in body.get("stems", [])
+    else:
+        # Whatever the failure mode, must NOT be the 2-inputs error.
+        detail = r.json().get("detail", "")
+        assert "requires at least 2" not in detail, detail

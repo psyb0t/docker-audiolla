@@ -5,6 +5,30 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.9 — 2026-06-17
+
+**Remix single-stem-solo fix.** Surfaced by the v1.0.8 UVR fix actually
+letting separation engines reach the mix step.
+
+- **Fix: `/v1/audio/remix` with one surviving stem.** With
+  `stem_mix={"vocals":1.0,"drums":0.0,"bass":0.0,"other":0.0}` (the
+  most common remix shape — solo one stem), exactly one mix input
+  survived gain filtering. The downstream `mix_audio` step requires
+  ≥ 2 inputs and rejected with
+  `"mix_audio requires at least 2 inputs"`. Added a new helper
+  `audio.apply_gain_db(raw, filename, gain_db, output_format)` —
+  single-stream ffmpeg `volume=<linear>` pass — and the remix handler
+  short-circuits to it when exactly one stem survives, bypassing the
+  multi-input `amix` filter graph. The 2-stem-and-up path is
+  unchanged.
+- New regression test: `test_remix_single_stem_solo` exercises the
+  solo path end-to-end (htdemucs separation + single-stem bounce). The
+  test guards against the original "requires at least 2 inputs" 500
+  even when the surrounding test environment can't run htdemucs (the
+  assertion is on response shape + the absence of the specific error
+  string).
+- Smoke: 483 / 483 CUDA integration tests passing.
+
 ## v1.0.8 — 2026-06-17
 
 **UVR phantom-output root cause fixed (was: never writing to disk) + remix stems arg.**

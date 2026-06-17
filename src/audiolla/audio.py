@@ -246,6 +246,46 @@ def trim_audio(
             os.unlink(out_path)
 
 
+def apply_gain_db(
+    raw_bytes: bytes,
+    filename: str,
+    gain_db: float,
+    output_format: str,
+) -> bytes:
+    """Apply a single gain (in dB) to one audio stream and re-encode.
+
+    Used by the remix handler's single-stem solo path — when stem_mix
+    leaves only one surviving stem (e.g. "vocals only"), ``mix_audio``
+    refuses (it requires >= 2 inputs); this helper applies the gain
+    inline with no second stream.
+    """
+    if output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise AudioConversionError(
+            f"unsupported output format {output_format!r}; "
+            f"supported: {sorted(SUPPORTED_OUTPUT_FORMATS)}"
+        )
+    codec_args = _FORMAT_FFMPEG_CODEC[output_format]
+    in_path = write_temp_input(raw_bytes, filename)
+    out_fd, out_path = tempfile.mkstemp(prefix="audiolla-gain-")
+    os.close(out_fd)
+    try:
+        linear = 10 ** (gain_db / 20.0)
+        cmd = [
+            "ffmpeg", "-y", "-i", in_path,
+            "-af", f"volume={linear}",
+            *codec_args, out_path,
+        ]
+        _run_ffmpeg(cmd)
+        with open(out_path, "rb") as fh:
+            return fh.read()
+    finally:
+        for p in (in_path, out_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
 def mix_audio(inputs: list[tuple[bytes, str, float]], output_format: str) -> bytes:
     """Mix N audio tracks with per-track gain_db. Requires at least 2 inputs."""
     if len(inputs) < 2:

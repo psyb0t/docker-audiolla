@@ -4510,6 +4510,22 @@ async def remix(req: AudioRemixRequest) -> Response:
         if not mix_inputs:
             raise HTTPException(status_code=400, detail="all stems are muted")
         meta["stems"] = list(stems.keys())
+        # Single-stem solo case ("vocals only", "drums only" — the most
+        # common remix shape). mix_audio() requires >= 2 inputs; for
+        # one stem we apply the gain inline via a 1-input mix and
+        # return that. We use concat_audio with no concat (just gain)
+        # — actually simplest: re-mix the same stem against itself at
+        # -inf dB to satisfy mix_audio's 2-input minimum is hacky.
+        # Cleaner: when only one stem survives, ffmpeg the gain
+        # directly with the existing transform pipeline. Use sox via
+        # an inline ffmpeg adjustment.
+        if len(mix_inputs) == 1:
+            from .audio import apply_gain_db  # noqa: PLC0415
+            stem_bytes, stem_filename, gain_db = mix_inputs[0]
+            return await asyncio.to_thread(
+                apply_gain_db, stem_bytes, stem_filename,
+                gain_db, output_format,
+            )
         return await asyncio.to_thread(mix_audio, mix_inputs, output_format)
 
     return await _run_with_optional_job(
