@@ -276,7 +276,18 @@ def audiolla_url(request: pytest.FixtureRequest) -> Iterator[str]:
 
     engines_csv = _collected_engines(request.session)
     port = _free_port()
-    name = f"audiolla-pytest-{os.getpid()}-{secrets.token_hex(4)}"
+    # Fixed container name so concurrent pytest runs share the same
+    # slot — first one wins, the rest see the existing container and
+    # would collide on the `docker run --name`. Kill any leftover by
+    # exact name before starting (only this exact name; the global rule
+    # forbids filter+xargs patterns). CUDA vs CPU runs use a different
+    # name so an in-flight CPU container doesn't conflict with a CUDA
+    # invocation.
+    name = "audiolla-pytest-cuda" if use_gpu else "audiolla-pytest"
+    subprocess.run(
+        ["docker", "rm", "-f", name],
+        capture_output=True, timeout=30,
+    )
 
     _ensure_fixtures(image)
 

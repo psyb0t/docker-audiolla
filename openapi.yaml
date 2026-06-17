@@ -723,13 +723,15 @@ components:
         - $ref: "#/components/schemas/BaseAudioInputRequest"
         - $ref: "#/components/schemas/BaseAudioOutputRequest"
         - type: object
-          required: [end_sec]
           properties:
             start_sec:
               type: number
               default: 0.0
+              description: "Trim window start in seconds. Defaults to 0 (beginning of file)."
             end_sec:
               type: number
+              nullable: true
+              description: "Trim window end in seconds. Omit (or pass null) to trim to end of source."
 
     AudioMixRequest:
       allOf:

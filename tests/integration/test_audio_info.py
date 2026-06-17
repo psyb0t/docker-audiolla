@@ -78,3 +78,30 @@ def test_info_no_input_422(client: httpx.Client) -> None:
     """No body at all → 422."""
     r = client.post("/v1/audio/info")
     assert r.status_code == 422, r.text
+
+
+def test_info_on_mp3(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """Regression: ffprobe -v quiet swallowed real error messages, leaving
+    callers with "ffprobe failed: unknown error" on any failure. Also,
+    `info` must succeed on MP3 inputs — historical bug had it returning
+    that unhelpful error on valid MP3 files."""
+    # Convert the staged WAV to MP3 first, then info-probe the MP3.
+    conv = client.post(
+        "/v1/audio/convert",
+        json={
+            "file_path": staged_audio,
+            "output_format": "mp3",
+            "output_path": "out/probe.mp3",
+        },
+    )
+    assert conv.status_code == 200, conv.text
+    mp3_path = conv.json()["path"]
+
+    r = client.post("/v1/audio/info", json={"file_path": mp3_path})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["codec"] == "mp3", body
+    assert body["duration_sec"] > 0, body
+    assert body["channels"] >= 1, body

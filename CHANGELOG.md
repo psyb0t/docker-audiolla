@@ -5,6 +5,17 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.6 — 2026-06-09
+
+**Bug fixes surfaced by downstream consumer + container-name unification + trim UX.**
+
+- **Fix: `/v1/audio/info` no longer reports `"ffprobe failed: unknown error"` on valid MP3 input.** `ffprobe -v quiet` silences ALL stderr, including the actual error message — so any probe failure surfaced as the generic placeholder. Switched to `ffprobe -v error`, which mutes info/warning lines but lets real errors through. Probe failures now surface the underlying ffprobe message in the API response.
+- **UX: `/v1/audio/trim` `end_sec` is now optional — omit it to trim from `start_sec` to source duration.** Handler probes the input via `audio_info` and uses the source's `duration_sec` as the implicit upper bound. The common "chop leading silence" / "fade-out tail" pipelines no longer need a separate probe-then-trim round trip. Old behavior of `end_sec <= start_sec → 400` preserved when explicitly supplied. `openapi.yaml` `AudioTrimRequest.end_sec` dropped from `required` and marked `nullable: true` with a docstring describing the implicit "to end" default. Regenerated Pydantic.
+- **Test harness: fixed container names.** Was `audiolla-pytest-{pid}-{hex}` (different per session, hard to share across runs). Now `audiolla-pytest` for CPU and `audiolla-pytest-cuda` for CUDA — `conftest.py` calls `docker rm -f <exact-name>` at session start to evict any leftover from a prior crashed session, then spawns fresh. Same image (`HARNESS_IMAGE`) reused; no rebuilds between tests. Concurrent pytest invocations on the same host would collide on the fixed name — operator's choice.
+- **New regression test: `test_info_on_mp3`.** Stages a WAV, converts it to MP3 via `/v1/audio/convert`, then probes the MP3 with `/v1/audio/info`. Asserts `codec == "mp3"`, positive duration, ≥ 1 channel. Pins the bug 1 fix.
+- **Updated test: `test_trim_omitted_end_sec_defaults_to_source_end`.** Replaces the prior "missing end_sec → 422" expectation. Trims `start_sec=3.0` without `end_sec` on the 8 s fixture; asserts response carries `end_sec >= 7.5` and the output WAV decodes as ≥ 4.5 s.
+- No API contract removed — `end_sec` is still accepted when provided. The 422 path that used to fire on missing `end_sec` now succeeds.
+
 ## v1.0.5 — 2026-06-09
 
 **Test infrastructure overhaul + engine logging coverage + UVR / DeepFilter / presets fixes.** No API changes, no contract changes. Everything in this release is additive to the v1.0.4 baseline or fixes a latent bug.

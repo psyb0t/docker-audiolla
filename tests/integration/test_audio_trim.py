@@ -91,18 +91,29 @@ def test_trim_output_format_mp3(
     assert_mp3(fetched.content)
 
 
-def test_trim_missing_end_sec_422(
+def test_trim_omitted_end_sec_defaults_to_source_end(
     client: httpx.Client, staged_audio: str,
 ) -> None:
-    """end_sec is required → Pydantic 422."""
+    """Omitting end_sec trims from start_sec to the source duration.
+
+    The synthetic fixture is 8 s; trimming start_sec=3.0 without end_sec
+    should produce ~5 s of audio (handler probes ffprobe for duration).
+    """
     r = client.post(
         "/v1/audio/trim",
         json={
             "file_path": staged_audio,
-            "output_path": "out/bad.wav",
+            "start_sec": 3.0,
+            "output_path": "out/trim_to_end.wav",
         },
     )
-    assert r.status_code == 422, r.text
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # end_sec echoed back in the response — should be ~8.0 (source dur).
+    assert body.get("end_sec", 0.0) >= 7.5, body
+    fetched = client.get(f"/v1/files/{body['path']}")
+    assert fetched.status_code == 200
+    assert_wav(fetched.content, min_duration_sec=4.5)
 
 
 def test_trim_end_before_start_400(

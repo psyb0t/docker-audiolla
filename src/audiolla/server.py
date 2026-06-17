@@ -3063,7 +3063,7 @@ async def audio_info_endpoint(req: AudioInfoRequest) -> JSONResponse:
 
 @app.post("/v1/audio/trim")
 async def trim(req: AudioTrimRequest) -> Response:
-    """Cut audio to [start_sec, end_sec). end_sec required."""
+    """Cut audio to [start_sec, end_sec). Omit end_sec to trim to source end."""
     validate_input_xor(req.file_path, req.file_url)
     validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
     # ── shim locals so the rest of the handler body stays unchanged ──
@@ -3080,9 +3080,23 @@ async def trim(req: AudioTrimRequest) -> Response:
     _validate_output_format(output_format)
     if start_sec < 0:
         raise HTTPException(status_code=400, detail="start_sec must be >= 0")
+    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
+    # Default end_sec to source duration when omitted — UX: "trim from
+    # start_sec to end of file" is the common case for fade-in / chop
+    # leading silence pipelines.
+    if end_sec is None:
+        info = await asyncio.to_thread(audio_info, raw, filename)
+        end_sec = float(info.get("duration_sec") or 0.0)
+        if end_sec <= start_sec:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"could not infer end_sec from source (duration={end_sec}); "
+                    "supply end_sec explicitly"
+                ),
+            )
     if end_sec <= start_sec:
         raise HTTPException(status_code=400, detail="end_sec must be > start_sec")
-    raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
     async def _produce() -> bytes:
         return await asyncio.to_thread(

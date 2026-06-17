@@ -137,9 +137,14 @@ def audio_info(raw_bytes: bytes, original_filename: str) -> dict:
 
     in_path = write_temp_input(raw_bytes, original_filename)
     try:
+        # `-v error`, not `-v quiet`: quiet suppresses ALL stderr including
+        # the actual error message on failure, leaving callers with the
+        # uninformative "ffprobe failed: unknown error". `error` mutes
+        # info / warning lines but lets the real error reach stderr so
+        # we can surface it in the API response.
         proc = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
+                "ffprobe", "-v", "error",
                 "-print_format", "json",
                 "-show_streams", "-show_format",
                 in_path,
