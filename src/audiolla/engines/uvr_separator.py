@@ -27,6 +27,23 @@ from ..audio import AudioConversionError, encode_audio
 from .base import EngineBase
 
 
+def _uvr_log_level() -> int:
+    """Bridge the audio-separator library's own log level to LOG_LEVEL.
+
+    audio-separator configures its own logger and won't honour the root
+    handler's level by default. Forward LOG_LEVEL=DEBUG into the library
+    so operators can debug the "model produced no output files" path
+    without rebuilding. Falls back to WARNING in production to keep the
+    library's numba spam out of the audiolla logs.
+    """
+    raw = (os.environ.get("LOG_LEVEL") or "").strip().upper()
+    if raw == "WARN":
+        raw = "WARNING"
+    if raw in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        return getattr(logging, raw)
+    return logging.WARNING
+
+
 class UVRSeparatorError(AudioConversionError):
     """Model inference failed or returned unexpected output."""
 
@@ -45,11 +62,19 @@ class UVRSeparatorEngine(EngineBase):
         from audio_separator.separator import Separator  # noqa: PLC0415
 
         os.makedirs(config.UVR_MODELS_DIR, exist_ok=True)
+        # Do NOT pass output_single_stem here. The library's filter is a
+        # case-insensitive match against the MODEL's own primary_stem
+        # name (read from its YAML/ckpt config). Our engines.json names
+        # ("No Reverb", "No Echo", "No Noise") rarely match the model's
+        # configured stem name ("Vocals", "Other", etc.) — when they
+        # don't, the library silently writes ZERO files and returns
+        # output_files=[], surfacing as "model produced no output
+        # files". Letting it write both stems and picking the right one
+        # post-hoc is more robust.
         sep = Separator(
             model_file_dir=str(config.UVR_MODELS_DIR),
             output_format="WAV",
-            output_single_stem=self._primary_stem,
-            log_level=logging.WARNING,
+            log_level=_uvr_log_level(),
         )
         self._log.info("loading UVR model %s", self._model_filename)
         sep.load_model(self._model_filename)
@@ -60,11 +85,11 @@ class UVRSeparatorEngine(EngineBase):
         from audio_separator.separator import Separator  # noqa: PLC0415
 
         os.makedirs(config.UVR_MODELS_DIR, exist_ok=True)
+        # See _load_sync above for why output_single_stem is omitted.
         sep = Separator(
             model_file_dir=str(config.UVR_MODELS_DIR),
             output_format="WAV",
-            output_single_stem=self._primary_stem,
-            log_level=logging.WARNING,
+            log_level=_uvr_log_level(),
         )
         self._log.info("loading UVR aggressive model %s", self._model_aggressive_filename)
         sep.load_model(self._model_aggressive_filename)
@@ -124,7 +149,15 @@ class UVRSeparatorEngine(EngineBase):
             with open(in_path, "wb") as fh:
                 fh.write(raw)
 
+            # audio-separator snapshots output_dir into its per-arch
+            # model_instance config at `load_model()` time. Mutating
+            # sep.output_dir alone does NOT propagate to the model
+            # instance that actually writes the file — pydub then exports
+            # to cwd (usually /app/, root-owned) and the file lands in a
+            # spot the runtime user can't read. Fix: set both.
             sep.output_dir = tmpdir
+            if getattr(sep, "model_instance", None) is not None:
+                sep.model_instance.output_dir = tmpdir
             output_files: list[str] = sep.separate(in_path)
             self._log.info(
                 "restore separate done: output_files=%s tmpdir=%s",
@@ -207,7 +240,14 @@ class UVRSeparatorEngine(EngineBase):
             with open(in_path, "wb") as fh:
                 fh.write(raw)
 
+            # See _restore_sync_with_sep — must mutate the per-arch
+            # model_instance.output_dir too, not just the outer
+            # Separator. Otherwise pydub exports to cwd (/app, root-
+            # owned) and the file lands somewhere the runtime user
+            # can't read.
             self._model.output_dir = tmpdir
+            if getattr(self._model, "model_instance", None) is not None:
+                self._model.model_instance.output_dir = tmpdir
             output_files: list[str] = self._model.separate(in_path)
             self._log.info(
                 "separate done: output_files=%s tmpdir=%s",

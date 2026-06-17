@@ -435,6 +435,17 @@ def _ensure_fixtures(image: str) -> None:
             "-af", "pan=stereo|c0=c0|c1=c0",
             "-ar", "44100",
         ],
+        # 16-second stereo signal with HEAVY reverb tail — exercises
+        # the UVR dereverb / deecho / denoise models with content they
+        # can actually operate on. Synthetic sine + vibrato + aecho
+        # produces a signal the BS-Roformer dereverb model can split
+        # into "(reverb)" and "(noreverb)" stems. Used by UVR happy-
+        # path tests to assert non-empty model output.
+        "audio_reverby.wav": [
+            "-f", "lavfi", "-i", "sine=frequency=200:duration=15",
+            "-af", "vibrato=f=4:d=0.7,aecho=0.95:0.85:600|1200|1800:0.7|0.5|0.35",
+            "-ar", "44100", "-ac", "2",
+        ],
     }
     if all((_FIXTURES_DIR / name).exists() for name in required):
         return
@@ -561,6 +572,24 @@ def staged_reference(client: httpx.Client) -> str:
     src = _FIXTURES_DIR / "audio_ref.wav"
     assert src.exists()
     rel = f"uploads/ref-{secrets.token_hex(8)}.wav"
+    with src.open("rb") as fh:
+        r = client.put(
+            f"/v1/files/{rel}",
+            content=fh.read(),
+            headers={"Content-Type": "application/octet-stream"},
+        )
+    assert r.status_code in (200, 201)
+    return rel
+
+
+@pytest.fixture
+def staged_reverby(client: httpx.Client) -> str:
+    """15-second stereo signal with heavy reverb tail (vibrato sine +
+    aecho). Used by UVR dereverb / deecho / denoise happy-path tests
+    to exercise the models on content they can actually split."""
+    src = _FIXTURES_DIR / "audio_reverby.wav"
+    assert src.exists()
+    rel = f"uploads/reverby-{secrets.token_hex(8)}.wav"
     with src.open("rb") as fh:
         r = client.put(
             f"/v1/files/{rel}",

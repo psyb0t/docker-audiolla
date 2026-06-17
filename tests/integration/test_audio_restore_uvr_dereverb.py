@@ -19,19 +19,20 @@ pytestmark = [
 
 
 def test_restore_writes_real_audio(
-    client: httpx.Client, staged_long_audio: str,
+    client: httpx.Client, staged_reverby: str,
 ) -> None:
-    """Happy path: 200 + the staged output is a decodable WAV."""
+    """Happy path on a heavily-reverb-y input: the dereverb model
+    splits cleanly into "(reverb)" and "(noreverb)" stems and audiolla
+    returns the dry stem. Asserts real WAV output (≥ 10 s of audio,
+    not a phantom-output 400)."""
     r = client.post(
         "/v1/audio/restore/uvr-dereverb",
         json={
-            "file_path": staged_long_audio,
+            "file_path": staged_reverby,
             "output_path": "out/dereverb.wav",
         },
         timeout=900.0,
     )
-    if uvr_model_produced_no_output(r):
-        return  # synthetic sine fixture has nothing for UVR to extract
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["path"] == "out/dereverb.wav"
@@ -40,7 +41,7 @@ def test_restore_writes_real_audio(
 
     fetched = client.get(f"/v1/files/{body['path']}")
     assert fetched.status_code == 200
-    assert_wav(fetched.content, min_bytes=10_000)
+    assert_wav(fetched.content, min_bytes=100_000, min_duration_sec=10.0)
 
 
 def test_restore_rejects_wrong_engine_type(

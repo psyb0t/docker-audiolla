@@ -22,19 +22,18 @@ pytestmark = [
 
 
 def test_noise_reduce_writes_real_audio(
-    client: httpx.Client, staged_long_audio: str,
+    client: httpx.Client, staged_reverby: str,
 ) -> None:
-    """Happy path: 200 + decodable WAV. Cold-load takes minutes."""
+    """Happy path on a heavily-reverb-y input. Asserts real WAV output
+    (≥ 10 s), not a phantom-output 400. Cold-load takes minutes."""
     r = client.post(
         "/v1/audio/noise-reduce/uvr-denoise",
         json={
-            "file_path": staged_long_audio,
+            "file_path": staged_reverby,
             "output_path": "out/uvr_nr.wav",
         },
         timeout=900.0,
     )
-    if uvr_model_produced_no_output(r):
-        return  # synthetic sine fixture has nothing for UVR to extract
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["path"] == "out/uvr_nr.wav"
@@ -42,7 +41,7 @@ def test_noise_reduce_writes_real_audio(
 
     fetched = client.get(f"/v1/files/{body['path']}")
     assert fetched.status_code == 200
-    assert_wav(fetched.content, min_bytes=10_000)
+    assert_wav(fetched.content, min_bytes=100_000, min_duration_sec=10.0)
 
 
 def test_noise_reduce_requires_input(client: httpx.Client) -> None:

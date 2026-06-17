@@ -5,6 +5,21 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.8 — 2026-06-17
+
+**UVR phantom-output root cause fixed (was: never writing to disk) + remix stems arg.**
+
+- **Fix: `/v1/audio/restore/uvr-*` and `/v1/audio/noise-reduce/uvr-denoise` actually write output files now.** The "model produced no output files" failure that bit every downstream consumer on real audio (not just synthetic fixtures) had two layered root causes inside the `audio-separator` library and one config mistake in audiolla:
+  1. **audio-separator snapshots `output_dir` into the per-architecture `model_instance` config at `load_model()` time.** Mutating `sep.output_dir` after load only updates the outer Separator wrapper; the inner `MDXCSeparator` / `MDXSeparator` / `VRSeparator` / etc. that actually invokes `write_audio_pydub` keeps the old (default) `output_dir`. The default is `os.getcwd()` — inside the audiolla container, that's `/app/` (root-owned), so pydub's ffmpeg export fails with `[Errno 13] Permission denied`. audio-separator catches the exception, logs it at ERROR, and reports the file path it WANTED to write as if it had succeeded. Audiolla's filter then drops every reported file (none exist on disk), surfacing "model produced no output files".
+  2. **`output_single_stem=self._primary_stem`** in audiolla's `Separator(...)` call was filtering against audio-separator's `primary_stem_name` (read from the model's YAML/ckpt config — typically "Vocals" or "Other"), not against audiolla's engines.json `primary_stem` ("No Reverb" / "No Echo" / "No Noise"). When the names don't match (always, for restore engines), the library writes ZERO stems and returns an empty `output_files` list.
+  3. The model exporter's near-silent check (`max(abs(stem_source)) < 1e-6`) silently drops stems on signals where the model genuinely produced near-zero output (e.g. our previous synthetic 8 s sine which the dereverb model classified entirely as reverb tail). Tests previously used a graceful skip to tolerate this; that masked the real bug.
+  
+  **Three-part fix:** drop `output_single_stem=` from the `Separator()` constructor (let the library write all stems; audiolla picks the right one post-hoc via the existing `_find_stem_file` substring match in the filename); propagate `sep.model_instance.output_dir = tmpdir` alongside `sep.output_dir = tmpdir` before each `separate()` call (in both `_separate_sync` and `_restore_sync_with_sep`); add a `_uvr_log_level()` bridge that forwards `LOG_LEVEL=DEBUG` to audio-separator's own logger so operators can see write_audio diagnostics without rebuilding. New `audio_reverby.wav` fixture (15-second stereo signal with heavy aecho tail) + `staged_reverby` pytest fixture; UVR restore + noise-reduce happy-path tests now require **real WAV output ≥ 10 s of decodable audio**, not a graceful no-output skip.
+
+- **Fix: `/v1/audio/remix` `TypeError: DemucsEngine.separate() missing 1 required positional argument: 'stems'`.** This bug existed pre-v1.0.7 but was masked by FastAPI's opaque plain-text 500. v1.0.7's global JSON exception handler started surfacing the real exception in the response detail; that exposed the missing `stems` arg in the remix handler's call to the separation engine. Handler now derives the stem list from the engine's declared `stems` in `engines.json` (intersected with the user's `stem_mix` keys when supplied), falling back to the htdemucs 4-stem default for engines that don't declare one. Demucs engines require `stems` positionally; UVR engines accept `None` for "all available" — the new wiring works for both.
+
+Smoke: 482 / 482 CUDA integration tests passing (UVR tests now strictly assert real audio output instead of accepting the phantom-output 400 as a graceful skip).
+
 ## v1.0.7 — 2026-06-17
 
 **Field-name compatibility aliases + master mode auto-detect + preset/pipeline JSON body + JSON 500 envelope + remix gain shorthand.** No API contract removed — every change is either additive (new accepted field name, optional field made optional) or a strict-superset fix (handler accepts more shapes than before).

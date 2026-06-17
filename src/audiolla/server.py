@@ -4444,7 +4444,32 @@ async def remix(req: AudioRemixRequest) -> Response:
         await _evict_siblings(engine)
         import math  # noqa: PLC0415
 
-        stems = await eng.separate(raw, filename, output_format=output_format)
+        # Demucs separate() requires a `stems` list — there's no
+        # "give me everything" sentinel. UVR engines accept None for
+        # "all available". To support both, infer the stem list from
+        # the engine's metadata (engines.json declares the canonical
+        # stem set per engine) and fall back to the htdemucs 4-stem
+        # default for engines that don't declare one. If the user's
+        # stem_mix spec lists stems, intersect with that subset.
+        engine_meta = REGISTRY.get(engine, {})
+        declared_stems = (
+            engine_meta.get("stems")
+            or ["vocals", "drums", "bass", "other"]
+        )
+        if stem_mix_spec:
+            requested_stems = [s for s in declared_stems if s in stem_mix_spec]
+            if not requested_stems:
+                # User listed stems the engine doesn't ship; fall back
+                # to the full set so the bounce can still proceed with
+                # all-other-stems-muted semantics.
+                requested_stems = declared_stems
+        else:
+            requested_stems = declared_stems
+        stems = await eng.separate(
+            raw, filename,
+            stems=requested_stems,
+            output_format=output_format,
+        )
         mix_inputs: list[tuple[bytes, str, float]] = []
         for stem_name, stem_bytes in stems.items():
             spec = stem_mix_spec.get(stem_name)
