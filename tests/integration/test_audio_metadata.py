@@ -94,3 +94,53 @@ def test_metadata_nonexistent_file(client: httpx.Client) -> None:
         json={"file_path": "nonexistent/path/file.wav"},
     )
     assert r.status_code in (400, 404, 422), r.text
+
+
+def test_metadata_write_without_output_marks_persisted_false(
+    client: httpx.Client, staged_mp3: str,
+) -> None:
+    """Write mode without an output target — tags applied in memory and
+    response carries persisted=false so callers know the source file
+    on disk wasn't touched. Regression for v1.0.10."""
+    r = client.post(
+        "/v1/audio/metadata",
+        json={
+            "file_path": staged_mp3,
+            "tags": '{"title":"InMem","artist":"NoPersist"}',
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("title") == "InMem"
+    assert body.get("artist") == "NoPersist"
+    assert body.get("persisted") is False
+
+
+def test_metadata_write_with_output_path_persists(
+    client: httpx.Client, staged_mp3: str,
+) -> None:
+    """Write mode WITH output_path persists the tagged audio there.
+    Read-back of the persisted file MUST show the new tags. This is
+    the v1.0.10 fix — pre-fix the write was in-memory only."""
+    dest = f"uploads/tagged-{secrets.token_hex(8)}.mp3"
+    r = client.post(
+        "/v1/audio/metadata",
+        json={
+            "file_path": staged_mp3,
+            "tags": '{"title":"Persisted","artist":"OnDisk"}',
+            "output_path": dest,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("path") == dest
+    assert body.get("persisted") is True
+    assert body.get("tags", {}).get("title") == "Persisted"
+    assert body.get("tags", {}).get("artist") == "OnDisk"
+
+    # Read the persisted file's tags back — they MUST match.
+    rb = client.post("/v1/audio/metadata", json={"file_path": dest})
+    assert rb.status_code == 200, rb.text
+    rb_body = rb.json()
+    assert rb_body.get("title") == "Persisted"
+    assert rb_body.get("artist") == "OnDisk"

@@ -43,6 +43,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 from contextlib import asynccontextmanager
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -738,11 +739,11 @@ _CATALOG_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ("POST", "/v1/presets/{name}", "Run a curated preset against a file"),
         ("POST", "/v1/pipeline", "Run an ad-hoc {op, params} chain server-side"),
         ("GET",  "/v1/ops", "List available pipeline op slugs + their params"),
-        ("POST", "/v1/audio/batch", "Multiple ops, one HTTP request"),
+        ("POST", "/v1/batch", "Multiple ops, one HTTP request"),
     ]),
     ("speech", "VAD, diarization", [
         ("POST", "/v1/audio/vad", "Voice activity detection (silero-vad)"),
-        ("POST", "/v1/audio/diarize", "Speaker diarization (pyannote)"),
+        ("POST", "/v1/audio/diarize/{engine}", "Speaker diarization (pyannote)"),
     ]),
     ("files", "Server-side file staging", [
         ("GET",    "/v1/files", "List staged files"),
@@ -4084,16 +4085,30 @@ async def sidechain_duck_endpoint(req: AudioSidechainDuckRequest) -> Response:
 
 
 @app.post("/v1/audio/metadata")
-async def audio_metadata(req: AudioMetadataRequest) -> JSONResponse:
+async def audio_metadata(req: AudioMetadataRequest) -> Response:
     """Read or write audio file tags (ID3, Vorbis, FLAC) via mutagen.
-    If tags is provided (JSON object), writes those tags and returns the updated
-    tag set. Without tags, reads and returns all tags."""
+
+    Read mode (``tags`` omitted / null): returns the file's current tag
+    set as JSON.
+
+    Write mode (``tags`` supplied as a JSON-encoded dict): writes those
+    tags into the audio container. When ``output_path`` or
+    ``output_url`` is set, persists the tagged audio there and returns
+    a JSON `{path|url, size, ...}` descriptor (same shape as every
+    other audio-producing endpoint). Without an output target, the
+    response is the updated tag set (write-only-in-memory mode — kept
+    for backwards compatibility but flagged in the response with
+    ``persisted: false``).
+    """
     validate_input_xor(req.file_path, req.file_url)
     # ── shim locals so the rest of the handler body stays unchanged ──
     file = None
     file_path = req.file_path
     file_url = url_to_str(req.file_url)
     tags = req.tags
+    output_path = req.output_path
+    output_url = url_to_str(req.output_url)
+    output_format = format_value(req.output_format) if req.output_format else None
     eng = ENGINES.get("metadata")
     if eng is None or not is_metadata_engine(eng):
         raise HTTPException(status_code=404, detail="metadata engine not configured")
@@ -4112,11 +4127,47 @@ async def audio_metadata(req: AudioMetadataRequest) -> JSONResponse:
         if write_tags is not None:
             updated_bytes = await eng.write_tags(raw, filename, write_tags)
             updated_tags = await eng.read_tags(updated_bytes, filename)
-            return JSONResponse(updated_tags)
+            # If the caller supplied an output target, persist the
+            # tagged audio there. Default media-type is "audio/*"
+            # — write_output handles the staging / presigned-PUT
+            # decision the same way every other endpoint does.
+            if output_path or output_url:
+                # Infer media type from the source extension when
+                # output_format isn't explicitly supplied — metadata
+                # writes don't transcode, so output_format defaults
+                # to whatever the input was.
+                effective_format = output_format or _infer_audio_format(filename)
+                return await write_output(
+                    updated_bytes,
+                    media_type=content_type_for(effective_format),
+                    filename=os.path.basename(output_path or "tagged"),
+                    output_path=output_path,
+                    output_url=output_url,
+                    extra_json={
+                        "tags": updated_tags,
+                        "output_format": effective_format,
+                        "persisted": True,
+                    },
+                )
+            # No output target — return the updated tags at top level
+            # (backwards-compatible with the pre-v1.0.10 shape) plus a
+            # `persisted: false` marker so callers can detect that the
+            # write was in-memory only.
+            body = dict(updated_tags) if isinstance(updated_tags, dict) else {"tags": updated_tags}
+            body["persisted"] = False
+            return JSONResponse(body)
         result = await eng.read_tags(raw, filename)
     except AudioConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(result)
+
+
+def _infer_audio_format(filename: str) -> str:
+    """Best-effort audio format from filename extension. Used by the
+    metadata write path which doesn't transcode and needs a sensible
+    media-type for the response. Falls back to wav."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return ext if ext in {"wav", "mp3", "flac", "ogg", "opus", "m4a", "aac"} else "wav"
 
 
 # ── /v1/audio/clip-detect — detect digital clipping ─────────────────────────

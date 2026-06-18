@@ -1023,11 +1023,21 @@ components:
     AudioMetadataRequest:
       allOf:
         - $ref: "#/components/schemas/BaseAudioInputRequest"
+        - $ref: "#/components/schemas/BaseAudioOutputRequest"
         - type: object
           properties:
             tags:
               type: string
               nullable: true
+              description: |
+                JSON-encoded tag dict to write. Omit / null = read-only
+                mode (returns the file's current tags). When supplied,
+                the handler writes the tags into the audio file's
+                container and — if ``output_path`` or ``output_url`` is
+                also set — persists the tagged audio there. Without
+                an output target, write-mode is no-op-persistent (tags
+                applied to bytes in memory; updated tag set returned
+                in the response; no file landed).
 
     AudioClipDetectRequest:
       allOf:

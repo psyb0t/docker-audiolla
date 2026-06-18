@@ -46,18 +46,23 @@ class FfmpegRenderError(AudioConversionError):
 
 
 # Maps the visualize() ``mode`` argument to the ffmpeg filter spec.
-# Each entry is (filter_name, supports_size, supports_rate, default_extra)
-# where default_extra is a comma-joined extra arg string applied verbatim.
-_VISUALIZE_FILTERS: dict[str, tuple[str, bool, bool, str]] = {
-    "spectrum":     ("showspectrum",   True,  True,
+# Each entry is (filter_name, size_arg_style, supports_rate, default_extra)
+# where size_arg_style is one of:
+#   "wh"  → "w=W:h=H" (showvolume + a few others — `s=WxH` is rejected)
+#   "s"   → "s=WxH"   (most show* / a* filters)
+#   None  → don't pass size at all
+_VISUALIZE_FILTERS: dict[str, tuple[str, str | None, bool, str]] = {
+    "spectrum":     ("showspectrum",   "s",  True,
                      "mode=combined:slide=scroll:color=intensity:scale=log"),
-    "waves":        ("showwaves",      True,  True,  "mode=line:colors=lime"),
-    "cqt":          ("showcqt",        True,  True,  ""),
-    "freqs":        ("showfreqs",      True,  True,  "mode=bar:fscale=log:cmode=combined"),
-    "volume":       ("showvolume",     True,  True,  "f=0.5:b=4"),
-    "vectorscope":  ("avectorscope",   True,  True,  "mode=lissajous_xy:zoom=1.5"),
-    "phasemeter":   ("aphasemeter",    True,  True,  ""),
-    "histogram":    ("ahistogram",     True,  True,  "rheight=1:slide=scroll"),
+    "waves":        ("showwaves",      "s",  True,  "mode=line:colors=lime"),
+    "cqt":          ("showcqt",        "s",  True,  ""),
+    "freqs":        ("showfreqs",      "s",  True,  "mode=bar:fscale=log:cmode=combined"),
+    # showvolume rejects `s=WxH` ("Invalid argument" on the `s` option);
+    # it takes `w=` + `h=` separately.
+    "volume":       ("showvolume",     "wh", True,  "f=0.5:b=4"),
+    "vectorscope":  ("avectorscope",   "s",  True,  "mode=lissajous_xy:zoom=1.5"),
+    "phasemeter":   ("aphasemeter",    "s",  True,  ""),
+    "histogram":    ("ahistogram",     "s",  True,  "rheight=1:slide=scroll"),
 }
 
 _VIDEO_CONTAINERS = {
@@ -239,11 +244,17 @@ class FfmpegRenderEngine(EngineBase):
         if fps < 1 or fps > 120:
             raise FfmpegRenderError(f"fps must be in [1, 120], got {fps}")
 
-        filt_name, _, _, extra = _VISUALIZE_FILTERS[mode]
-        # Build the filter arg string. Size goes as s=WxH; fps is applied
-        # as an ffmpeg output -r flag (filter-level rate options vary by filter
-        # and are unreliable across ffmpeg versions).
-        filt_args = [f"s={width}x{height}"]
+        filt_name, size_style, _, extra = _VISUALIZE_FILTERS[mode]
+        # Build the filter arg string. Most filters take `s=WxH`;
+        # showvolume rejects that and wants `w=W:h=H`. fps is applied
+        # as an ffmpeg output -r flag (filter-level rate options vary
+        # by filter and are unreliable across ffmpeg versions).
+        filt_args: list[str] = []
+        if size_style == "s":
+            filt_args.append(f"s={width}x{height}")
+        elif size_style == "wh":
+            filt_args.append(f"w={width}:h={height}")
+        # else: no size passed (filter doesn't accept dimensions)
         if extra:
             filt_args.append(extra)
         filter_spec = f"[0:a]{filt_name}=" + ":".join(filt_args) + "[v]"

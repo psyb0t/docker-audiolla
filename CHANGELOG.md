@@ -5,6 +5,50 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.10 — 2026-06-18
+
+**Three real-world bug fixes from the field + catalog/route consistency.** No
+API contract removed; the metadata write path gains an `output_path` /
+`output_url` option (additive — old call shape still works).
+
+- **Fix: `/v1/audio/visualize/video/volume` no longer 500s.** ffmpeg's
+  `showvolume` filter rejects the `s=WxH` argument that the rest of the
+  `show*` filters accept — it needs `w=W:h=H` as separate options. The
+  `_VISUALIZE_FILTERS` table now carries a per-filter `size_arg_style`
+  (`"s"` / `"wh"` / `None`) and the filter spec is assembled accordingly.
+  Other modes (`spectrum`, `waves`, `cqt`, `freqs`, `vectorscope`,
+  `phasemeter`, `histogram`) are unchanged. Regression test
+  `test_visualize_volume_mp4` exercises the path end-to-end.
+- **Fix: `/v1/audio/metadata` write mode now actually persists to disk
+  when `output_path` / `output_url` is supplied.** Pre-v1.0.10 the
+  handler wrote the new tags into an in-memory bytes copy, read them
+  back, returned the tags JSON, and DROPPED the tagged bytes. The
+  source file on disk was untouched. Schema now mixes
+  `BaseAudioOutputRequest` into `AudioMetadataRequest`; the handler
+  delegates to `write_output()` (same as every other audio-producing
+  endpoint) when an output target is set, returning the standard
+  `{path|url, size, tags, output_format, persisted: true}` descriptor.
+  Without an output target, the response shape is unchanged (tags
+  merged at top level) but now carries `persisted: false` so callers
+  can detect the in-memory-only mode. Two regression tests:
+  `test_metadata_write_with_output_path_persists` (reads the persisted
+  file back + asserts the new tags survive the round-trip) and
+  `test_metadata_write_without_output_marks_persisted_false`.
+- **Fix: `/v1/catalog` paths now match the actual routes.** The
+  catalog claimed `POST /v1/audio/batch` (real route is `/v1/batch`)
+  and `POST /v1/audio/diarize` (real route is
+  `/v1/audio/diarize/{engine}`). Both entries corrected. New
+  consistency test `test_catalog_paths_match_actual_routes` walks
+  every `(method, path)` from the catalog and asserts it resolves
+  against the FastAPI OpenAPI spec — guards against future drift.
+- **Note on plain-text 5xx errors:** the v1.0.7 global
+  `@app.exception_handler(Exception)` already wraps every uncaught
+  exception in `{"detail": ...}` JSON at the FastAPI layer. Any
+  remaining plain-text 5xx the user might still see comes from the
+  layer above audiolla (nginx 502/504, container restart during a
+  request, kernel OOM kill) and is out of scope for application-level
+  fixes.
+
 ## v1.0.9 — 2026-06-17
 
 **Remix single-stem-solo fix.** Surfaced by the v1.0.8 UVR fix actually

@@ -176,3 +176,27 @@ def test_visualize_unknown_mode_400(
     )
     assert r.status_code == 400, r.text
     assert "mode" in r.text.lower()
+
+
+def test_visualize_volume_mp4(
+    client: httpx.Client, staged_audio: str,
+) -> None:
+    """video/volume uses showvolume which rejects `s=WxH` and demands `w=`/`h=`
+    — regression for the v1.0.10 fix. Any 5xx here means the filter spec
+    is back to the broken form."""
+    dest = f"viz/vol-{secrets.token_hex(4)}.mp4"
+    r = client.post(
+        "/v1/audio/visualize/video/volume",
+        json={
+            "file_path": staged_audio,
+            "width": 320,
+            "height": 180,
+            "fps": 15,
+            "container": "mp4",
+            "output_path": dest,
+        },
+    )
+    assert r.status_code == 200, r.text
+    fetched = client.get(f"/v1/files/{dest}")
+    assert fetched.status_code == 200
+    assert_mp4(fetched.content, min_bytes=2000)

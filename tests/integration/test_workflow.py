@@ -38,6 +38,33 @@ def test_catalog_returns_categories(client: httpx.Client) -> None:
     assert len(dynamics["endpoints"]) > 0
 
 
+def test_catalog_paths_match_actual_routes(client: httpx.Client) -> None:
+    """Every (method, path) in /v1/catalog must resolve to a real FastAPI
+    route. Regression for v1.0.10 — pre-fix catalog claimed
+    /v1/audio/batch (actual /v1/batch) and /v1/audio/diarize (actual
+    /v1/audio/diarize/{engine}).
+
+    Resolution rule: a catalog path with a `{param}` segment is
+    template-matched against the OpenAPI spec; a literal path is looked
+    up directly. Either form must exist on the server.
+    """
+    cat = client.get("/v1/catalog").json()
+    spec = client.get("/openapi.json").json()
+    real = set()
+    for path, ops in spec.get("paths", {}).items():
+        for method in ops:
+            if method.lower() in {"get", "post", "put", "delete", "patch"}:
+                real.add((method.upper(), path))
+
+    missing = []
+    for cat_entry in cat["categories"]:
+        for ep in cat_entry["endpoints"]:
+            key = (ep["method"], ep["path"])
+            if key not in real:
+                missing.append(key)
+    assert not missing, f"catalog references nonexistent routes: {missing}"
+
+
 def test_ops_returns_list(client: httpx.Client) -> None:
     """/v1/ops lists every pipeline op slug."""
     r = client.get("/v1/ops")
