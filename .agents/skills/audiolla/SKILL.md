@@ -803,7 +803,8 @@ The MCP contract mirrors REST: every audio tool requires exactly one of `file_pa
 | `visualize` | `file_path` or `file_url`, `mode`, `width`, `height`, `fps`, `container`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
 | `fingerprint` | `file_path` or `file_url`, `analyze_seconds`, `return_raw` | `{duration, fingerprint, fingerprint_raw?}` |
 | `transform` | `operations`, `file_path` or `file_url`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
-| `loudness` | `file_path` or `file_url`, `target_lufs`, `output_path` or `output_url` | measurement JSON (no target) or `{path or url, size, measured_lufs, target_lufs, normalized}` |
+| `loudness` | `file_path` or `file_url` | `{loudness_lufs}` — measurement only |
+| `normalize` | `file_path` or `file_url`, `target_lufs`, `output_format`, `output_path` or `output_url` | `{path or url, size, measured_lufs, target_lufs}` |
 | `fx` | `effects`, `file_path` or `file_url`, `output_format`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
 | `midi_compose` | `spec` (song JSON), `output_path` or `output_url` | `{path, size}` or `{url, size}` |
 | `midi_inspect` | `file_path` or `file_url` (MIDI) | `{type, ticks_per_beat, tempo_changes, tracks, ...}` |

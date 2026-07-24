@@ -4,18 +4,23 @@ on: [push]
 
 jobs:
   call-docker-image-workflow:
-    uses: psyb0t/reusable-github-workflows/.github/workflows/docker-image-workflow.yml@59d43bac747f6bf66eeddb103a845b6dbf367c6b # v0.6.0
+    permissions:
+      contents: write # GitHub Release
+      security-events: write # upload the Grype SARIF to the Security tab
+    uses: psyb0t/reusable-github-workflows/.github/workflows/docker-image-workflow.yml@master
 
     with:
       repository_name: psyb0t/audiolla
       target_platforms: "linux/amd64"
       scan_severity: "high"
       cache_mode: "min"
+      # Report scan findings to the Security tab but don't fail the run, so the
+      # clawhub publish job below can depend on this workflow succeeding.
+      scan_fail_build: false
       # CUDA image (~5 GB unpacked torch + nvidia-* deps) OODs on the default
-      # ubuntu-latest 14 GB free. v0.6.0 of the reusable workflow optionally
-      # strips Android SDK / .NET / Haskell / CodeQL / large apt pkgs /
-      # preloaded docker images first (~25-30 GB freed). Tool cache + swap
-      # left intact.
+      # ubuntu-latest 14 GB free. The reusable workflow optionally strips
+      # Android SDK / .NET / Haskell / CodeQL / large apt pkgs / preloaded
+      # docker images first (~25-30 GB freed). Tool cache + swap left intact.
       free_disk_space: true
       build_targets: |
         [
@@ -26,3 +31,17 @@ jobs:
     secrets:
       dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  # Publish the skills under .agents/skills/ to ClawHub. Tag pushes ONLY, and
+  # only after the Docker image build/push + GitHub release have succeeded
+  # (needs the docker-image workflow, which does both).
+  publish-skills-to-clawhub:
+    needs: [call-docker-image-workflow]
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: psyb0t/reusable-github-workflows/.github/workflows/clawhub-skills-publish-workflow.yml@master
+
+    with:
+      skills_dir: .agents/skills
+
+    secrets:
+      clawhub_token: ${{ secrets.CLAWHUB_TOKEN }}

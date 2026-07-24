@@ -5,6 +5,20 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.0.11 — 2026-07-24
+
+Skill packaging + docs. No REST API or service change.
+
+- **Skill published to ClawHub.** The `audiolla` agent skill moves to the
+  standard `.agents/skills/` layout and the CI pipeline gains a tag-gated
+  `publish-skills-to-clawhub` job (runs after the image build + GitHub release).
+- **Skill doc fix:** the MCP tools table conflated two tools — the `loudness`
+  row listed `normalize`'s parameters. Split into the real measure-only
+  `loudness` tool and the separate `normalize` tool (`target_lufs` /
+  `output_format` / `output_path` xor `output_url`).
+- Build: `scan_fail_build: false` (Grype findings go to the Security tab
+  without failing the run); `.dockerignore` excludes `.agents/`.
+
 ## v1.0.10 — 2026-06-18
 
 **Three real-world bug fixes from the field + catalog/route consistency.** No
