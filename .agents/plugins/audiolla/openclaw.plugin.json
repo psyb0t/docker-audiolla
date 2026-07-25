@@ -1,0 +1,39 @@
+{
+  "name": "@psyb0t/audiolla",
+  "id": "@psyb0t/audiolla",
+  "version": "0.0.0",
+  "type": "code-plugin",
+  "summary": "Wire an OpenClaw agent to a self-hosted audiolla audio-production API over MCP — stem separation, mastering, MIR analysis, DSP, restoration, and MIDI as tools.",
+  "description": "A thin stdio<->HTTP bridge that connects an MCP client (OpenClaw, Claude, Cursor, Codex, ...) to a running audiolla instance's MCP endpoint (/v1/mcp), exposing its tool surface: Demucs/MDX/BS-Roformer stem separation, matchering/pedalboard mastering, librosa MIR analysis (BPM/key/LUFS/beats/onsets/melody/segments), SoX and pedalboard DSP chains, multiband compression, transient shaping, sidechain ducking, de-essing, AI restoration (de-reverb/de-echo/de-noise via UVR), DeepFilterNet enhancement, VAD, speaker diarization, MIDI compose/inspect/transform/render/humanize, audio-to-MIDI transcription, tagging/embedding/classification, metadata read/write, curated workflow presets, ad-hoc op pipelines, and text-to-music/SFX generation. audiolla is self-hosted — you run the server yourself and point this bridge at it. See https://github.com/psyb0t/docker-audiolla.",
+  "extensions": ["./bin/cli.js"],
+  "compat": {
+    "pluginApi": ">=2026.3.24-beta.2"
+  },
+  "build": {
+    "openclawVersion": "2026.3.24-beta.2"
+  },
+  "environment": {
+    "AUDIOLLA_URL": {
+      "required": true,
+      "description": "Base URL of your running audiolla server, e.g. http://localhost:8000 (the bridge appends /v1/mcp)."
+    },
+    "AUDIOLLA_AUTH_TOKEN": {
+      "required": false,
+      "description": "Bearer token, only if the audiolla server was started with AUDIOLLA_AUTH_TOKEN set."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "required": ["url"],
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "Base URL of your running audiolla server, e.g. http://localhost:8000 (the bridge appends /v1/mcp)."
+      },
+      "authToken": {
+        "type": "string",
+        "description": "Bearer token, only if the audiolla server was started with AUDIOLLA_AUTH_TOKEN set."
+      }
+    }
+  }
+}

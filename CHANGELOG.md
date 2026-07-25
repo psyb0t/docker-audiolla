@@ -5,6 +5,14 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.1.0 — 2026-07-25
+
+ClawHub plugin + skill/README accuracy pass. No REST API or service change.
+
+- **New `@psyb0t/audiolla` code plugin** (`.agents/plugins/audiolla/`) — a stdio↔HTTP MCP bridge (`mcp-remote`) to the box's `/v1/mcp` endpoint, so an OpenClaw/MCP agent can drive audiolla as a tool. MIT-licensed. CI now publishes the plugin alongside the skill via the reusable `clawhub-publish.yml`.
+- **Skill + README accuracy fixes** verified against the code: documented `AUDIOLLA_LOAD_TIMEOUT` (cold-load cap, default `300`s), corrected the `/v1/audio/segments` example, plus other drift fixes.
+- `.gitignore`: ignore `.telemetry/`.
+
 ## v1.0.11 — 2026-07-24
 
 Skill packaging + docs. No REST API or service change.

@@ -124,3 +124,4 @@ node_modules/
 # sine-tone via ffmpeg lavfi). Never committed.
 tests/integration/.fixtures/*
 !tests/integration/.fixtures/.gitkeep
+.telemetry/

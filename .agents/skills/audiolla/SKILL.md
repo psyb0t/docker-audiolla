@@ -334,12 +334,12 @@ Finds recurring sections (verse, chorus, bridge…) using a recurrence matrix. R
 curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
   -H 'Content-Type: application/json' \
   $AUDIOLLA_URL/v1/audio/segments \
-  -d '{"file_path":"uploads/track.wav","num_segments":4}'
+  -d '{"file_path":"uploads/track.wav","num_segments":6}'
 # {"segments": [{"label":"A","start_sec":0.0,"end_sec":32.5},
 #               {"label":"B","start_sec":32.5,"end_sec":65.0}, ...]}
 ```
 
-Optional: `num_segments` (int, default 4). Short inputs (fewer beats than `num_segments`) return a single `A` span with a `note` field explaining the fallback.
+Optional: `num_segments` (int, default 6, valid range [2, 32]). Short inputs (fewer beats than `num_segments`) return a single `A` span with a `note` field explaining the fallback.
 
 ### Silence detection and trimming (`/v1/audio/silence`)
 
@@ -785,22 +785,22 @@ curl -X POST -H "Authorization: Bearer $AUDIOLLA_TOKEN" \
 
 audiolla exposes a Model Context Protocol server at `/v1/mcp` using the streamable HTTP transport. Same auth as REST — pass `Authorization: Bearer $AUDIOLLA_TOKEN`.
 
-The MCP contract mirrors REST: every audio tool requires exactly one of `file_path` or `file_url` for input (same `AUDIOLLA_FETCH_MODE` policy as REST), and every audio-producing tool requires exactly one of `output_path` or `output_url` for output. There is **no inline-base64 audio mode** — v1.0.0 dropped every base64 audio/MIDI/image/video response field that existed in v0.23.x because LLMs can't consume raw bytes anyway, and large base64 payloads choke the context window. Every audio-producing tool returns either `{path, size, output_format}` (when `output_path` is set) or `{url, size, output_format}` (when `output_url` is set). The `separate` tool takes `output_urls` as a per-stem dict when uploading each stem to its own presigned URL.
+The MCP contract mostly mirrors REST: every audio tool requires exactly one of `file_path` or `file_url` for input (same `AUDIOLLA_FETCH_MODE` policy as REST), and most audio-producing tools require exactly one of `output_path` or `output_url` for output, returning either `{path, size, output_format}` or `{url, size, output_format}`. There are narrow exceptions where the MCP transport still returns inline base64 instead of staging — see the `beats`/`melody`/`silence` rows below.
+
+The table below is a curated subset — the server exposes ~78 MCP tools total (one per REST endpoint, roughly), including ops like `trim`, `mix`, `concat`, `fade`, `reverse`, `loop`, `speed`, `convert`, `pan`, `eq`, `key_match`, `bpm_match`, `stereo_width`, `mid_side`, `sidechain_duck`, `multiband_compress`, `transient_shaper`, `convolution_reverb`, `deess`, `dj_prep`, `pitch_correct`, `repair_audio`, `find_loop_point`, `chords`, `chords_to_midi`, `vad`, `diarize`, `stretch`, `tag`, `embed`, `classify`, `similar`, `hpss`, `noise_reduce`, `detect_clipping`, `slice_at_beats`, `audio_thumbnail`, `stereo_field`, `midi_quantize`, `midi_humanize`, `drum_pattern`, `generate_music`, `list_presets`, `describe_preset`, `run_preset`, `list_ops`, `run_pipeline_tool`, `audio_metadata`, `info`, and job control (`list_jobs`, `get_job`, `cancel_job`). Each mirrors its REST counterpart's params 1:1 (see the REST reference above for the full param list of each) — connect an MCP client and call `list_engines`/introspect the tool list, or check `GET /v1/catalog`, for the authoritative current set.
 
 | Tool | Inputs | Output |
 |------|--------|--------|
 | `list_engines` | — | engine catalog with `loaded` flag |
-| `separate` | `engine`, `stems`, `file_path` or `file_url`, `output_path` or `output_url` or `output_urls: {stem: url}` | `{path, size}` / `{url, size}` / `{uploaded_stems: {stem: {url, size}}}` |
+| `separate` | `engine`, `stems`, `file_path` or `file_url`, `output_paths: {stem: path}` or `output_urls: {stem: url}` (one of the two maps is required — no single `output_path`/`output_url`) | `{staged_stems: {stem: {path, size}}, output_format}` or `{uploaded_stems: {stem: {url, size}}, output_format}` |
 | `master` | `mode`, `file_path` or `file_url`, `reference_path` or `reference_url` (mode=reference), `preset` (mode=chain), `target_lufs`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
 | `analyze` | `file_path` or `file_url`, `features` | librosa feature dict |
-| `beats` | `file_path` or `file_url`, `click_track`, `hop_length`, `output_path` or `output_url` (only when `click_track=true`) | `{bpm, beats, ...}` (+ click track `{path}` / `{url}` if `click_track=true`) |
-| `onsets` | `file_path` or `file_url`, `backtrack`, `hop_length`, `delta` | `{onsets, count, ...}` |
-| `melody` | `file_path` or `file_url`, `as_midi`, `fmin`, `fmax`, `output_path` or `output_url` (only when `as_midi=true`) | `{melody: [{time, hz}, ...], ...}` (+ MIDI `{path}` / `{url}` if `as_midi=true`) |
-| `segments` | `file_path` or `file_url`, `num_segments` | `{segments: [{label, start_sec, end_sec}, ...]}` |
-| `silence` | `file_path` or `file_url`, `threshold_db`, `min_duration_sec`, `trim_mode`, `output_path` or `output_url` (only when `trim_mode` set) | `{silent_ranges, non_silent_ranges, duration, ...}` (+ trimmed audio `{path}` / `{url}` if `trim_mode` set) |
-| `spectrogram` | `file_path` or `file_url`, `width`, `height`, `color`, `scale`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
-| `waveform` | `file_path` or `file_url`, `width`, `height`, `color`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
-| `visualize` | `file_path` or `file_url`, `mode`, `width`, `height`, `fps`, `container`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
+| `beats` | `file_path` or `file_url`, `click_track`, `output_format` | `{tempo_bpm, beats, beat_count, duration}` — with `click_track=true`, adds `click_track_base64` (inline base64, NOT staged — no `output_path`/`output_url` param on this tool) |
+| `onsets` | `file_path` or `file_url` | `{onsets, ...}` |
+| `melody` | `file_path` or `file_url`, `fmin`, `fmax`, `as_midi` | pitch contour — with `as_midi=true`, adds `midi_base64` (inline base64, NOT staged — no `output_path`/`output_url` param on this tool) |
+| `segments` | `file_path` or `file_url`, `num_segments` (default 6) | `{segments: [{label, start_sec, end_sec}, ...]}` |
+| `silence` | `file_path` or `file_url`, `threshold_db`, `min_duration_sec`, `trim_mode`, `output_format` | `{silent_ranges, non_silent_ranges, duration, ...}` — with `trim_mode` set, adds `trimmed_audio_base64` (inline base64, NOT staged — no `output_path`/`output_url` param on this tool) |
+| `visualize` | `file_path` or `file_url`, `engine`, `mode` (`spectrogram`/`waveform` for static PNG, or `spectrum`/`waves`/`cqt`/`freqs`/`volume`/`vectorscope`/`phasemeter`/`histogram` for animated video), `width`, `height`, `color`, `scale`, `fps`, `container`, `output_path` or `output_url` | `{path, size}` or `{url, size}` — replaces the separate `spectrogram`/`waveform` REST endpoints as one tool with a `mode` switch |
 | `fingerprint` | `file_path` or `file_url`, `analyze_seconds`, `return_raw` | `{duration, fingerprint, fingerprint_raw?}` |
 | `transform` | `operations`, `file_path` or `file_url`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
 | `loudness` | `file_path` or `file_url` | `{loudness_lufs}` — measurement only |
@@ -811,9 +811,8 @@ The MCP contract mirrors REST: every audio tool requires exactly one of `file_pa
 | `midi_transform` | `file_path` or `file_url` (MIDI), `transpose_semitones`, `tempo_bpm`, `quantize`, `keep_channels`, `drop_channels`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
 | `midi_render` | `file_path` or `file_url` (MIDI), `soundfont_path`, `gain`, `samplerate`, `output_format`, `output_path` or `output_url` | `{path, size}` or `{url, size}` |
 | `midi_generate` | `spec`, `soundfont_path`, `gain`, `samplerate`, `output_format`, `output_path` or `output_url` | `{path, size, midi_size}` or `{url, size, midi_size}` |
-| `dereverb` | `file_path` or `file_url`, `engine`, `output_format`, `output_path` or `output_url` | `{path, size, engine, output_format}` or `{url, size, engine, output_format}` |
-| `deecho` | `file_path` or `file_url`, `engine`, `output_format`, `output_path` or `output_url` | `{path, size, engine, output_format}` or `{url, size, engine, output_format}` |
-| `denoise` | `file_path` or `file_url`, `engine`, `output_format`, `output_path` or `output_url` | `{path, size, engine, output_format}` or `{url, size, engine, output_format}` |
+| `restore` | `file_path` or `file_url`, `engine` (default `uvr-dereverb`; also `uvr-deecho`, `uvr-denoise`), `aggressive` (uvr-deecho only), `output_format`, `output_url` only (no `output_path` on this tool — inline base64 is not returned either; `output_url` is required) | `{url, size, engine, aggressive, output_format}` |
+| `denoise` | `file_path` or `file_url`, `engine`, `output_format`, `output_path` or `output_url` | `{path, size, engine, output_format}` or `{url, size, engine, output_format}` — thin shim over `restore`/`noise_reduce` |
 | `audio_to_midi` | `file_path` or `file_url`, `engine`, `onset_threshold`, `frame_threshold`, `minimum_note_length_ms`, `minimum_frequency`, `maximum_frequency`, `multiple_pitch_bends`, `melodia_trick`, `output_path` or `output_url` | `{path, size, engine}` or `{url, size, engine}` |
 | `enhance` | `file_path` or `file_url`, `engine`, `output_format`, `output_path` or `output_url` | `{path, size, engine, output_format}` or `{url, size, engine, output_format}` |
 | `list_files` | — | `{files: [...]}` |
@@ -821,7 +820,7 @@ The MCP contract mirrors REST: every audio tool requires exactly one of `file_pa
 | `get_file` | `path` | `{path, size}` (the bytes themselves are fetched via REST `GET /v1/files/{path}`) |
 | `delete_file` | `path` | `{deleted}` |
 
-Audio over MCP is **strictly path/URL-based** — JSON-RPC can't carry raw bytes efficiently and the v1.0.0 contract enforces this everywhere. For inputs: pre-stage via REST `PUT /v1/files/{path}` (or the `put_file` MCP tool for small files) and pass `file_path`, or pass `file_url` when fetch is enabled. For outputs: pick `output_path` to keep the result in staging (chain it as the next call's `file_path`), or `output_url` to PUT it to S3-style storage.
+Audio over MCP is **path/URL-based for inputs and for most audio-producing outputs** — JSON-RPC can't carry raw bytes efficiently, so the v1.0.0 contract enforces this on nearly every tool. For inputs: pre-stage via REST `PUT /v1/files/{path}` (or the `put_file` MCP tool for small files) and pass `file_path`, or pass `file_url` when fetch is enabled. For outputs: pick `output_path` to keep the result in staging (chain it as the next call's `file_path`), or `output_url` to PUT it to S3-style storage. Exceptions: `beats` (click track), `melody` (as_midi), and `silence` (trim) still return their secondary audio/MIDI artifact as inline base64 rather than staging it — see the table above.
 
 The MCP endpoint is at `$AUDIOLLA_URL/v1/mcp`. It is JSON-RPC over streamable HTTP; do not try to describe it in OpenAPI or hit it with raw curl — use an MCP client.
 

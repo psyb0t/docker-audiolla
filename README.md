@@ -361,7 +361,7 @@ curl -X POST http://localhost:8000/v1/audio/melody \
 # structural segmentation — labels recurring sections A, B, C...
 curl -X POST http://localhost:8000/v1/audio/segments \
   -H 'Content-Type: application/json' \
-  -d '{"file_path":"uploads/track.wav","num_segments":4}'
+  -d '{"file_path":"uploads/track.wav","num_segments":6}'
 ```
 
 Beat detection also generates a click-track file when `click_track=true` (set `output_path` to receive it) — handy for aligning a mix to a grid. Pass `start_bpm=140` to seed the tracker when you already know the rough tempo (faster, more accurate). Melody can be exported as a single-track MIDI file via `as_midi=true` + `output_path`.
@@ -2262,6 +2262,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
 | `AUDIOLLA_SWEEPER_INTERVAL` | `60` | how often the idle sweeper checks, in seconds |
+| `AUDIOLLA_LOAD_TIMEOUT` | `300` | seconds allowed for an engine's cold load before it's treated as failed (also accepts `5m`, etc.) |
 | `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (200 MB) — also caps URL fetch body size |
 | `AUDIOLLA_FETCH_MODE` | `disabled` | `disabled`, `allowlist`, or `denylist` — controls server-side fetching for file_url / output_url |
 | `AUDIOLLA_FETCH_HOSTS` | _(none)_ | comma-separated host patterns (`bucket.s3.amazonaws.com`, `*.s3.amazonaws.com`). Required when mode=allowlist. |
@@ -2270,7 +2271,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 | `AUDIOLLA_FETCH_TIMEOUT` | `30` | hard timeout per fetch/upload, in seconds (also accepts `30s`, `1m`) |
 | `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each Location re-validated through the policy |
 | `AUDIOLLA_JOB_TTL` | `3600` | Seconds a completed/failed/cancelled job stays in memory before being swept. Also accepts `1h`, `30m`. |
-| `AUDIOLLA_JOB_MAX_CONCURRENT` | `8` | Maximum number of async jobs that can run simultaneously. |
+| `AUDIOLLA_JOB_MAX_CONCURRENT` | `8` | Parsed at startup for future async-job concurrency limiting; not yet enforced anywhere in the current build. |
 | `AUDIOLLA_SOUNDFONT` | `/usr/share/sounds/sf2/FluidR3_GM.sf2` (prod images) | Default SoundFont path for `/v1/midi/render`. Override per request via `soundfont_path`. |
 
 ---
@@ -2279,7 +2280,7 @@ Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints —
 
 | | Why |
 |-|-----|
-| MusicGen / MAGNeT / JASCO | CC-BY-NC weights. Outclassed by ACE-Step (Apache 2.0) and DiffRhythm (Apache 2.0), both shipping in the box as of v1.0.0. |
+| MAGNeT / JASCO | CC-BY-NC weights, same family as MusicGen (which does ship, gated behind `AUDIOLLA_ENABLE_NONCOMMERCIAL=1`). ACE-Step and DiffRhythm (both Apache 2.0, full-song generation) are researched but not shipped in v1.0.0 either — see "Deferred to a future release" above for why. |
 | YuE 7B | Apache 2.0 but realistically needs 16-24 GB VRAM at fp16; doesn't fit comfortably on a 12 GB GPU without int4 quant tooling. Revisit when a 2B or quantised variant lands. |
 | Essentia analysis | AGPL v3 — any network service using it has to publish full source. librosa handles the common cases without that. |
 | Streaming separation | Demucs needs the whole file. No chunked or real-time inference. |

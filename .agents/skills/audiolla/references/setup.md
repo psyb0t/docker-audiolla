@@ -57,6 +57,11 @@ All config is via environment variables passed at `docker run`:
 | `AUDIOLLA_FETCH_TIMEOUT` | `30` | per-fetch/upload timeout (seconds; also accepts `30s`, `1m`) |
 | `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each `Location` re-validated through the policy |
 | `AUDIOLLA_SOUNDFONT` | `/usr/share/sounds/sf2/FluidR3_GM.sf2` (prod images) | Default SoundFont (`.sf2`) path used by `/v1/midi/render`. Empty = midi-render refuses unless `soundfont_path` is passed on the request. Prod images install FluidR3_GM via `apt install fluid-soundfont-gm`. |
+| `AUDIOLLA_UVR_MODELS_DIR` | `/data/uvr_models` | directory holding UVR (`audio-separator`) `.ckpt`/`.pth` model files for `uvr-dereverb`, `uvr-deecho`, `uvr-denoise`, `uvr-karaoke`, `uvr-vocal-bsr` — not bundled in the image |
+| `AUDIOLLA_ENABLE_NONCOMMERCIAL` | `false` | opt-in gate (`1`/`true`/`yes`/`on`) required to use CC-BY-NC-licensed `musicgen-small` / `musicgen-medium` weights |
+| `AUDIOLLA_LOAD_TIMEOUT` | `300` | seconds allowed for an engine's cold load before it's treated as failed (also accepts Go-style durations) |
+| `AUDIOLLA_JOB_TTL` | `3600` | seconds a completed/failed async job's record is retained before eviction |
+| `AUDIOLLA_JOB_MAX_CONCURRENT` | `8` | parsed at startup for future async-job concurrency limiting; not yet enforced anywhere in the current build |
 
 ### Authentication
 
