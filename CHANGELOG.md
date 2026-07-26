@@ -5,6 +5,12 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.1.1 — 2026-07-26
+
+Third-party license notices. Documentation only, no behavior or API change.
+
+- Added `THIRD_PARTY.md` documenting the licenses of GPL components pulled into the published image — matchering + pedalboard (GPL-3.0), and mutagen / sox / ffmpeg (GPL-2.0+) — with full license texts under `LICENSES/`. The project's own code stays WTFPL.
+
 ## v1.1.0 — 2026-07-25
 
 ClawHub plugin + skill/README accuracy pass. No REST API or service change.
