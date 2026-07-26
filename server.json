@@ -1,0 +1,9 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.psyb0t/audiolla",
+  "title": "Audiolla",
+  "description": "Self-hosted MCP server: audio stems, mastering, MIR analysis, DSP, MIDI, speech tools.",
+  "version": "0.0.0",
+  "repository": { "url": "https://github.com/psyb0t/docker-audiolla", "source": "github" },
+  "packages": [ { "registryType": "oci", "identifier": "docker.io/psyb0t/audiolla:latest", "runtimeHint": "docker", "transport": { "type": "streamable-http", "url": "http://localhost:8000/v1/mcp" } } ]
+}

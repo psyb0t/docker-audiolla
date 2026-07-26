@@ -63,6 +63,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS runtime
 
+# MCP Registry ownership label — required for io.github.psyb0t/audiolla publishing.
+LABEL io.modelcontextprotocol.server.name="io.github.psyb0t/audiolla"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
