@@ -1,9 +1,8 @@
 # audiolla
 
+[![version](https://raw.githubusercontent.com/psyb0t/docker-audiolla/badges/version.svg)](https://github.com/psyb0t/docker-audiolla/releases)
+[![license](https://raw.githubusercontent.com/psyb0t/docker-audiolla/badges/license.svg)](LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/psyb0t/audiolla?style=flat-square)](https://hub.docker.com/r/psyb0t/audiolla)
-[![Docker Hub](https://img.shields.io/docker/v/psyb0t/audiolla?sort=semver&label=Docker%20Hub&style=flat-square)](https://hub.docker.com/r/psyb0t/audiolla)
-[![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg?style=flat-square)](http://www.wtfpl.net/)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 
 **Thirty audio engines. One port. Zero cloud. Fire-and-forget async jobs. Webhooks.**
 

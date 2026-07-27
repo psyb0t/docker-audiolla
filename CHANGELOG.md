@@ -5,6 +5,10 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.1.3 — 2026-07-27
+
+- Added self-hosted version and license badges plus a Docker Hub pulls badge; wired a badges job into pipeline.yml.
+
 ## v1.1.2 — 2026-07-26
 
 Listed on the official MCP Registry — no behavior change.
