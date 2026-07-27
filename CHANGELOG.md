@@ -5,6 +5,13 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.1.6 — 2026-07-27
+
+README fix. Documentation only, no behavior or API change.
+
+- The `## Agent integrations` → Codex subsection was missing its install command — it told readers to run `codex plugin marketplace add psyb0t/agents` and stopped, unlike the Claude Code subsection above it. Added the missing `codex plugin add audiolla@psyb0t` line.
+- Corrected the invocation prose, which conflated two different paths: a plugin installed via the marketplace invokes its skill as `$audiolla:audiolla`, while Codex's automatic pickup of `.agents/skills/` in any repo (no install) invokes the same skill as plain `$audiolla`.
+
 ## v1.1.5 — 2026-07-27
 
 Agent-integration manifests. Documentation only, no behavior or API change.

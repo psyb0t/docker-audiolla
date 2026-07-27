@@ -2266,10 +2266,12 @@ stored in your OS keychain.
 
 ```bash
 codex plugin marketplace add psyb0t/agents
+codex plugin add audiolla@psyb0t
 ```
 
-Codex also picks the skill up automatically in any repo containing `.agents/skills/`, and
-invokes it as `$audiolla`.
+Installed via the marketplace, the skill invokes as `$audiolla:audiolla`. Codex also picks
+the skill up automatically, no install needed, in any repo containing `.agents/skills/`,
+where it invokes as plain `$audiolla`.
 
 ### OpenClaw
 
