@@ -5,6 +5,13 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.1.5 — 2026-07-27
+
+Agent-integration manifests. Documentation only, no behavior or API change.
+
+- Added `.agents/.claude-plugin/plugin.json` and `.agents/.codex-plugin/plugin.json` so the existing `.agents/skills/audiolla` skill installs natively via `claude plugin install audiolla@psyb0t` and `codex plugin marketplace add psyb0t/agents`.
+- Added a `## Agent integrations` README section (with Table of Contents entry) documenting the Claude Code, Codex, and OpenClaw install paths, including the existing `@psyb0t/audiolla` MCP-bridge plugin.
+
 ## v1.1.4 — 2026-07-27
 
 - Added a GitHub Actions CI status badge to the README.

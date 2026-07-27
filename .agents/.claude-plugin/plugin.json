@@ -1,0 +1,22 @@
+{
+  "name": "audiolla",
+  "description": "Self-hosted audio-production API — stem separation, mastering, MIR analysis, DSP chains, MIDI, and AI restoration over REST and MCP.",
+  "author": { "name": "psyb0t", "url": "https://github.com/psyb0t" },
+  "homepage": "https://github.com/psyb0t/docker-audiolla",
+  "license": "WTFPL",
+  "keywords": ["audio", "demucs", "stem-separation", "mastering", "midi", "mir-analysis", "dsp", "mcp"],
+  "userConfig": {
+    "audiolla_url": {
+      "type": "string",
+      "title": "audiolla URL",
+      "description": "Base URL of your running audiolla server (AUDIOLLA_URL), e.g. http://localhost:8000.",
+      "required": true
+    },
+    "audiolla_token": {
+      "type": "string",
+      "title": "audiolla auth token",
+      "description": "Bearer token (AUDIOLLA_AUTH_TOKEN). Only needed if the server was started with AUDIOLLA_AUTH_TOKEN set.",
+      "sensitive": true
+    }
+  }
+}

@@ -158,6 +158,7 @@ No account. No subscription. No per-minute billing. No vendor lock-in. `docker r
 - [API catalog](#api-catalog)
 - [Endpoints](#endpoints)
 - [MCP](#mcp)
+- [Agent integrations](#agent-integrations)
 - [Configuration](#configuration)
 - [What's not in here](#whats-not-in-here)
 - [Build & dev](#build--dev)
@@ -2243,6 +2244,49 @@ Audio-producing MCP tools follow the same contract as REST: callers MUST pass ex
 | `delete_file` | Remove a staged file |
 
 Auth (`AUDIOLLA_AUTH_TOKEN`) covers `/v1/mcp` the same as the REST endpoints — pass the bearer token in the `Authorization` header.
+
+---
+
+## Agent integrations
+
+The [skill](.agents/skills/audiolla) works in any agent that reads `.agents/skills/`, and
+installs natively in the clients below.
+
+### Claude Code
+
+```bash
+claude plugin marketplace add psyb0t/agents
+claude plugin install audiolla@psyb0t
+```
+
+Claude Code prompts for the audiolla URL and, if auth is enabled, the token — the token is
+stored in your OS keychain.
+
+### Codex
+
+```bash
+codex plugin marketplace add psyb0t/agents
+```
+
+Codex also picks the skill up automatically in any repo containing `.agents/skills/`, and
+invokes it as `$audiolla`.
+
+### OpenClaw
+
+The skill is published to ClawHub on every release:
+
+```bash
+openclaw skills install @psyb0t/audiolla
+```
+
+For MCP clients that speak local stdio, the [`@psyb0t/audiolla`](.agents/plugins/audiolla)
+plugin bridges to the running server's `/v1/mcp` endpoint:
+
+```bash
+openclaw plugins install clawhub:@psyb0t/audiolla
+```
+
+Then set `AUDIOLLA_URL` (and `AUDIOLLA_AUTH_TOKEN` if the server has auth enabled).
 
 ---
 
