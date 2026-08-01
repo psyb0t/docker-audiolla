@@ -5,6 +5,22 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v1.1.7 — 2026-08-01
+
+Infrastructure only. No behavior, image, or API change — every commit in this
+release touches `.github/workflows/`.
+
+- The pipeline was split: building and publishing stay in `pipeline.yml`, and
+  everything that leaves the host now lives beside it in
+  `mirror-and-archive.yml`.
+- The repository is mirrored to Codeberg as well as GitLab.
+- It is archived to the Wayback Machine, Software Heritage, and archive.org.
+- Issues opened on either mirror are copied back to GitHub every six hours, and
+  the GitHub copy is closed when the original closes.
+- Pull requests are switched off on both mirrors. They are force-pushed from
+  GitHub, so anything merged on a mirror would be destroyed by the next sync.
+  Issues and forking stay enabled.
+
 ## v1.1.6 — 2026-07-27
 
 README fix. Documentation only, no behavior or API change.
