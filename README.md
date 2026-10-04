@@ -1814,6 +1814,8 @@ Delivery has 4 attempts with exponential backoff (0 s, 1 s, 2 s, 4 s). Completed
 
 A simple server-side file store under `/v1/files`. Upload, list, download, delete.
 
+Staged inputs and outputs expire after 24 hours by default. Change `AUDIOLLA_FILES_TTL` to a duration such as `48h` or `86400` seconds; `0` disables cleanup. When upgrading from v1, set `AUDIOLLA_FILES_TTL=0` before starting the new image if existing files must stay indefinitely. Age runs from the last write, not the last read. The sweep runs every `AUDIOLLA_SWEEPER_INTERVAL` seconds and waits for active requests, downloads, and background jobs to finish, including when CPU and CUDA containers share `/data`. Continuous activity can defer cleanup. Model caches, symlinks, and `.part` files are excluded. Download anything you want to keep before it expires. Job metadata retention (`AUDIOLLA_JOB_TTL`) is separate from file retention.
+
 ```bash
 # upload
 curl -X PUT http://localhost:8000/v1/files/mytrack.wav \
@@ -2307,7 +2309,8 @@ Then set `AUDIOLLA_URL` (and `AUDIOLLA_AUTH_TOKEN` if the server has auth enable
 | `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
 | `AUDIOLLA_PRELOAD` | — | comma-separated slugs to load at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
-| `AUDIOLLA_SWEEPER_INTERVAL` | `60` | how often the idle sweeper checks, in seconds |
+| `AUDIOLLA_FILES_TTL` | `24h` | Retention age for staged input/output files. Accepts seconds or h/m/s durations. `0` disables cleanup. |
+| `AUDIOLLA_SWEEPER_INTERVAL` | `60` | How often engine-idle and staged-file cleanup check, in seconds. Must be finite and positive. |
 | `AUDIOLLA_LOAD_TIMEOUT` | `300` | seconds allowed for an engine's cold load before it's treated as failed (also accepts `5m`, etc.) |
 | `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (200 MB) — also caps URL fetch body size |
 | `AUDIOLLA_FETCH_MODE` | `disabled` | `disabled`, `allowlist`, or `denylist` — controls server-side fetching for file_url / output_url |
@@ -2337,9 +2340,14 @@ Then set `AUDIOLLA_URL` (and `AUDIOLLA_AUTH_TOKEN` if the server has auth enable
 
 ## Build & dev
 
+Both images inherit the Python 3.12, Torch 2.5.1 CPU/cu124 variants from [Torchbase](https://github.com/psyb0t/torchbase), pinned to v0.1.1 and their published digests. Audiolla installs its audio stack on top. Source is copied after dependency installation, so editing Python code does not reinstall Torch or audio dependencies. `TORCHBASE_CPU_IMAGE` and `TORCHBASE_CUDA_IMAGE` override the base when building with Make. Builds tag the image with the version from `pyproject.toml`, plus `latest` or `latest-cuda`, and the local test tag.
+
+Torch 2.5.1 is retained for audio-stack compatibility. It is affected by [CVE-2025-32434](https://github.com/pytorch/pytorch/security/advisories/GHSA-53q9-r3pm-6pq6). Use trusted, verified model checkpoints only, including files mounted into the model cache. This base migration does not fix that vulnerability.
+
 ```bash
 make build        # CPU image
 make build-cuda   # CUDA image
+make version      # print the version used for image tags and package metadata
 make run          # CPU image on port 8000
 make run-cuda     # CUDA image on port 8000
 ```
@@ -2350,6 +2358,9 @@ make shell              # shell inside it
 make lint               # flake8 + mypy
 make format             # isort + black
 make test-unit          # unit tests (no GPU, no ML deps needed)
+make test-retention     # retention tests with a 90% module coverage gate
+make test-image         # real tensors, DSP, jobs and cleanup in the built CPU image
+make test-image DEVICE=cuda # same checks in the built CUDA image, requires a GPU
 make test-unit-cov-gate # fail if coverage on support modules drops below 80%
 make test-integration   # integration tests (spins up Docker containers)
 make generate           # regenerate src/audiolla/schema/ from openapi.yaml
@@ -2362,10 +2373,11 @@ make pkg-add PKG=name[==ver]  # add a dep
 make pkg-update PKG=name      # upgrade one dep
 make pkg-upgrade              # upgrade everything
 make pkg-remove PKG=name      # remove a dep
-make pkg-compile-heavy        # recompile requirements-heavy-{cpu,cuda}.txt
+make pkg-compile-heavy        # recompile both heavy locks, preserving existing versions
+make pkg-compile-heavy VARIANT=cuda # recompile only the CUDA lock
 ```
 
-Every `make pkg-*` bumps `[tool.uv] exclude-newer` to UTC midnight **7 days before** the bump date before touching anything — packages published in the last week are invisible to the resolver. The 7-day floor is the supply-chain attack window: fresh wheels (typosquats, hijacked maintainer releases) typically get caught and yanked within hours-to-days, so the floor gives malicious uploads a week of community scrutiny before they're eligible to enter the lockfile. Everything runs inside the dev container. Host needs `docker`, `make`, `git`.
+`pkg-add`, `pkg-remove`, `pkg-update`, and `pkg-upgrade` refresh `[tool.uv] exclude-newer` to UTC midnight seven days before the operation. `pkg-lock` honors the current cutoff. Heavy-lock compilation uses the separately pinned `HEAVY_EXCLUDE_NEWER` cutoff in `scripts/compile_heavy_deps.sh` and constrains resolution to existing output pins; changing wheel flavor does not upgrade unrelated packages. An intentional dependency upgrade requires reviewing those pins and the cutoff. Everything runs inside the dev container. Host needs `docker`, `make`, `git`.
 
 ---
 

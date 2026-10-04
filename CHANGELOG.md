@@ -5,6 +5,15 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v2.0.0. 2026-10-04
+
+Staged files now expire after 24 hours by default. Before upgrading an installation that must keep files indefinitely, set `AUDIOLLA_FILES_TTL=0`. REST and MCP request shapes are unchanged.
+
+- Add configurable staged-file retention with a 24-hour default, disabled with `AUDIOLLA_FILES_TTL=0`. Cross-process leases prevent cleanup during requests and background jobs sharing the same data directory.
+- Reuse Torchbase's Python 3.12 and Torch 2.5.1 CPU/cu124 layers. Copy application source after audio dependencies so source edits preserve the expensive dependency cache.
+- Keep Docker integration tests out of the offline unit-test target.
+- Derive runtime version metadata from the installed package and synchronize the API and agent plugin versions.
+
 ## v1.1.7 — 2026-08-01
 
 Infrastructure only. No behavior, image, or API change — every commit in this

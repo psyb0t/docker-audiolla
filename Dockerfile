@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# CPU image — python:3.12-slim + ffmpeg + sox + Demucs CPU + matchering +
+# CPU image: Torchbase + ffmpeg + sox + Demucs CPU + matchering +
 # pedalboard + pyloudnorm + librosa + pysox.
 #
 # Note on GPL: matchering and pedalboard are GPL v3. This image is for
@@ -8,25 +8,27 @@
 # GPL compliance review is required.
 #
 # Supply chain:
-#   - Lightweight runtime deps installed via `uv sync --frozen --no-dev`
+#   - Lightweight runtime deps exported with `uv export --frozen --no-dev`
 #     against uv.lock — uv verifies sdist/wheel hashes from the lockfile.
 #   - Heavy ML/DSP deps installed via `uv pip install --require-hashes -r
 #     requirements-heavy-cpu.txt` — hashes pinned via
 #     scripts/compile_heavy_deps.sh.
 
-FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS builder
+ARG TORCHBASE_IMAGE=psyb0t/torchbase:py3.12-torch2.5.1-v0.1.1-cpu@sha256:805f9ea0ad6a815b144e5d110cc762bd4e976e5ba1f6682ea347a485db0d7b37
+FROM ${TORCHBASE_IMAGE} AS dependencies
+
+USER root
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PROJECT_ENVIRONMENT=/opt/venv
+    UV_PROJECT_ENVIRONMENT=/opt/torch-venv
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
         git \
-        curl \
-        cargo \
+        ffmpeg sox libsndfile1 libgomp1 libatomic1 \
+        fluidsynth fluid-soundfont-gm libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.15@sha256:e590846f4776907b254ac0f44b5b380347af5d90d668138ca7938d1b0c2f98d3 /uv /usr/local/bin/uv
@@ -36,16 +38,20 @@ WORKDIR /app
 # 1) Lightweight runtime deps from the lockfile. Frozen install fails if
 #    uv.lock is out of date relative to pyproject.toml.
 COPY pyproject.toml uv.lock ./
-COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+    uv export --frozen --no-dev --group build --no-emit-project --format requirements.txt --output-file /tmp/runtime-requirements.txt \
+    && uv pip install --python /opt/torch-venv/bin/python --require-hashes -r /tmp/runtime-requirements.txt \
+    && python -c "import torch; assert torch.__version__ == '2.5.1+cpu'"
+
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cargo \
+    && rm -rf /var/lib/apt/lists/*
 
 # 2) Heavy ML / DSP deps — CPU torch for demucs, hash-locked requirements.
 #    See scripts/heavy-deps-cpu.in for the human spec. Pins/licenses:
 #    demucs 4.0.1 (MIT), matchering 2.0.6 (GPL v3), pedalboard 0.9.20 (GPL v3),
 #    pyloudnorm 0.1.1 (MIT), librosa 0.10.2 (ISC), sox 1.4.1 (BSD-3),
-#    torch 2.5.1+cpu, torchaudio 2.5.1+cpu, numpy 1.26.4,
-#    soundfile 0.12.1, huggingface-hub 0.30.2.
+#    torch 2.5.1+cpu, torchaudio 2.5.1+cpu, numpy 2.1.3,
+#    soundfile 0.12.1, huggingface-hub 0.34.6.
 COPY requirements-heavy-cpu.txt ./
 # deepfilternet==0.5.6 declares numpy<2.0 (overly conservative; works fine
 # with 2.x). Extract the full numpy block (with hashes) from the requirements
@@ -53,22 +59,26 @@ COPY requirements-heavy-cpu.txt ./
 # Tensorflow exclusion prevents resolution of basic-pitch's optional dep.
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -c "import re,sys; txt=open('requirements-heavy-cpu.txt').read(); m=re.search(r'(numpy==[\d.]+(?:\s*\\\\\n\s+--hash=sha256:[a-f0-9]+)+)', txt); open('/tmp/np-override.txt','w').write(m.group(1).rstrip(' \\\\\n')+'\ntensorflow ; sys_platform == \"never\"\ntensorflow-cpu ; sys_platform == \"never\"\n') if m else sys.exit('numpy block not found')" && \
-    uv pip install --python /opt/venv/bin/python --no-config \
+    uv pip install --python /opt/torch-venv/bin/python --no-config \
         --extra-index-url https://download.pytorch.org/whl/cpu \
         --index-strategy unsafe-best-match \
         --require-hashes \
         --override /tmp/np-override.txt \
-        -r requirements-heavy-cpu.txt
+        -r requirements-heavy-cpu.txt \
+    && python -c "import torch, torchaudio; assert torch.__version__ == '2.5.1+cpu'; assert torchaudio.__version__ == '2.5.1+cpu'"
+
+RUN apt-get purge -y --auto-remove build-essential cargo \
+    && rm -rf /root/.cache /tmp/np-override.txt
 
 # -----------------------------------------------------------------------------
-FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2 AS runtime
+FROM dependencies AS runtime
 
 # MCP Registry ownership label — required for io.github.psyb0t/audiolla publishing.
 LABEL io.modelcontextprotocol.server.name="io.github.psyb0t/audiolla"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:$PATH" \
+    PATH="/opt/torch-venv/bin:$PATH" \
     PYTHONPATH=/app/src \
     TZ=UTC \
     AUDIOLLA_DEVICE=cpu \
@@ -78,36 +88,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/data/hf \
     HF_HUB_OFFLINE=0
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        sox \
-        libsndfile1 \
-        libgomp1 \
-        libatomic1 \
-        fluidsynth \
-        fluid-soundfont-gm \
-        libchromaprint-tools \
-        git \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -u 1000 --create-home --shell /bin/bash audiolla \
-    && mkdir -p /data \
-    && chown audiolla:audiolla /data
+RUN mkdir -p /data && chown 1000:1000 /data
 
 WORKDIR /app
 
-COPY --from=builder /opt/venv /opt/venv
-COPY --from=ghcr.io/astral-sh/uv:0.11.15@sha256:e590846f4776907b254ac0f44b5b380347af5d90d668138ca7938d1b0c2f98d3 /uv /usr/local/bin/uv
-COPY --chown=audiolla:audiolla src ./src
-COPY --chown=audiolla:audiolla pyproject.toml ./
-COPY --chown=audiolla:audiolla engines-cpu.json /app/engines.json
-COPY --chown=audiolla:audiolla openapi.yaml /app/openapi.yaml
-COPY --chown=audiolla:audiolla presets /app/presets
-COPY --chown=audiolla:audiolla entrypoint.sh /usr/local/bin/audiolla-entrypoint
+COPY --chown=1000:1000 src ./src
+COPY --chown=1000:1000 pyproject.toml ./
+RUN uv pip install --python /opt/torch-venv/bin/python --no-deps --no-build-isolation .
+COPY --chown=1000:1000 engines-cpu.json /app/engines.json
+COPY --chown=1000:1000 openapi.yaml /app/openapi.yaml
+COPY --chown=1000:1000 presets /app/presets
+COPY --chown=1000:1000 entrypoint.sh /usr/local/bin/audiolla-entrypoint
 RUN chmod +x /usr/local/bin/audiolla-entrypoint
 
-RUN uv pip install --python /opt/venv/bin/python --no-config mutagen==1.47.0
-
-USER audiolla
+USER 1000:1000
 
 EXPOSE 8000
 

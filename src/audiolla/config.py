@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import re
 from pathlib import Path
-import logging
 
 _log = logging.getLogger("audiolla.config")
 
@@ -95,6 +96,11 @@ MODELS_DIR: Path = DATA_DIR / "models"
 
 # Server-side file staging area for the /v1/files API.
 FILES_DIR: Path = DATA_DIR / "files"
+FILES_TTL_SECONDS: float = _duration_env("AUDIOLLA_FILES_TTL", 24 * 3600.0)
+if not math.isfinite(FILES_TTL_SECONDS) or FILES_TTL_SECONDS < 0:
+    raise ValueError(
+        "AUDIOLLA_FILES_TTL must be finite and nonnegative; 0 disables cleanup"
+    )
 
 # Cache directory for UVR (audio-separator) model files.
 # Overridable via AUDIOLLA_UVR_MODELS_DIR.
@@ -106,6 +112,8 @@ UVR_MODELS_DIR: Path = (
 
 ENGINE_IDLE_TIMEOUT_SECONDS: float = _duration_env("AUDIOLLA_ENGINE_TTL", 600.0)
 SWEEPER_INTERVAL_SECONDS: float = _duration_env("AUDIOLLA_SWEEPER_INTERVAL", 60.0)
+if not math.isfinite(SWEEPER_INTERVAL_SECONDS) or SWEEPER_INTERVAL_SECONDS <= 0:
+    raise ValueError("AUDIOLLA_SWEEPER_INTERVAL must be finite and greater than zero")
 LOAD_TIMEOUT_SECONDS: float = _duration_env("AUDIOLLA_LOAD_TIMEOUT", 300.0)
 
 MAX_UPLOAD_BYTES: int = _int_env("AUDIOLLA_MAX_UPLOAD_BYTES", 200 * 1024 * 1024)

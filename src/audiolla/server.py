@@ -52,8 +52,9 @@ from urllib.parse import unquote
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from . import config
+from . import __version__, config
 from . import files as files_mod
+from .file_retention import FileRetention, FileRetentionMiddleware
 from .audio import (
     SUPPORTED_OUTPUT_FORMATS,
     AudioConversionError,
@@ -289,6 +290,23 @@ async def _idle_sweeper() -> None:
 
 _sweeper_task: asyncio.Task[None] | None = None
 _job_sweeper_task: asyncio.Task[None] | None = None
+_file_sweeper_task: asyncio.Task[None] | None = None
+
+
+def _file_retention() -> FileRetention:
+    return FileRetention(config.FILES_DIR)
+
+
+async def _file_sweeper() -> None:
+    while True:
+        try:
+            await asyncio.sleep(config.SWEEPER_INTERVAL_SECONDS)
+            await _file_retention().sweep(config.FILES_TTL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except OSError:
+            log.exception("file retention sweep failed; retrying next interval")
+
 
 # Forward-declared so _lifespan can drive `MCP_SERVER.session_manager.run()`.
 # Assigned to the real FastMCP instance below, before the app starts.
@@ -330,16 +348,24 @@ async def _lifespan(_app: FastAPI):
         except Exception:  # noqa: BLE001
             log.exception("preload %s failed", slug)
 
-    global _sweeper_task, _job_sweeper_task
+    global _sweeper_task, _job_sweeper_task, _file_sweeper_task
     _sweeper_task = asyncio.create_task(_idle_sweeper(), name="audiolla-sweeper")
     _job_sweeper_task = asyncio.create_task(_job_sweeper(), name="audiolla-job-sweeper")
+    _file_sweeper_task = asyncio.create_task(
+        _file_sweeper(), name="audiolla-file-sweeper"
+    )
+    log.info(
+        "file retention: ttl=%gs interval=%gs",
+        config.FILES_TTL_SECONDS,
+        config.SWEEPER_INTERVAL_SECONDS,
+    )
     try:
         # MCP's streamable HTTP transport needs its session manager running
         # for the lifetime of the app.
         async with MCP_SERVER.session_manager.run():
             yield
     finally:
-        for task in (_sweeper_task, _job_sweeper_task):
+        for task in (_sweeper_task, _job_sweeper_task, _file_sweeper_task):
             if task is not None:
                 task.cancel()
                 try:
@@ -350,6 +376,7 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="audiolla",
+    version=__version__,
     description=(
         "Self-hosted audio-production REST API — stem separation, restoration, "
         "mastering, MIR analysis, DSP transforms, loudness, speech enhancement, "
@@ -397,7 +424,7 @@ def _openapi_override():
             from fastapi.openapi.utils import get_openapi  # noqa: PLC0415
             loaded = get_openapi(
                 title=app.title,
-                version="1.0.0",
+                version=__version__,
                 description=app.description,
                 routes=app.routes,
             )
@@ -600,6 +627,7 @@ async def _unhandled_exception_to_json(  # type: ignore[no-untyped-def]
 
 
 # Optional bearer auth covers every route — mounted MCP transport included.
+app.add_middleware(FileRetentionMiddleware, retention=_file_retention)
 app.add_middleware(BearerAuthMiddleware, token=config.AUTH_TOKEN)
 # Per-request log line at the right level (DEBUG for healthz, INFO for 2xx,
 # WARN for 4xx, ERROR for 5xx). Logger name: audiolla.request.
@@ -1037,15 +1065,26 @@ async def _submit_job(
     webhook_url: str | None,
     job_id: str,
 ) -> JSONResponse:
+
     async def _wrap():
         resp = await coro
         if isinstance(resp, JSONResponse):
             return json.loads(resp.body)
         return {"size": len(resp.body) if hasattr(resp, "body") else 0}
 
-    await JOB_QUEUE.submit(
-        _wrap, job_id=job_id, endpoint=endpoint, webhook_url=webhook_url
-    )
+    lease = await _file_retention().acquire()
+    try:
+        await JOB_QUEUE.submit(
+            _wrap,
+            job_id=job_id,
+            endpoint=endpoint,
+            webhook_url=webhook_url,
+            on_done=lease.close,
+        )
+    except BaseException:
+        # Submission failures must release the lease as well as cancellation.
+        lease.close()
+        raise
     return JSONResponse(
         {
             "job_id": job_id,
@@ -4938,7 +4977,6 @@ async def chords_to_midi(req: AudioChordsToMidiRequest) -> Response:
             "size": len(midi_bytes),
         },
     )
-
 
 
 # ── /v1/audio/deess — split-band de-esser ───────────────────────────────────

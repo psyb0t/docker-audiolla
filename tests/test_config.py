@@ -158,3 +158,21 @@ def test_device_rejects_garbage(monkeypatch, fake_registry):
 def test_device_accepts_cuda_n(monkeypatch, fake_registry):
     cfg = _reload_config(monkeypatch, fake_registry, AUDIOLLA_DEVICE="cuda:1")
     assert cfg.DEVICE == "cuda:1"
+
+
+@pytest.mark.parametrize("raw,seconds", [("", 86400), ("24h", 86400), ("0", 0), ("0.5", 0.5)])
+def test_files_ttl(monkeypatch, fake_registry, raw, seconds):
+    cfg = _reload_config(monkeypatch, fake_registry, AUDIOLLA_FILES_TTL=raw)
+    assert cfg.FILES_TTL_SECONDS == seconds
+
+
+@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "1e999", "yesterday"])
+def test_files_ttl_rejects_invalid(monkeypatch, fake_registry, raw):
+    with pytest.raises(ValueError, match="AUDIOLLA_FILES_TTL"):
+        _reload_config(monkeypatch, fake_registry, AUDIOLLA_FILES_TTL=raw)
+
+
+@pytest.mark.parametrize("raw", ["-1", "0", "nan", "inf"])
+def test_sweeper_interval_rejects_invalid(monkeypatch, fake_registry, raw):
+    with pytest.raises(ValueError, match="AUDIOLLA_SWEEPER_INTERVAL"):
+        _reload_config(monkeypatch, fake_registry, AUDIOLLA_SWEEPER_INTERVAL=raw)

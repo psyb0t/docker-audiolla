@@ -75,6 +75,7 @@ class JobQueue:
         job_id: str | None = None,
         endpoint: str,
         webhook_url: str | None = None,
+        on_done: Callable[[], None] | None = None,
     ) -> Job:
         jid = job_id or self.new_id()
         job = Job(id=jid, endpoint=endpoint, webhook_url=webhook_url)
@@ -82,6 +83,9 @@ class JobQueue:
         job._task = asyncio.create_task(
             self._run(job, coro_fn), name=f"audiolla-job-{jid}"
         )
+        if on_done is not None:
+            # Runs even when cancelled before the coroutine starts.
+            job._task.add_done_callback(lambda _task: on_done())
         return job
 
     async def _run(self, job: Job, coro_fn: Callable[[], Awaitable[Any]]) -> None:
@@ -101,7 +105,9 @@ class JobQueue:
             job.error = str(exc)
             _log.exception(
                 "job %s failed (endpoint=%s): %s",
-                job.id, job.endpoint, exc,
+                job.id,
+                job.endpoint,
+                exc,
             )
         finally:
             job.completed_at = time.time()

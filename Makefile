@@ -3,6 +3,9 @@ PORT ?= 8000
 DEV_IMAGE  := psyb0t/audiolla-dev:latest
 CPU_IMAGE  := psyb0t/audiolla:local
 CUDA_IMAGE := psyb0t/audiolla:local-cuda
+TORCHBASE_CPU_IMAGE ?= psyb0t/torchbase:py3.12-torch2.5.1-v0.1.1-cpu@sha256:805f9ea0ad6a815b144e5d110cc762bd4e976e5ba1f6682ea347a485db0d7b37
+TORCHBASE_CUDA_IMAGE ?= psyb0t/torchbase:py3.12-torch2.5.1-v0.1.1-cu124@sha256:11ccac6fafe5c136cbff749f8690ca2a98d0abe84ce6f673df4db2be7a265d63
+VERSION := $(shell awk -F\" '/^version *= *"/ {print $$2; exit}' pyproject.toml)
 
 PYPROJECT := pyproject.toml
 BUMP_HOST := bash scripts/bump_exclude_newer.sh $(PYPROJECT)
@@ -32,11 +35,15 @@ DEV_RUN_TTY := docker run --rm -it \
         run run-cuda \
         test test-unit test-integration \
         lint format check clean \
-        generate \
+        generate version \
+        test-retention test-image \
         pkg-lock pkg-upgrade pkg-add pkg-remove pkg-update pkg-compile-heavy
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+version: ## Print the canonical release version
+	@echo v$(VERSION)
 
 # -----------------------------------------------------------------------------
 # Dev container — every other target depends on this.
@@ -82,19 +89,18 @@ pkg-update: dev-image ## Upgrade ONE package (usage: make pkg-update PKG=name)
 # hash-locked requirements-heavy-{cpu,cuda}.txt — both committed and
 # consumed by Dockerfile / Dockerfile.cuda via `uv pip install
 # --require-hashes`. Re-run this after editing the .in files.
-pkg-compile-heavy: dev-image ## Re-compile hash-locked requirements-heavy-{cpu,cuda}.txt
-	$(BUMP_HOST)
-	$(DEV_RUN) bash scripts/compile_heavy_deps.sh
+pkg-compile-heavy: dev-image ## Re-compile heavy locks preserving versions (VARIANT=cpu/cuda/all)
+	$(DEV_RUN) bash scripts/compile_heavy_deps.sh $(or $(VARIANT),all)
 
 # -----------------------------------------------------------------------------
 # Production image builds.
 # -----------------------------------------------------------------------------
 
 build: ## Build the CPU production image
-	docker build -f Dockerfile -t $(CPU_IMAGE) .
+	docker build --build-arg TORCHBASE_IMAGE=$(TORCHBASE_CPU_IMAGE) -f Dockerfile -t $(CPU_IMAGE) -t psyb0t/audiolla:v$(VERSION) -t psyb0t/audiolla:latest .
 
 build-cuda: ## Build the CUDA production image
-	docker build -f Dockerfile.cuda -t $(CUDA_IMAGE) .
+	docker build --build-arg TORCHBASE_IMAGE=$(TORCHBASE_CUDA_IMAGE) -f Dockerfile.cuda -t $(CUDA_IMAGE) -t psyb0t/audiolla:v$(VERSION)-cuda -t psyb0t/audiolla:latest-cuda .
 
 build-all: build build-cuda ## Build both production images
 
@@ -126,8 +132,21 @@ run-cuda: build-cuda ## Run CUDA image locally (requires --gpus all support)
 
 test: test-unit ## Run unit tests (fast, offline, no GPU)
 
+test-retention: dev-image ## Test staged-file retention and configuration
+	$(DEV_RUN) pytest tests/test_file_retention.py tests/test_config.py tests/test_retention_server.py -v --cov=audiolla.file_retention --cov-fail-under=90
+
+test-image: ## Exercise the built production image (DEVICE=cpu/cuda)
+	docker run --rm $(if $(filter cuda,$(DEVICE)),--gpus all,) \
+		-e AUDIOLLA_DEVICE=$(or $(DEVICE),cpu) \
+		-e RELEASE_VERSION=$(VERSION) \
+		-e AUDIOLLA_DATA_DIR=/tmp/audiolla-image-smoke \
+		-e AUDIOLLA_ENABLED_ENGINES=sox-transform \
+		-e AUDIOLLA_FILES_TTL=60 -e AUDIOLLA_SWEEPER_INTERVAL=0.05 \
+		-v $(PWD)/tests/image_smoke.py:/image_smoke.py:ro \
+		--entrypoint python $(if $(filter cuda,$(DEVICE)),$(CUDA_IMAGE),$(CPU_IMAGE)) /image_smoke.py
+
 test-unit: dev-image ## Run unit tests in the dev container with coverage
-	$(DEV_RUN) pytest tests/ -v \
+	$(DEV_RUN) pytest tests/ --ignore=tests/integration -v \
 		--cov=src/audiolla \
 		--cov-report=term-missing:skip-covered
 
@@ -139,7 +158,7 @@ test-unit: dev-image ## Run unit tests in the dev container with coverage
 # suite under `tests/integration/` covers the engine inference paths
 # end-to-end against the prod image. This gate covers the glue code.
 test-unit-cov-gate: dev-image ## Enforce ≥80% line coverage on support modules
-	$(DEV_RUN) pytest tests/ \
+	$(DEV_RUN) pytest tests/ --ignore=tests/integration \
 		--cov=audiolla.audio \
 		--cov=audiolla.auth \
 		--cov=audiolla.files \

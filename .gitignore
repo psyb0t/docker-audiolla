@@ -14,6 +14,10 @@ credentials.json
 *.pfx
 
 # Dev-level markdown — never commit
+AGENTS.md
+CODEX.local.md
+PLAN.md
+WIP.md
 CLAUDE.md
 implplan.md
 ANUSTIMES*.md
@@ -21,6 +25,9 @@ ANUSTIMES*.md
 .brutal-review-*.md
 *.scratch.md
 NOTES.md
+TODO.md
+.agent_notes/
+.agent_knowledge/
 
 # Local tooling
 git-update.sh
@@ -125,3 +132,5 @@ node_modules/
 tests/integration/.fixtures/*
 !tests/integration/.fixtures/.gitkeep
 .telemetry/
+
+.testing/

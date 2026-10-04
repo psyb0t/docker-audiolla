@@ -5,8 +5,8 @@
 # exists if setuptools is installed. Modern uv/pip envs don't include it by
 # default. Without it, /v1/audio/master mode=reference returns 500.
 setuptools==75.6.0
-torch==2.5.1
-torchaudio==2.5.1
+torch==2.5.1+cu124
+torchaudio==2.5.1+cu124
 demucs==4.0.1
 matchering==2.0.6
 pedalboard==0.9.20

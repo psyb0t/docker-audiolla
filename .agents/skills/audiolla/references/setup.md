@@ -48,7 +48,8 @@ All config is via environment variables passed at `docker run`:
 | `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
 | `AUDIOLLA_PRELOAD` | _(none)_ | comma-separated slugs to load into memory at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
-| `AUDIOLLA_SWEEPER_INTERVAL` | `60` | how often the idle-engine sweeper runs, in seconds |
+| `AUDIOLLA_FILES_TTL` | `24h` | Retention age for staged files; seconds or h/m/s durations, `0` disables cleanup |
+| `AUDIOLLA_SWEEPER_INTERVAL` | `60` | Engine-idle and staged-file sweep interval, finite positive seconds |
 | `AUDIOLLA_MAX_UPLOAD_BYTES` | `209715200` | upload cap (default 200 MB); also caps remote URL fetch body size |
 | `AUDIOLLA_FETCH_MODE` | `disabled` | `disabled` / `allowlist` / `denylist` — server-side fetch policy for `file_url` and `output_url` |
 | `AUDIOLLA_FETCH_HOSTS` | _(none)_ | comma-separated host patterns (`bucket.s3.amazonaws.com`, `*.s3.amazonaws.com`) — required when mode=allowlist |
@@ -146,6 +147,10 @@ docker run -d --rm --name audiolla \
 ```
 
 Preload happens during container startup; the server doesn't accept traffic until preload finishes. Failed preloads log a warning and continue.
+
+### Staged-file retention
+
+Staged input and output files under `/data/files` expire after 24 hours by default. Set `AUDIOLLA_FILES_TTL=48h` to keep them longer or `0` to disable deletion. Before upgrading from v1, set `AUDIOLLA_FILES_TTL=0` if existing files must stay indefinitely. Age is measured from the last write, not reads. Cleanup runs every `AUDIOLLA_SWEEPER_INTERVAL` seconds and is postponed while any processing request, download, or background job holds a shared lease. The lock coordinates containers sharing `/data`; continuous traffic can postpone cleanup. Model caches, symlinks, and `.part` files are not deleted. Download results you need to keep before they expire. `AUDIOLLA_JOB_TTL` only controls job metadata and `AUDIOLLA_ENGINE_TTL` only controls loaded models.
 
 ### Idle unload
 

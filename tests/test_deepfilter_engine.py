@@ -162,9 +162,8 @@ def test_engine_has_required_attributes():
     from audiolla.engines import is_deepfilter_engine
 
     eng = _engine()
-    # Before load, _df_state is not present → should fail the duck-type check.
-    assert not is_deepfilter_engine(eng)
+    assert is_deepfilter_engine(eng)
+    assert not is_deepfilter_engine(object())
 
-    # After load (simulated by setting the attribute), it should pass.
     eng._df_state = MagicMock()
     assert is_deepfilter_engine(eng)

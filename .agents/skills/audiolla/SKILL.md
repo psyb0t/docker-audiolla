@@ -152,6 +152,8 @@ Status codes follow REST conventions:
 
 Engines lazy-load on first use and auto-unload after `AUDIOLLA_ENGINE_TTL` seconds of idle (default 600s). Demucs weights prefetch into `/data/torch_cache/` at container start so the first separation request doesn't pay the cold-download cost.
 
+Download staged results before they expire. Audiolla v2 deletes inactive staged files after 24 hours by default, measured from their last write. Operators can change `AUDIOLLA_FILES_TTL` or set it to `0` to disable deletion. Reading a result does not extend its lifetime. Model-cache retention is separate. See `references/setup.md` before upgrading a server that must preserve existing files.
+
 Use `GET /v1/engines` to confirm what's actually configured on the running server (operators can restrict via `AUDIOLLA_ENABLED_ENGINES`).
 
 ## Output formats
