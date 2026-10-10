@@ -5,6 +5,10 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v2.0.1. 2026-10-10
+
+Documentation only. The README's agent integrations section names [peen](https://github.com/psyb0t/peen) as an example of an agent that reads `.agents/skills/`.
+
 ## v2.0.0. 2026-10-04
 
 Staged files now expire after 24 hours by default. Before upgrading an installation that must keep files indefinitely, set `AUDIOLLA_FILES_TTL=0`. REST and MCP request shapes are unchanged.

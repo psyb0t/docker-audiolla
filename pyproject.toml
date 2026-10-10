@@ -1,6 +1,6 @@
 [project]
 name = "audiolla"
-version = "2.0.0"
+version = "2.0.1"
 description = "Self-hosted audio-production REST + MCP API — stem separation, restoration, mastering, MIR analysis, DSP transforms, loudness, speech enhancement, diarization, MIDI transcription + composition, curated workflow presets and ad-hoc pipelines"
 license = { text = "WTFPL" }
 requires-python = ">=3.10,<3.13"
