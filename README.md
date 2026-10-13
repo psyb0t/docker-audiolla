@@ -4,7 +4,6 @@
 [![version](https://raw.githubusercontent.com/psyb0t/docker-audiolla/badges/version.svg)](https://github.com/psyb0t/docker-audiolla/releases)
 [![license](https://raw.githubusercontent.com/psyb0t/docker-audiolla/badges/license.svg)](LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/psyb0t/audiolla?style=flat-square)](https://hub.docker.com/r/psyb0t/audiolla)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/psyb0t/docker-audiolla)
 
 **Thirty audio engines. One port. Zero cloud. Fire-and-forget async jobs. Webhooks.**
 
