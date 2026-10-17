@@ -134,3 +134,6 @@ tests/integration/.fixtures/*
 .telemetry/
 
 .testing/
+
+# Review receipt for the local release script.
+git-update.sh.debot
