@@ -148,7 +148,10 @@ if not isinstance(AudioDjPrepRequest, type) or AudioDjPrepRequest is BaseAudioIn
     class AudioDjPrepRequest(BaseAudioInputRequest):  # type: ignore[no-redef]
         pass
 
-if not isinstance(AudioStereoFieldRequest, type) or AudioStereoFieldRequest is BaseAudioInputRequest:
+if (
+    not isinstance(AudioStereoFieldRequest, type)
+    or AudioStereoFieldRequest is BaseAudioInputRequest
+):
     class AudioStereoFieldRequest(BaseAudioInputRequest):  # type: ignore[no-redef]
         pass
 

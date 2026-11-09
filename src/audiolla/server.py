@@ -11,8 +11,10 @@ Endpoints:
   POST   /v1/audio/analyze           librosa MIR analysis
   POST   /v1/audio/transform         pysox DSP transform chain
   POST   /v1/audio/loudness          pyloudnorm LUFS measurement + normalization
-  POST   /v1/audio/restore/{engine}  remove reverb/echo/noise (UVR); aggressive=true for deecho hard mode
-  POST   /v1/audio/noise-reduce/{engine} noise reduction — engine=noise-reduce (DSP) or uvr-denoise (ML)
+  POST   /v1/audio/restore/{engine}  remove reverb/echo/noise (UVR);
+                                     aggressive=true for deecho hard mode
+  POST   /v1/audio/noise-reduce/{engine} noise reduction: engine=noise-reduce (DSP)
+                                     or uvr-denoise (ML)
   POST   /v1/audio/visualize/image/spectrogram  static PNG spectrogram
   POST   /v1/audio/visualize/image/waveform     static PNG waveform
   POST   /v1/audio/visualize/video/{mode}       animated video (spectrum/waves/cqt/…)
@@ -49,7 +51,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import unquote
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from . import __version__, config
@@ -215,6 +217,7 @@ from .output_writer import write_output
 from .schema import AnalyzeResult, HealthResponse, LoudnessResult
 
 log = logging.getLogger("audiolla.server")
+
 
 def _ensure_json_array(value, field_name: str) -> list:
     """In the v1.0.0 JSON-body API the field is already a list. The old
@@ -432,7 +435,7 @@ def _openapi_override():
     return _static_spec_cache
 
 
-app.openapi = _openapi_override  # type: ignore[assignment]
+app.openapi = _openapi_override  # type: ignore[method-assign]
 
 
 class _MCPSlashRewriteMiddleware:
@@ -616,7 +619,7 @@ class _RequestLogMiddleware:
 # request-log middleware's ``except Exception: _LOG.exception(...)``
 # branch — this handler is purely about response shape.
 @app.exception_handler(Exception)
-async def _unhandled_exception_to_json(  # type: ignore[no-untyped-def]
+async def _unhandled_exception_to_json(
     request, exc,
 ):  # pragma: no cover — exercised via integration tests
     log.exception("unhandled %s on %s %s", type(exc).__name__, request.method, request.url.path)
@@ -736,11 +739,21 @@ _CATALOG_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ("POST", "/v1/audio/conv-reverb", "Apply user-supplied impulse response"),
     ]),
     ("generate", "Text-to-music generation", [
-        ("POST", "/v1/audio/generate/stable-audio-open", "Stability Community Licence — 47s cap, loops / SFX / textures (no vocals). CUDA-only."),
-        ("POST", "/v1/audio/generate/musicgen-small", "Meta MusicGen 300M — CC-BY-NC, 30s cap, instrumental only. Opt-in via AUDIOLLA_ENABLE_NONCOMMERCIAL=1. CUDA-only."),
-        ("POST", "/v1/audio/generate/musicgen-medium", "Meta MusicGen 1.5B — CC-BY-NC, 30s cap, higher quality than -small. Opt-in via AUDIOLLA_ENABLE_NONCOMMERCIAL=1. CUDA-only."),
-        ("POST", "/v1/audio/generate/riffusion", "Riffusion-v1 — CreativeML OpenRAIL-M, spectrogram→Griffin-Lim, ~5s per pass, lo-fi character. CUDA-only."),
-        ("POST", "/v1/audio/generate/audioldm2", "AudioLDM 2 — CC-BY 4.0 (commercial OK, no opt-in), general SFX (ambience / foley / impacts), 16 kHz mono, up to 30s, slow. CUDA-only."),
+        ("POST", "/v1/audio/generate/stable-audio-open",
+         "Stability Community Licence — 47s cap, loops / SFX / textures (no vocals). "
+         "CUDA-only."),
+        ("POST", "/v1/audio/generate/musicgen-small",
+         "Meta MusicGen 300M — CC-BY-NC, 30s cap, instrumental only. "
+         "Opt-in via AUDIOLLA_ENABLE_NONCOMMERCIAL=1. CUDA-only."),
+        ("POST", "/v1/audio/generate/musicgen-medium",
+         "Meta MusicGen 1.5B — CC-BY-NC, 30s cap, higher quality than -small. "
+         "Opt-in via AUDIOLLA_ENABLE_NONCOMMERCIAL=1. CUDA-only."),
+        ("POST", "/v1/audio/generate/riffusion",
+         "Riffusion-v1 — CreativeML OpenRAIL-M, spectrogram→Griffin-Lim, ~5s per pass, "
+         "lo-fi character. CUDA-only."),
+        ("POST", "/v1/audio/generate/audioldm2",
+         "AudioLDM 2 — CC-BY 4.0 (commercial OK, no opt-in), general SFX "
+         "(ambience / foley / impacts), 16 kHz mono, up to 30s, slow. CUDA-only."),
     ]),
     ("visualize", "PNG spectrogram/waveform + animated video", [
         ("POST", "/v1/audio/visualize/image/spectrogram", "Static spectrogram PNG"),
@@ -1611,7 +1624,7 @@ async def normalize(req: NormalizeRequest) -> Any:
     Common targets: -14 (Spotify/YouTube), -16 (Apple Music), -23 (broadcast EBU R128)."""
     validate_input_xor(req.file_path, req.file_url)
     validate_output_xor(req.output_path, req.output_url, async_job=req.async_job)
-    output_format = req.output_format.value if hasattr(req.output_format, "value") else req.output_format
+    output_format = format_value(req.output_format)
     _validate_output_format(output_format)
     _validate_target_lufs(req.target_lufs)
     eng = ENGINES.get("librosa-analyze")
@@ -1753,12 +1766,10 @@ async def midi_compose(
                 status_code=400,
                 detail=f"invalid `spec` JSON: {exc}",
             ) from exc
-        output_path = form.get("output_path") or output_path or None
-        output_url = form.get("output_url") or output_url or None
-        if output_path is not None:
-            output_path = str(output_path) or None
-        if output_url is not None:
-            output_url = str(output_url) or None
+        form_path = form.get("output_path") or output_path or None
+        form_url = form.get("output_url") or output_url or None
+        output_path = (str(form_path) or None) if form_path is not None else None
+        output_url = (str(form_url) or None) if form_url is not None else None
 
     engine_slug = "midi-compose"
     eng = ENGINES.get(engine_slug)
@@ -2156,6 +2167,7 @@ async def silence(req: AudioSilenceRequest) -> Any:
         file_path=file_path,
         file_url=file_url,
     )
+
     async def _produce_json() -> dict[str, Any]:
         return await eng.detect(
             raw, filename,
@@ -2211,7 +2223,9 @@ async def visualize_spectrogram(req: AudioVisualizeImageSpectrogramRequest) -> R
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
     async def _produce() -> bytes:
-        return await eng.spectrogram(raw, filename, width=width, height=height, color=color, scale=scale)
+        return await eng.spectrogram(
+            raw, filename, width=width, height=height, color=color, scale=scale
+        )
 
     return await _run_with_optional_job(
         _produce,
@@ -3110,7 +3124,12 @@ async def noise_reduce(engine: str, req: AudioNoiseReduceRequest) -> Response:
 
     def _extra() -> dict:
         if is_dsp:
-            return {"engine": engine, "stationary": stationary, "prop_decrease": prop_decrease, "output_format": output_format}
+            return {
+                "engine": engine,
+                "stationary": stationary,
+                "prop_decrease": prop_decrease,
+                "output_format": output_format,
+            }
         return {"engine": engine, "output_format": output_format}
 
     return await _run_with_optional_job(
@@ -4754,7 +4773,9 @@ async def pitch_correct_endpoint(req: AudioPitchCorrectRequest) -> Response:
     raw, filename = await resolve_input(file=file, file_path=file_path, file_url=file_url)
 
     async def _produce() -> bytes:
-        return await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
+        return await eng.pitch_correct(
+            raw, filename, strength=strength, output_format=output_format
+        )
 
     return await _run_with_optional_job(
         _produce,
@@ -5200,7 +5221,9 @@ async def batch(request: Request) -> JSONResponse:
                 loudness_eng = next((e for e in ENGINES.values() if is_loudness_engine(e)), None)
                 if loudness_eng is None:
                     raise HTTPException(status_code=404, detail="loudness engine not configured")
-                b, _ = await loudness_eng.normalize_lufs(raw, fname, target_lufs=target, output_format=fmt)
+                b, _ = await loudness_eng.normalize_lufs(
+                    raw, fname, target_lufs=target, output_format=fmt
+                )
             elif op == "trim":
                 ss = float(op_spec.get("start_sec", 0.0))
                 es_raw = op_spec.get("end_sec")
@@ -5236,7 +5259,7 @@ async def batch(request: Request) -> JSONResponse:
                 output_path=out_path, output_url=None,
             )
             if isinstance(resp, JSONResponse):
-                resp_data = json.loads(resp.body)
+                resp_data = json.loads(bytes(resp.body))
             else:
                 resp_data = {"size": len(resp.body)}
             results.append({"index": i, "op": op, "status": "ok", **resp_data})

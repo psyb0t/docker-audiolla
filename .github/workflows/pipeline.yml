@@ -1,27 +1,49 @@
 name: pipeline
 
+# Every push runs lint and unit tests; main also builds, scans and pushes both
+# images as :latest and :sha-<commit> (-cuda suffix for the CUDA image). A v*
+# tag waits for that commit's main run to succeed, then promotes the same
+# digests to the release tag without rebuilding or rerunning checks.
 on: [push]
 
+permissions: {}
+
 jobs:
+  code:
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    permissions:
+      contents: read
+      security-events: write # the called workflow requests it for SARIF uploads
+    uses: psyb0t/reusable-github-workflows/.github/workflows/code-workflow.yml@master
+    with:
+      lint_command: "make lint" # flake8 + mypy in the dev image
+      test_command: "make test" # offline pytest in the dev image, engines stubbed
+      # Regenerate src/audiolla/schema/_generated.py from openapi.yaml; the
+      # called workflow fails the run if that leaves any diff.
+      generate_command: "make generate"
+
   badges:
-    if: github.ref_name == github.event.repository.default_branch || startsWith(github.ref, 'refs/tags/')
+    needs: [code, wait]
+    if: "always() && ((github.ref_name == github.event.repository.default_branch && needs.code.result == 'success') || (startsWith(github.ref, 'refs/tags/') && needs.wait.result == 'success'))"
     permissions:
       contents: write
     uses: psyb0t/reusable-github-workflows/.github/workflows/create-badges.yml@master
 
   call-docker-image-workflow:
+    needs: [code]
+    if: "!startsWith(github.ref, 'refs/tags/')"
     permissions:
-      contents: write # GitHub Release
+      contents: write
       security-events: write # upload the Grype SARIF to the Security tab
     uses: psyb0t/reusable-github-workflows/.github/workflows/docker-image-workflow.yml@master
-
     with:
       repository_name: psyb0t/audiolla
       target_platforms: "linux/amd64"
+      push_sha_tag: true
       scan_severity: "high"
       cache_mode: "min"
       # Report scan findings to the Security tab but don't fail the run, so the
-      # clawhub publish job below can depend on this workflow succeeding.
+      # tag pipeline can promote this build and publish after it.
       scan_fail_build: false
       # CUDA image (~5 GB unpacked torch + nvidia-* deps) OODs on the default
       # ubuntu-latest 14 GB free. The reusable workflow optionally strips
@@ -33,24 +55,63 @@ jobs:
           {"file": "Dockerfile",      "tag_suffix": "",      "platforms": "linux/amd64"},
           {"file": "Dockerfile.cuda", "tag_suffix": "-cuda", "platforms": "linux/amd64"}
         ]
-
     secrets:
       dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  # Publish the skill (.agents/skills/) + plugin (.agents/plugins/) to ClawHub.
-  # Tag pushes ONLY, and only after the Docker image build/push + GitHub release
-  # have succeeded (needs the docker-image workflow, which does both).
-  publish-to-clawhub:
-    needs: [call-docker-image-workflow]
+  wait:
     if: startsWith(github.ref, 'refs/tags/')
-    uses: psyb0t/reusable-github-workflows/.github/workflows/clawhub-publish.yml@master
+    permissions:
+      actions: read
+    uses: psyb0t/reusable-github-workflows/.github/workflows/wait-for-default-branch.yml@master
 
+  docker-promote:
+    needs: [wait]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      security-events: write
+    uses: psyb0t/reusable-github-workflows/.github/workflows/docker-image-workflow.yml@master
+    with:
+      repository_name: psyb0t/audiolla
+      target_platforms: "linux/amd64"
+      promote_on_tag: true
+      create_release: false
+      scan_severity: "high"
+      scan_fail_build: false
+      build_targets: |
+        [
+          {"file": "Dockerfile",      "tag_suffix": "",      "platforms": "linux/amd64"},
+          {"file": "Dockerfile.cuda", "tag_suffix": "-cuda", "platforms": "linux/amd64"}
+        ]
+    secrets:
+      dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  release:
+    needs: [docker-promote]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    uses: psyb0t/reusable-github-workflows/.github/workflows/release-workflow.yml@master
+
+  # Publish the skill (.agents/skills/) + plugin (.agents/plugins/) to ClawHub.
+  # Tag pushes ONLY, and only after the images are promoted and the GitHub
+  # release exists.
+  publish-to-clawhub:
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    uses: psyb0t/reusable-github-workflows/.github/workflows/clawhub-publish.yml@master
+    with:
+      skill_names: '["audiolla"]'
+      plugin_names: '["audiolla"]'
     secrets:
       clawhub_token: ${{ secrets.CLAWHUB_TOKEN }}
 
   publish-to-mcp-registry:
-    needs: [call-docker-image-workflow]
+    needs: [release]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       id-token: write

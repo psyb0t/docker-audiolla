@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from typing import Any
 
 from ..audio import AudioConversionError, write_temp_input
 from .base import EngineBase
@@ -18,7 +19,7 @@ _MODEL_ID = "MIT/ast-finetuned-audioset-10-10-0.4593"
 
 
 class TagEngine(EngineBase):
-    def _load_sync(self) -> object:
+    def _load_sync(self) -> Any:
         from transformers import (  # noqa: PLC0415
             AutoFeatureExtractor,
             AutoModelForAudioClassification,
@@ -33,9 +34,9 @@ class TagEngine(EngineBase):
         self._log.info("TagEngine ready (AST %s)", _MODEL_ID)
         return model
 
-    def _release_model(self, model: object) -> None:
+    def _release_model(self, model: Any) -> None:
         try:
-            model.cpu()  # type: ignore[union-attr]
+            model.cpu()
         except Exception:
             pass
 
@@ -61,7 +62,7 @@ class TagEngine(EngineBase):
         )
         return result
 
-    def _tag_sync(self, raw: bytes, filename: str, top_k: int, model: object) -> dict:
+    def _tag_sync(self, raw: bytes, filename: str, top_k: int, model: Any) -> dict:
         import librosa  # noqa: PLC0415
 
         torch = self._torch
@@ -72,14 +73,14 @@ class TagEngine(EngineBase):
 
             inputs = self._extractor(y, sampling_rate=16000, return_tensors="pt")
             with torch.no_grad():
-                logits = model(**inputs).logits  # type: ignore[operator]
+                logits = model(**inputs).logits
             scores = torch.softmax(logits, dim=-1)[0]
             top_k = min(top_k, scores.shape[0])
             top_indices = scores.topk(top_k).indices.tolist()
 
             tags = [
                 {
-                    "label": model.config.id2label[i],  # type: ignore[union-attr]
+                    "label": model.config.id2label[i],
                     "score": round(scores[i].item(), 4),
                 }
                 for i in top_indices

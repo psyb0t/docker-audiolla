@@ -1251,9 +1251,10 @@ def multiband_compress(
             "crossovers_hz must be a non-empty list of ascending frequencies"
         )
     if not isinstance(bands, list) or len(bands) != len(crossovers_hz) + 1:
+        got = len(bands) if isinstance(bands, list) else type(bands).__name__
         raise AudioConversionError(
             f"bands must have length len(crossovers_hz)+1 "
-            f"({len(crossovers_hz) + 1}), got {len(bands) if isinstance(bands, list) else type(bands).__name__}"
+            f"({len(crossovers_hz) + 1}), got {got}"
         )
     xo = sorted(float(f) for f in crossovers_hz)
     for i, f in enumerate(xo):
@@ -1519,7 +1520,7 @@ def chords_to_midi_bytes(
 
     chord_track = mido.MidiTrack()
     chord_track.append(mido.Message("program_change", channel=0, program=0, time=0))
-    events: list[tuple[int, object]] = []
+    events: list[tuple[int, mido.Message]] = []
 
     for seg in chords:
         chord_name = seg.get("chord", "")

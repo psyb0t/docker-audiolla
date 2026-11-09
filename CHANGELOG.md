@@ -5,6 +5,17 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## v2.0.2. 2026-11-09
+
+Documentation site, a release pipeline that promotes tested images, lint that passes, and funding links. REST and MCP request shapes are unchanged.
+
+- The documentation now lives at https://psyb0t.github.io/docker-audiolla/, built by GitHub Pages from `docs/`. The API reference page is generated from `openapi.yaml` and lists all 94 operations; task pages cover getting started, files, workflows, jobs, every engine family, MCP, configuration, deployment and security. The README is a short summary that links there with full URLs, so the links also work on Docker Hub. `make docs` builds the site locally.
+- Doc and skill corrections found while writing the site: 35 engines in the CUDA image and 27 in the CPU image, where the CUDA-only ones answer 404; MIDI compose, generate and drum take output options as query parameters; mix and concat take `file_paths` or `file_urls`; pitch correction shifts the whole file by one amount; staging uploads are raw bytes, not multipart; the skill uses `AUDIOLLA_AUTH_TOKEN`, the variable the server reads, and counts 18 catalog categories and 82 MCP tools.
+- The pipeline runs `make lint`, `make test` and a `make generate` drift check on every push before any image is built. A `main` push also tags the images `:sha-<commit>`, and a `v*` tag waits for that commit's `main` run to pass, then promotes the same images to the release tag instead of rebuilding them. The GitHub release, ClawHub and the MCP Registry publish after the promotion.
+- `make lint` passes: long lines, unused imports and the mypy errors in first-party code are fixed without changing behaviour. The model generator no longer writes a timestamp, so `make generate` is repeatable, and enum fields default to enum members.
+- Contributor guide (`AGENTS.md`) and project rules under `.agents/rules/`, including the spec-first API contract, with `CLAUDE.md` and `.claude` committed as links to them.
+- Added Buy Me a Coffee to the funding links and a Sponsor section to the README. The plugin manifests no longer use em dashes, and the issue-pull workflow runs at hours of its own instead of the hours every repository shared.
+
 ## v2.0.1. 2026-10-10
 
 Documentation only. The README's agent integrations section names [peen](https://github.com/psyb0t/peen) as an example of an agent that reads `.agents/skills/`.

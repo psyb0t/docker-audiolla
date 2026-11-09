@@ -659,7 +659,8 @@ class MidiComposeEngine(EngineBase):
                 for step_idx, hit in enumerate(steps_list):
                     if not hit:
                         continue
-                    velocity = int(min(127, max(1, hit if isinstance(hit, int) and hit > 1 else 100)))
+                    raw_vel = hit if isinstance(hit, int) and hit > 1 else 100
+                    velocity = int(min(127, max(1, raw_vel)))
                     tick = bar_ticks * bar_idx + step_idx * ticks_per_step
                     if swing > 0 and step_idx % 2 == 1:
                         tick += int(swing * ticks_per_step * 2)
@@ -683,7 +684,14 @@ class MidiComposeEngine(EngineBase):
         mid.save(file=buf)
         return buf.getvalue()
 
-    async def humanize(self, midi_bytes: bytes, *, timing_ms: float = 10.0, velocity_pct: float = 10.0, seed: int | None = None) -> bytes:
+    async def humanize(
+        self,
+        midi_bytes: bytes,
+        *,
+        timing_ms: float = 10.0,
+        velocity_pct: float = 10.0,
+        seed: int | None = None,
+    ) -> bytes:
         self._log.info(
             "humanize start: input_bytes=%d timing_ms=%.2f velocity_pct=%.2f seed=%s",
             len(midi_bytes), timing_ms, velocity_pct, seed,

@@ -1,0 +1,13 @@
+---
+layout: null
+permalink: /llms.txt
+sitemap: false
+---
+# {{ site.title }}
+
+> {{ site.description }}
+
+{% assign pages = site.pages | where_exp: "item", "item.description" | where_exp: "item", "item.nav_exclude != true" | sort: "nav_order" -%}
+{% for item in pages -%}
+- [{{ item.title }}]({{ item.url | absolute_url }}): {{ item.description }}
+{% endfor -%}

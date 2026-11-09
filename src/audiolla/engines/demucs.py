@@ -146,7 +146,8 @@ class DemucsEngine(EngineBase):
             invalid = [s for s in stems if s not in available_sources]
             if invalid:
                 self._log.warning(
-                    "demucs unknown stems requested: variant=%s requested=%s available=%s invalid=%s",
+                    "demucs unknown stems requested: variant=%s requested=%s "
+                    "available=%s invalid=%s",
                     self._variant, stems, available_sources, invalid,
                 )
                 raise AudioConversionError(

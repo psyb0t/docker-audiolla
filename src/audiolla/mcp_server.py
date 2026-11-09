@@ -46,7 +46,16 @@ from . import config, fetch
 from . import files as files_mod
 import asyncio
 
-from .audio import AudioConversionError, content_type_for, clip_detect, mid_side_encode, mid_side_decode, beat_slice, conv_reverb, transient_shape
+from .audio import (
+    AudioConversionError,
+    beat_slice,
+    clip_detect,
+    content_type_for,
+    conv_reverb,
+    mid_side_decode,
+    mid_side_encode,
+    transient_shape,
+)
 from .audio import multiband_compress as _multiband_compress_fn
 
 _log = logging.getLogger("audiolla.mcp")
@@ -257,7 +266,8 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Run a curated preset pipeline against an input file.
-        Writes audio to `output_path` xor `output_url`; response `{path,size,steps}` or `{url,size,steps}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,steps}` or
+        `{url,size,steps}`."""
         from .pipeline import PipelineError, run_pipeline  # noqa: PLC0415
 
         if not presets or name not in presets:
@@ -273,7 +283,9 @@ def build_mcp_server(
                 raise ValueError(str(exc)) from exc
             return payload
 
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def run_pipeline_tool(
@@ -295,7 +307,9 @@ def build_mcp_server(
                 raise ValueError(str(exc)) from exc
             return payload
 
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     # ── text-to-music generation (no input file) ────────────────────────────
 
@@ -703,7 +717,8 @@ def build_mcp_server(
         Provide exactly one of `file_path` (staged MIDI) or `file_url`
         (remote MIDI — subject to fetch policy). `soundfont_path`
         optionally overrides the server's default SoundFont with a
-        staged ``.sf2``. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`.
+        staged ``.sf2``. Writes audio to `output_path` xor `output_url`; response `{path,size,...}`
+        or `{url,size,...}`.
         """
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("midi-render")
@@ -764,7 +779,8 @@ def build_mcp_server(
         output_format: str = "wav",
     ) -> dict[str, Any]:
         """Beat tracking. Returns tempo + beat positions in seconds.
-        With ``click_track=True`` also writes click-track audio to ``output_path`` xor ``output_url`` of input
+        With ``click_track=True`` also writes click-track audio to ``output_path`` xor
+        ``output_url`` of input
         mixed with a metronome click on each beat."""
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("librosa-analyze")
@@ -805,7 +821,8 @@ def build_mcp_server(
         as_midi: bool = False,
     ) -> dict[str, Any]:
         """Monophonic pitch tracking via pyin. Returns the pitch contour
-        and (with ``as_midi=True``) a MIDI file of quantised (writes to ``output_path`` xor ``output_url``)
+        and (with ``as_midi=True``) a MIDI file of quantised (writes to ``output_path`` xor
+        ``output_url``)
         notes."""
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("librosa-analyze")
@@ -853,7 +870,8 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Find silent ranges + optionally auto-trim. ``trim_mode='edges'``
         removes leading/trailing silence; ``'all'`` removes every detected
-        silence. When `trim_mode` is set, writes trimmed audio to `output_path` xor `output_url`."""
+        silence. When `trim_mode` is set, writes trimmed audio to `output_path` xor
+        `output_url`."""
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("silence-detect")
         if eng is None or not hasattr(eng, "detect"):
@@ -898,7 +916,8 @@ def build_mcp_server(
           ``vectorscope`` / ``phasemeter`` / ``histogram`` — animated MP4/WebM video
 
         Output: PNG/MP4/WebM bytes are written to ``output_path`` xor ``output_url``;
-        response is ``{path, size, ...}`` or ``{url, size, ...}``. Pass ``output_path`` to stage in FILES_DIR
+        response is ``{path, size, ...}`` or ``{url, size, ...}``. Pass ``output_path`` to stage in
+        FILES_DIR
         and get ``{path, ...}`` back, or ``output_url`` for a presigned PUT
         returning ``{url, ...}``. ``output_path`` + ``output_url`` are mutually
         exclusive.
@@ -928,7 +947,9 @@ def build_mcp_server(
         try:
             if mode in ("spectrogram", "waveform"):
                 if mode == "spectrogram":
-                    out = await eng.spectrogram(raw, name, width=width, height=height, color=color, scale=scale)
+                    out = await eng.spectrogram(
+                        raw, name, width=width, height=height, color=color, scale=scale
+                    )
                 else:
                     out = await eng.waveform(raw, name, width=width, height=height, color=color)
                 base = {"engine": engine, "mode": mode}
@@ -938,10 +959,12 @@ def build_mcp_server(
                     await fetch.upload_bytes(output_url, out, "image/png")
                     return {"url": output_url, "size": len(out), **base}
                 raise ValueError(
-            "binary-output MCP tool requires output_path or output_url; "
-            "the raw-base64 response mode was removed in v1.0.0"
-        )
-            out = await eng.visualize(raw, name, mode=mode, width=width, height=height, fps=fps, container=container)
+                    "binary-output MCP tool requires output_path or output_url; "
+                    "the raw-base64 response mode was removed in v1.0.0"
+                )
+            out = await eng.visualize(
+                raw, name, mode=mode, width=width, height=height, fps=fps, container=container
+            )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         media_type = "video/mp4" if container == "mp4" else "video/webm"
@@ -1016,7 +1039,9 @@ def build_mcp_server(
         if not is_uvr_restore_engine(eng):
             raise ValueError(f"engine {engine!r} does not support restore operations")
         try:
-            audio_bytes = await eng.restore(raw, name, output_format=output_format, aggressive=aggressive)
+            audio_bytes = await eng.restore(
+                raw, name, output_format=output_format, aggressive=aggressive
+            )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         if output_url:
@@ -1024,7 +1049,13 @@ def build_mcp_server(
                 await fetch.upload_bytes(output_url, audio_bytes, content_type_for(output_format))
             except fetch.FetchError as exc:
                 raise ValueError(str(exc)) from exc
-            return {"url": output_url, "size": len(audio_bytes), "engine": engine, "aggressive": aggressive, "output_format": output_format}
+            return {
+                "url": output_url,
+                "size": len(audio_bytes),
+                "engine": engine,
+                "aggressive": aggressive,
+                "output_format": output_format,
+            }
         raise ValueError(
             "audio-producing MCP tool requires output_path or output_url; "
             "the raw-base64 response mode was removed in v1.0.0"
@@ -1090,7 +1121,8 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Transform a MIDI file: transpose / quantize / change tempo /
-        filter channels. Writes MIDI to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        filter channels. Writes MIDI to `output_path` xor `output_url`; response `{path,size,...}`
+        or `{url,size,...}`."""
         raw, _name = await _load_input(file_path, file_url)
         eng = engines.get("midi-compose")
         if eng is None or not hasattr(eng, "transform"):
@@ -1336,7 +1368,6 @@ def build_mcp_server(
         """Time-stretch and/or pitch-shift audio. tempo_factor=0.5 halves speed;
         pitch_semitones=12 shifts one octave up. Writes audio to `output_path` xor `output_url`."""
         from .engines import is_stretch_engine  # noqa: PLC0415
-        from .audio import content_type_for  # noqa: PLC0415
 
         raw, name = await _load_input(file_path, file_url)
         eng = engines.get("stretch")
@@ -1431,16 +1462,20 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Cut audio to [start_sec, end_sec). end_sec required and must be > start_sec.
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}`."""
         from .audio import trim_audio as _trim  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if end_sec <= start_sec:
             raise ValueError("end_sec must be > start_sec")
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(
                 _trim, raw, filename, start_sec, end_sec, output_format
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def mix(
@@ -1451,7 +1486,8 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Mix multiple audio tracks with per-track gain.
         tracks: list of {file_path or file_url, gain_db (optional, default 0.0)}.
-        Requires at least 2 tracks. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Requires at least 2 tracks. Writes audio to `output_path` xor `output_url`; response
+        `{path,size,...}` or `{url,size,...}`."""
         from .audio import mix_audio as _mix  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if len(tracks) < 2:
@@ -1504,17 +1540,21 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Apply fade-in/fade-out. curve: tri/qsin/esin/hsin/log/exp/lin/etc.
-        At least one of fade_in/fade_out must be > 0. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        At least one of fade_in/fade_out must be > 0. Writes audio to `output_path` xor
+        `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         from .audio import fade_audio as _fade  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if fade_in <= 0.0 and fade_out <= 0.0:
             raise ValueError("at least one of fade_in or fade_out must be > 0")
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(
                 _fade, raw, filename, output_format,
                 fade_in=fade_in, fade_out=fade_out, curve=curve,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def reverse(
@@ -1524,12 +1564,16 @@ def build_mcp_server(
         output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Reverse audio playback direction. Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        """Reverse audio playback direction. Writes audio to `output_path` xor `output_url`;
+        response `{path,size,...}` or `{url,size,...}`."""
         from .audio import reverse_audio as _reverse  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(_reverse, raw, filename, output_format)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def loop(
@@ -1540,14 +1584,18 @@ def build_mcp_server(
         output_path: str | None = None,
         output_url: str | None = None,
     ) -> dict[str, Any]:
-        """Repeat audio count times (minimum 2). Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        """Repeat audio count times (minimum 2). Writes audio to `output_path` xor `output_url`;
+        response `{path,size,...}` or `{url,size,...}`."""
         from .audio import loop_audio as _loop  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if count < 2:
             raise ValueError(f"count must be >= 2, got {count}")
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(_loop, raw, filename, output_format, count)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def bpm_match(
@@ -1561,7 +1609,8 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Detect source BPM then time-stretch to target_bpm.
         Requires librosa-analyze + stretch engines.
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}` plus {source_bpm, target_bpm, tempo_factor}."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}` plus {source_bpm, target_bpm, tempo_factor}."""
         from .engines import is_beats_engine as _is_beats  # noqa: PLC0415
         from .engines import is_stretch_engine as _is_stretch  # noqa: PLC0415
         if target_bpm <= 0:
@@ -1603,16 +1652,20 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Adjust stereo image width via M/S processing.
         width=0.0 → mono, 1.0 → original, >1.0 → wider. Range: [0.0, 3.0].
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}`."""
         from .audio import stereo_width_audio as _stereo_width  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if not (0.0 <= width <= 3.0):
             raise ValueError(f"width must be in [0.0, 3.0], got {width}")
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(
                 _stereo_width, raw, filename, output_format, width
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     # ── split / pan / eq / key-match / sidechain-duck ─────────────────────────
 
@@ -1629,7 +1682,8 @@ def build_mcp_server(
         """Split audio into segments.
         mode=equal: requires count>=2, splits into equal time parts.
         mode=silence: splits on quiet gaps (uses threshold_db/min_duration_sec).
-        DEPRECATED in v1.0.0 — raises ValueError; use REST `POST /v1/audio/split` with `output_path`."""
+        DEPRECATED in v1.0.0: raises ValueError; use REST `POST /v1/audio/split` with
+        `output_path`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import (  # noqa: PLC0415
             split_audio_equal as _split_equal,
@@ -1693,17 +1747,21 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Pan audio in the stereo field.
         position: -1.0=hard left, 0.0=center, 1.0=hard right.
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import pan_audio as _pan  # noqa: PLC0415
 
         if not (-1.0 <= position <= 1.0):
             raise ValueError(f"position must be in [-1.0, 1.0], got {position}")
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(
                 _pan, raw, filename, output_format, position
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def eq(
@@ -1715,17 +1773,21 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Parametric EQ. bands: [{freq, gain_db, width_hz (opt)}].
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import eq_audio as _eq  # noqa: PLC0415
 
         if not bands:
             raise ValueError("bands must contain at least one entry")
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(
                 _eq, raw, filename, output_format, bands
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def key_match(
@@ -1737,7 +1799,8 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Detect source key then pitch-shift to target_key (e.g. C, F#, Bb).
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}` plus {source_key, target_key, semitones}.
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}` plus {source_key, target_key, semitones}.
         Requires chord-detect + stretch engines."""
         from .engines import (  # noqa: PLC0415
             is_chord_detect_engine as _is_chord,
@@ -1814,7 +1877,8 @@ def build_mcp_server(
         """Duck primary audio when trigger audio is loud.
         Provide primary via file_path/file_url, trigger via
         trigger_file_path/trigger_file_url.
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}`."""
         import asyncio as _asyncio  # noqa: PLC0415
         from .audio import sidechain_duck as _duck  # noqa: PLC0415
 
@@ -1845,7 +1909,8 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Concatenate N audio files in order.
         files: list of {file_path or file_url}. Requires at least 2.
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}`."""
         from .audio import concat_audio as _concat  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if len(files) < 2:
@@ -1876,14 +1941,18 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Change playback speed without pitch shift via ffmpeg atempo.
         speed=0.5 halves speed; speed=2.0 doubles. Range: 0.1–10.0.
-        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or
+        `{url,size,...}`."""
         from .audio import speed_audio as _speed  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
         if not (0.1 <= speed <= 10.0):
             raise ValueError(f"speed must be in [0.1, 10.0], got {speed}")
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(_speed, raw, filename, speed, output_format)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def convert(
@@ -1897,14 +1966,18 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Re-encode audio to a different format, sample rate, or channel count.
         output_format: wav/mp3/flac/opus/aac/pcm. sample_rate: e.g. 16000, 44100, 48000.
-        channels: 1 (mono) or 2 (stereo). Writes audio to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        channels: 1 (mono) or 2 (stereo). Writes audio to `output_path` xor `output_url`; response
+        `{path,size,...}` or `{url,size,...}`."""
         from .audio import convert_audio as _convert  # noqa: PLC0415
         import asyncio as _asyncio  # noqa: PLC0415
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await _asyncio.to_thread(
                 _convert, raw, filename, output_format, sample_rate, channels
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     @mcp.tool()
     async def similar(
@@ -1936,7 +2009,8 @@ def build_mcp_server(
         output_url: str | None = None,
     ) -> dict[str, Any]:
         """Snap MIDI note timings to the nearest rhythmic grid.
-        grid_beats: 0.25=16th note, 0.5=8th, 1.0=quarter. Writes MIDI to `output_path` xor `output_url`; response `{path,size,...}` or `{url,size,...}`."""
+        grid_beats: 0.25=16th note, 0.5=8th, 1.0=quarter. Writes MIDI to `output_path` xor
+        `output_url`; response `{path,size,...}` or `{url,size,...}`."""
         if grid_beats <= 0:
             raise ValueError(f"grid_beats must be > 0, got {grid_beats}")
         raw, _name = await _load_input(file_path, file_url)
@@ -1971,7 +2045,8 @@ def build_mcp_server(
         """Harmonic/percussive source separation via librosa HPSS median filter.
 
         Provide exactly one of `file_path` or `file_url`. Returns
-        ``{stems: {harmonic: <path|url>, percussive: <path|url>}, output_format}`` — pass ``output_paths={'harmonic':..., 'percussive':...}`` xor ``output_urls={...}``.
+        ``{stems: {harmonic: <path|url>, percussive: <path|url>}, output_format}``; pass
+        ``output_paths={'harmonic':..., 'percussive':...}`` xor ``output_urls={...}``.
         ``margin`` ≥1.0 controls separation aggressiveness; ``kernel_size``
         sets the median filter width (odd int, default 31).
         """
@@ -1982,7 +2057,7 @@ def build_mcp_server(
         if eng is None or not is_hpss_engine(eng):
             raise ValueError("hpss engine not configured")
         try:
-            result = await eng.hpss(
+            await eng.hpss(
                 raw,
                 name,
                 margin=margin,
@@ -2175,7 +2250,7 @@ def build_mcp_server(
             beat_times = beats_result.get("beats", [])
             if not beat_times:
                 raise ValueError("no beats detected in audio")
-            zip_bytes = await asyncio.to_thread(beat_slice, raw, filename, beat_times, output_format)
+            await asyncio.to_thread(beat_slice, raw, filename, beat_times, output_format)
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
         raise ValueError(
@@ -2234,7 +2309,9 @@ def build_mcp_server(
                 sustain_gain_db=sustain_gain_db,
                 output_format=output_format,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     # ── multiband_compress — N-band compressor ────────────────────────────
 
@@ -2260,7 +2337,9 @@ def build_mcp_server(
                 crossovers_hz=crossovers_hz, bands=bands,
                 output_format=output_format,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     # ── dj_prep — BPM + key + LUFS + Camelot ─────────────────────────────
 
@@ -2271,7 +2350,11 @@ def build_mcp_server(
     ) -> dict[str, Any]:
         """Analyse a track for DJ use: BPM, musical key, Camelot wheel position,
         and integrated LUFS loudness. Requires librosa-analyze + chord-detect."""
-        from .engines import is_beats_engine, is_chord_detect_engine, is_loudness_engine  # noqa: PLC0415
+        from .engines import (  # noqa: PLC0415
+            is_beats_engine,
+            is_chord_detect_engine,
+            is_loudness_engine,
+        )
         _camelot: dict[str, str] = {
             "C major": "8B", "A minor": "8A", "G major": "9B", "E minor": "9A",
             "D major": "10B", "B minor": "10A", "A major": "11B", "F# minor": "11A",
@@ -2372,9 +2455,14 @@ def build_mcp_server(
         eng = next((e for e in engines.values() if is_pitch_correct_engine(e)), None)
         if eng is None:
             raise ValueError("pitch-correct engine not configured")
+
         async def _work(raw: bytes, filename: str) -> bytes:
-            return await eng.pitch_correct(raw, filename, strength=strength, output_format=output_format)
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+            return await eng.pitch_correct(
+                raw, filename, strength=strength, output_format=output_format
+            )
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     # ── repair_audio — declip + dehum ─────────────────────────────────────
 
@@ -2394,13 +2482,16 @@ def build_mcp_server(
         dehum: notch-filter 50 or 60 Hz hum + harmonics.
         hum_freq: 50 (EU) or 60 (US) Hz."""
         from .audio import repair_audio as _repair  # noqa: PLC0415
+
         async def _work(raw: bytes, filename: str) -> bytes:
             return await asyncio.to_thread(
                 _repair, raw, filename,
                 declip=declip, dehum=dehum, hum_freq=hum_freq,
                 output_format=output_format,
             )
-        return await _run_audio_tool(file_path, file_url, _work, output_format, output_url, output_path)
+        return await _run_audio_tool(
+            file_path, file_url, _work, output_format, output_url, output_path
+        )
 
     # ── find_loop_point — best seamless loop boundary ─────────────────────
 
@@ -2419,7 +2510,9 @@ def build_mcp_server(
             raise ValueError("loop-point engine not configured")
         raw, filename = await _load_input(file_path, file_url)
         try:
-            return await eng.loop_point(raw, filename, min_loop_bars=min_loop_bars, num_candidates=num_candidates)
+            return await eng.loop_point(
+                raw, filename, min_loop_bars=min_loop_bars, num_candidates=num_candidates
+            )
         except AudioConversionError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -2456,7 +2549,9 @@ def build_mcp_server(
         if output_url:
             import httpx  # noqa: PLC0415
             async with httpx.AsyncClient(timeout=30) as client:
-                await client.put(output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"})
+                await client.put(
+                    output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"}
+                )
             return {"output_url": output_url, "size": len(midi_bytes)}
         raise ValueError(
             "binary-output MCP tool requires output_path or output_url; "
@@ -2499,8 +2594,14 @@ def build_mcp_server(
         if output_url:
             import httpx  # noqa: PLC0415
             async with httpx.AsyncClient(timeout=30) as client:
-                await client.put(output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"})
-            return {"output_url": output_url, "size": len(midi_bytes), "key": chord_result.get("key", "")}
+                await client.put(
+                    output_url, content=midi_bytes, headers={"Content-Type": "audio/midi"}
+                )
+            return {
+                "output_url": output_url,
+                "size": len(midi_bytes),
+                "key": chord_result.get("key", ""),
+            }
         raise ValueError(
             "binary-output MCP tool requires output_path or output_url; "
             "the raw-base64 response mode was removed in v1.0.0"
@@ -2533,7 +2634,11 @@ def build_mcp_server(
         if output_url:
             import httpx  # noqa: PLC0415
             async with httpx.AsyncClient(timeout=30) as client:
-                await client.put(output_url, content=result, headers={"Content-Type": content_type_for(output_format)})
+                await client.put(
+                    output_url,
+                    content=result,
+                    headers={"Content-Type": content_type_for(output_format)},
+                )
             return {"output_url": output_url, "size": len(result)}
         raise ValueError(
             "binary-output MCP tool requires output_path or output_url; "
@@ -2584,7 +2689,11 @@ def build_mcp_server(
         if output_url:
             import httpx  # noqa: PLC0415
             async with httpx.AsyncClient(timeout=30) as client:
-                await client.put(output_url, content=audio_bytes, headers={"Content-Type": content_type_for(output_format)})
+                await client.put(
+                    output_url,
+                    content=audio_bytes,
+                    headers={"Content-Type": content_type_for(output_format)},
+                )
             return {"output_url": output_url, "size": len(audio_bytes), **meta}
         raise ValueError(
             "binary-output MCP tool requires output_path or output_url; "
@@ -2621,7 +2730,9 @@ def build_mcp_server(
         if output_url:
             import httpx  # noqa: PLC0415
             async with httpx.AsyncClient(timeout=30) as client:
-                await client.put(output_url, content=result, headers={"Content-Type": "audio/midi"})
+                await client.put(
+                    output_url, content=result, headers={"Content-Type": "audio/midi"}
+                )
             return {"output_url": output_url, "size": len(result)}
         raise ValueError(
             "binary-output MCP tool requires output_path or output_url; "

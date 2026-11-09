@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from typing import Any
 
 from ..audio import AudioConversionError, write_temp_input
 from .base import EngineBase
@@ -19,7 +20,7 @@ _MODEL_ID = "laion/larger_clap_music_and_speech"
 
 
 class EmbedEngine(EngineBase):
-    def _load_sync(self) -> object:
+    def _load_sync(self) -> Any:
         from transformers import ClapModel, ClapProcessor  # noqa: PLC0415
         import torch  # noqa: PLC0415
 
@@ -31,9 +32,9 @@ class EmbedEngine(EngineBase):
         self._log.info("EmbedEngine ready (CLAP %s)", _MODEL_ID)
         return model
 
-    def _release_model(self, model: object) -> None:
+    def _release_model(self, model: Any) -> None:
         try:
-            model.cpu()  # type: ignore[union-attr]
+            model.cpu()
         except Exception:  # noqa: BLE001
             self._log.exception("CLAP model.cpu() failed")
 
@@ -61,7 +62,7 @@ class EmbedEngine(EngineBase):
         return result
 
     def _embed_sync(
-        self, raw: bytes, filename: str, query_text: str | None, model: object
+        self, raw: bytes, filename: str, query_text: str | None, model: Any
     ) -> dict:
         import librosa  # noqa: PLC0415
 
@@ -73,7 +74,7 @@ class EmbedEngine(EngineBase):
 
             inputs = self._processor(audios=y, return_tensors="pt", sampling_rate=48000)
             with torch.no_grad():
-                audio_features = model.get_audio_features(**inputs)  # type: ignore[union-attr]
+                audio_features = model.get_audio_features(**inputs)
             audio_features = audio_features / audio_features.norm(p=2, dim=-1, keepdim=True)
             embedding = audio_features[0].tolist()
 
@@ -84,7 +85,7 @@ class EmbedEngine(EngineBase):
                     text=[query_text], return_tensors="pt", padding=True
                 )
                 with torch.no_grad():
-                    text_features = model.get_text_features(  # type: ignore[union-attr]
+                    text_features = model.get_text_features(
                         **text_inputs
                     )
                 text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
@@ -128,7 +129,7 @@ class EmbedEngine(EngineBase):
         return result
 
     def _similar_sync(
-        self, raw_a: bytes, filename_a: str, raw_b: bytes, filename_b: str, model: object
+        self, raw_a: bytes, filename_a: str, raw_b: bytes, filename_b: str, model: Any
     ) -> dict:
         import librosa  # noqa: PLC0415
 
@@ -140,7 +141,7 @@ class EmbedEngine(EngineBase):
             y_a, _ = librosa.load(path_a, sr=48000, mono=True)
             inputs_a = self._processor(audios=y_a, return_tensors="pt", sampling_rate=48000)
             with torch.no_grad():
-                feats_a = model.get_audio_features(**inputs_a)  # type: ignore[union-attr]
+                feats_a = model.get_audio_features(**inputs_a)
             feats_a = feats_a / feats_a.norm(p=2, dim=-1, keepdim=True)
             emb_a = feats_a[0].tolist()
 
@@ -148,7 +149,7 @@ class EmbedEngine(EngineBase):
             y_b, _ = librosa.load(path_b, sr=48000, mono=True)
             inputs_b = self._processor(audios=y_b, return_tensors="pt", sampling_rate=48000)
             with torch.no_grad():
-                feats_b = model.get_audio_features(**inputs_b)  # type: ignore[union-attr]
+                feats_b = model.get_audio_features(**inputs_b)
             feats_b = feats_b / feats_b.norm(p=2, dim=-1, keepdim=True)
 
             similarity = (feats_a @ feats_b.T)[0, 0].item()
@@ -192,7 +193,7 @@ class EmbedEngine(EngineBase):
         return result
 
     def _classify_sync(
-        self, raw: bytes, filename: str, labels: list[str], model: object
+        self, raw: bytes, filename: str, labels: list[str], model: Any
     ) -> dict:
         import librosa  # noqa: PLC0415
 
@@ -204,27 +205,24 @@ class EmbedEngine(EngineBase):
 
             inputs = self._processor(audios=y, return_tensors="pt", sampling_rate=48000)
             with torch.no_grad():
-                audio_features = model.get_audio_features(**inputs)  # type: ignore[union-attr]
+                audio_features = model.get_audio_features(**inputs)
             audio_features = audio_features / audio_features.norm(p=2, dim=-1, keepdim=True)
 
             text_inputs = self._processor(
                 text=labels, return_tensors="pt", padding=True
             )
             with torch.no_grad():
-                text_features = model.get_text_features(  # type: ignore[union-attr]
+                text_features = model.get_text_features(
                     **text_inputs
                 )
             text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
 
             similarities = (audio_features @ text_features.T)[0].tolist()
-            scored = sorted(
-                [
-                    {"label": lbl, "score": round(float(sim), 4)}
-                    for lbl, sim in zip(labels, similarities)
-                ],
-                key=lambda x: x["score"],
-                reverse=True,
-            )
+            unsorted: list[dict[str, Any]] = [
+                {"label": lbl, "score": round(float(sim), 4)}
+                for lbl, sim in zip(labels, similarities)
+            ]
+            scored = sorted(unsorted, key=lambda x: x["score"], reverse=True)
             return {"results": scored}
 
         except AudioConversionError:

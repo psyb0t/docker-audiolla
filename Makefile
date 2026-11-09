@@ -5,6 +5,8 @@ CPU_IMAGE  := psyb0t/audiolla:local
 CUDA_IMAGE := psyb0t/audiolla:local-cuda
 TORCHBASE_CPU_IMAGE ?= psyb0t/torchbase:py3.12-torch2.5.1-v0.1.1-cpu@sha256:805f9ea0ad6a815b144e5d110cc762bd4e976e5ba1f6682ea347a485db0d7b37
 TORCHBASE_CUDA_IMAGE ?= psyb0t/torchbase:py3.12-torch2.5.1-v0.1.1-cu124@sha256:11ccac6fafe5c136cbff749f8690ca2a98d0abe84ce6f673df4db2be7a265d63
+# The image GitHub Pages builds docs/ with, pinned by digest.
+JEKYLL_IMAGE := ghcr.io/actions/jekyll-build-pages:v1.0.13@sha256:6791ebfd912185ed59bfb5fb102664fa872496b79f87ff8b9cfba292a7345041
 VERSION := $(shell awk -F\" '/^version *= *"/ {print $$2; exit}' pyproject.toml)
 
 PYPROJECT := pyproject.toml
@@ -35,7 +37,7 @@ DEV_RUN_TTY := docker run --rm -it \
         run run-cuda \
         test test-unit test-integration \
         lint format check clean \
-        generate version \
+        generate version docs \
         test-retention test-image \
         pkg-lock pkg-upgrade pkg-add pkg-remove pkg-update pkg-compile-heavy
 
@@ -206,6 +208,24 @@ check: lint test ## Lint + unit tests
 
 generate: dev-image ## Regenerate src/audiolla/schema/ from openapi.yaml
 	$(DEV_RUN) bash scripts/generate_models.sh
+
+# -----------------------------------------------------------------------------
+# Documentation site: build docs/ with the same Jekyll image GitHub Pages uses.
+# Output lands in the gitignored .testing/docs-site.
+# -----------------------------------------------------------------------------
+
+docs: ## Build the docs site into .testing/docs-site (GitHub Pages image)
+	mkdir -p .testing
+	docker run --rm \
+		-u $(UID):$(GID) \
+		-e HOME=/tmp \
+		-e GITHUB_WORKSPACE=/work \
+		-e GITHUB_REPOSITORY=psyb0t/docker-audiolla \
+		-e INPUT_SOURCE=docs \
+		-e INPUT_DESTINATION=.testing/docs-site \
+		-e INPUT_VERBOSE=false \
+		-v $(PWD):/work \
+		$(JEKYLL_IMAGE)
 
 clean: ## Remove build / cache artifacts (host-side)
 	docker rmi $(CPU_IMAGE) $(CUDA_IMAGE) 2>/dev/null || true

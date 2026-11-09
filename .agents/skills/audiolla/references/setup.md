@@ -14,22 +14,24 @@ CPU image — no GPU needed:
 ```bash
 docker run -d --rm --name audiolla \
   -v $HOME/.audiolla-data:/data \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   psyb0t/audiolla:latest
 ```
 
-CUDA image — GPU-accelerated Demucs separation:
+The CPU image has 27 engines. It lacks `htdemucs_ft`, `htdemucs_6s`, `mdx_extra` and the five text-to-audio generators, which return 404 there.
+
+CUDA image (all 35 engines), GPU-accelerated:
 
 ```bash
 docker run -d --rm --name audiolla \
   --gpus all \
   -v $HOME/.audiolla-data:/data \
   -e AUDIOLLA_DEVICE=cuda \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   psyb0t/audiolla:latest-cuda
 ```
 
-First run downloads the image (~3 GB CPU, ~8 GB CUDA), then on container start prefetches Demucs model weights (~600 MB) into `/data/torch_cache/`. The model fetch logs to the container's stdout — `docker logs -f audiolla` to watch.
+First run downloads the image (~3 GB CPU, ~8 GB CUDA), then on container start prefetches Demucs model weights (~600 MB) into `/data/torch_cache/`. `docker logs -f audiolla` shows the entrypoint's prefetch lines and the server's JSON log lines (on stderr).
 
 After that, subsequent runs reuse the volume and skip the download.
 
@@ -41,7 +43,7 @@ All config is via environment variables passed at `docker run`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUDIOLLA_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or `cuda:N` for a specific GPU |
+| `AUDIOLLA_DEVICE` | `cpu` in the CPU image, `cuda` in the CUDA image (`auto` in code) | `auto`, `cpu`, `cuda`, or `cuda:N` for a specific GPU |
 | `AUDIOLLA_ENGINES_FILE` | `/app/engines.json` | path to engines registry |
 | `AUDIOLLA_DATA_DIR` | `/data` | where models and staged files live |
 | `AUDIOLLA_AUTH_TOKEN` | _(none)_ | bearer token; empty means no auth |
@@ -58,9 +60,9 @@ All config is via environment variables passed at `docker run`:
 | `AUDIOLLA_FETCH_TIMEOUT` | `30` | per-fetch/upload timeout (seconds; also accepts `30s`, `1m`) |
 | `AUDIOLLA_FETCH_MAX_REDIRECTS` | `5` | max redirects per fetch; each `Location` re-validated through the policy |
 | `AUDIOLLA_SOUNDFONT` | `/usr/share/sounds/sf2/FluidR3_GM.sf2` (prod images) | Default SoundFont (`.sf2`) path used by `/v1/midi/render`. Empty = midi-render refuses unless `soundfont_path` is passed on the request. Prod images install FluidR3_GM via `apt install fluid-soundfont-gm`. |
-| `AUDIOLLA_UVR_MODELS_DIR` | `/data/uvr_models` | directory holding UVR (`audio-separator`) `.ckpt`/`.pth` model files for `uvr-dereverb`, `uvr-deecho`, `uvr-denoise`, `uvr-karaoke`, `uvr-vocal-bsr` — not bundled in the image |
+| `AUDIOLLA_UVR_MODELS_DIR` | `/data/uvr_models` | where audio-separator caches the UVR `.ckpt`/`.pth` model files for `uvr-dereverb`, `uvr-deecho`, `uvr-denoise`, `uvr-karaoke`, `uvr-vocal-bsr`; they are not in the image and download on each engine's first load |
 | `AUDIOLLA_ENABLE_NONCOMMERCIAL` | `false` | opt-in gate (`1`/`true`/`yes`/`on`) required to use CC-BY-NC-licensed `musicgen-small` / `musicgen-medium` weights |
-| `AUDIOLLA_LOAD_TIMEOUT` | `300` | seconds allowed for an engine's cold load before it's treated as failed (also accepts Go-style durations) |
+| `AUDIOLLA_LOAD_TIMEOUT` | `300` | parsed and validated at startup; not enforced anywhere in the current build |
 | `AUDIOLLA_JOB_TTL` | `3600` | seconds a completed/failed async job's record is retained before eviction |
 | `AUDIOLLA_JOB_MAX_CONCURRENT` | `8` | parsed at startup for future async-job concurrency limiting; not yet enforced anywhere in the current build |
 
@@ -72,7 +74,7 @@ By default audiolla runs with no auth — anyone who can reach port 8000 can use
 docker run -d --rm --name audiolla \
   -v $HOME/.audiolla-data:/data \
   -e AUDIOLLA_AUTH_TOKEN="$(openssl rand -hex 32)" \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   psyb0t/audiolla:latest
 ```
 
@@ -128,7 +130,7 @@ Only enable the engines you actually need:
 docker run -d --rm --name audiolla \
   -v $HOME/.audiolla-data:/data \
   -e AUDIOLLA_ENABLED_ENGINES=htdemucs,matchering,librosa-analyze \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   psyb0t/audiolla:latest
 ```
 
@@ -142,7 +144,7 @@ By default, engines lazy-load on first request. To avoid the cold-start latency 
 docker run -d --rm --name audiolla \
   -v $HOME/.audiolla-data:/data \
   -e AUDIOLLA_PRELOAD=htdemucs,matchering \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   psyb0t/audiolla:latest
 ```
 
@@ -179,7 +181,8 @@ Memory footprints (approximate):
     hub/checkpoints/    # downloaded .th files
   files/                # staging area for /v1/files endpoints
   models/               # additional model storage (currently unused)
-  hf/                   # HuggingFace cache (CUDA image only — HF_HOME)
+  uvr_models/           # UVR model files (AUDIOLLA_UVR_MODELS_DIR)
+  hf/                   # Hugging Face cache (HF_HOME, both images)
 ```
 
 Mount the same path on subsequent runs to skip the model re-download and keep staged files.
@@ -219,7 +222,7 @@ AUDIOLLA_AUTH_TOKEN=<openssl rand -hex 32 output>
 
 ## Logs
 
-audiolla logs to stdout — read with `docker logs -f audiolla`. Key log lines:
+The server logs JSON lines to stderr and the entrypoint prints plain lines to stdout; `docker logs -f audiolla` shows both. Key log lines:
 
 - `audiolla starting: device=... engines=[...] ttl=... files_dir=... auth=on|off` — boot banner
 - `[entrypoint] demucs variants to prefetch: [...]` — model prefetch
@@ -255,8 +258,8 @@ Heavy ML deps are hash-locked in `requirements-heavy-{cpu,cuda}.txt`. Light deps
 **`/healthz` returns but engine calls 404 with "unknown engine"**
 The engine is filtered out by `AUDIOLLA_ENABLED_ENGINES`. Check `GET /v1/engines` for what's actually exposed.
 
-**`htdemucs_ft` returns 400 with "cuda_only"**
-The CUDA-only fine-tuned variant won't run on the CPU image. Either use the CUDA image with `--gpus all`, or pick `htdemucs` / `htdemucs_ft`'s lighter sibling.
+**`htdemucs_ft` returns 404 "unknown engine" or 400 "cuda_only"**
+The CPU image does not ship `htdemucs_ft` (404). The CUDA image returns 400 when it runs without a GPU. Use the CUDA image with `--gpus all`, or use `htdemucs`.
 
 **Separation request hangs for minutes**
 Demucs on CPU is slow — `htdemucs` on a 3-min track takes 1-3 min on a mid-range CPU; `htdemucs_ft` is ~4x that. CUDA image is 5-10x faster. Watch `docker logs -f audiolla` for engine load progress.
@@ -268,4 +271,4 @@ Hit the `AUDIOLLA_MAX_UPLOAD_BYTES` cap (default 200 MB). Bump it via env var, o
 The server has `AUDIOLLA_AUTH_TOKEN` set and the request didn't carry `Authorization: Bearer ...` (or carried the wrong token).
 
 **Container exits during startup**
-Check `docker logs audiolla` for `preload <slug> failed` or engine-init exceptions. The most common cause is a corrupt `/data/torch_cache/` — delete the volume and let the container re-download.
+Check `docker logs audiolla`. The server refuses to start on an invalid setting (the message names the variable) or an unknown slug in `AUDIOLLA_ENABLED_ENGINES`. A failed preload or a failed Demucs prefetch only logs a warning; it does not stop the server.

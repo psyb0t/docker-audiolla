@@ -73,7 +73,8 @@ class AudioFingerprintEngine(EngineBase):
             self._touch()
             dt = time.perf_counter() - t0
             self._log.info(
-                "fingerprint done: filename=%s duration_ms=%.1f fp_len=%d raw_len=%d audio_duration=%.2f",
+                "fingerprint done: filename=%s duration_ms=%.1f fp_len=%d raw_len=%d "
+                "audio_duration=%.2f",
                 filename, dt * 1000.0,
                 len(result.get("fingerprint", "")),
                 len(result.get("fingerprint_raw", []) or []),

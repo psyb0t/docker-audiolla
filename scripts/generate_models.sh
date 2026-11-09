@@ -37,6 +37,8 @@ datamodel-codegen \
     --enum-field-as-literal one \
     --field-constraints \
     --strict-nullable \
+    --set-default-enum-member \
+    --disable-timestamp \
     --target-python-version 3.12
 
 echo "[generate_models] done — ${OUT_FILE} regenerated."

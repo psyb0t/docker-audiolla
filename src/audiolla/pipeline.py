@@ -83,13 +83,17 @@ async def _op_fx(engines: dict, raw: bytes, filename: str, *, effects: list,
 
 async def _op_transform(engines: dict, raw: bytes, filename: str, *,
                         operations: list, output_format: str = "wav") -> bytes:
-    eng = _require_engine(engines, "sox-transform", is_transform_engine, "sox-transform not present")
+    eng = _require_engine(
+        engines, "sox-transform", is_transform_engine, "sox-transform not present"
+    )
     return await eng.transform(raw, filename, operations=operations, output_format=output_format)
 
 
 async def _op_normalize(engines: dict, raw: bytes, filename: str, *,
                         target_lufs: float, output_format: str = "wav") -> bytes:
-    eng = _require_engine(engines, "librosa-analyze", is_loudness_engine, "loudness measurement missing")
+    eng = _require_engine(
+        engines, "librosa-analyze", is_loudness_engine, "loudness measurement missing"
+    )
     audio_bytes, _measured = await eng.normalize_lufs(
         raw, filename, target_lufs=target_lufs, output_format=output_format,
     )
@@ -113,7 +117,9 @@ async def _op_master(engines: dict, raw: bytes, filename: str, *, mode: str,
         if eng is None or not hasattr(eng, "master_reference"):
             raise PipelineError("matchering engine not configured for mode=reference")
         if reference_raw is None or reference_filename is None:
-            raise PipelineError("master: mode=reference requires reference_raw + reference_filename")
+            raise PipelineError(
+                "master: mode=reference requires reference_raw + reference_filename"
+            )
         return await eng.master_reference(raw, filename, reference_raw, reference_filename,
                                           target_lufs=target_lufs, output_format=output_format)
     raise PipelineError(f"master: mode must be 'chain' or 'reference', got {mode!r}")
@@ -184,7 +190,9 @@ async def _op_convert(engines: dict, raw: bytes, filename: str, *,
                       output_format: str = "wav", sample_rate: int | None = None,
                       channels: int | None = None) -> bytes:
     del engines
-    return await asyncio.to_thread(convert_audio, raw, filename, output_format, sample_rate, channels)
+    return await asyncio.to_thread(
+        convert_audio, raw, filename, output_format, sample_rate, channels
+    )
 
 
 async def _op_fade(engines: dict, raw: bytes, filename: str, *,

@@ -866,7 +866,9 @@ class LibrosaAnalyzeEngine(EngineBase):
             min_beats_needed = min_loop_bars * 4 + 2
             if len(beat_times) < min_beats_needed:
                 return {
-                    "loop_start_sec": round(float(beat_times[0]) if len(beat_times) > 0 else 0.0, 4),
+                    "loop_start_sec": round(
+                        float(beat_times[0]) if len(beat_times) > 0 else 0.0, 4
+                    ),
                     "loop_end_sec": round(duration, 4),
                     "bars": 0,
                     "score": 0.0,
@@ -924,7 +926,9 @@ class LibrosaAnalyzeEngine(EngineBase):
             if not candidates:
                 return {
                     "loop_start_sec": round(float(beat_times[0]), 4),
-                    "loop_end_sec": round(float(beat_times[min(min_loop_bars * 4, len(beat_times) - 1)]), 4),
+                    "loop_end_sec": round(
+                        float(beat_times[min(min_loop_bars * 4, len(beat_times) - 1)]), 4
+                    ),
                     "bars": min_loop_bars,
                     "score": 0.0,
                     "tempo_bpm": round(tempo_val, 2),
