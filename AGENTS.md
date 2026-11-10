@@ -6,8 +6,6 @@ The project rules live in `.agents/rules/`, one file per topic. They are authori
 
 ## Agent setup
 
-This repository expects the psyb0t rig (`.claude-rig`, or `.codex-rig` once that exists).
-
 `CLAUDE.md` is a committed symlink to `AGENTS.md`, and `.claude` is a committed symlink to `.agents`, so Claude Code reads the same instructions, rules and skills as Codex. Claude's Edit and Write tools refuse to write through a symlink: edit `AGENTS.md` and `.agents/rules/*.md` directly, never the paths under `CLAUDE.md` or `.claude/`.
 
 ## What it is
@@ -143,7 +141,7 @@ Adding a setting: read it in `config.py` with the existing parsers (PY4, PY5), a
 
 Adding an MCP tool: [mcp.md](.agents/rules/mcp.md).
 
-Releasing: [docs-and-releases.md](.agents/rules/docs-and-releases.md). Never commit, tag, push or publish unless the user asked for that specific action.
+Releasing: [docs-and-releases.md](.agents/rules/docs-and-releases.md).
 
 ## Rules
 
@@ -157,4 +155,4 @@ Rules for every change: `.agents/rules/`. Read the area file before touching tha
 | `mcp.md` | `src/audiolla/mcp_server.py`, the `/v1/mcp` mount, `.agents/plugins/audiolla/`, `server.json` |
 | `security.md` | `auth.py`, `files.py`, `file_retention.py`, `fetch.py`, `input_resolver.py`, `output_writer.py`, `jobs.py`, `logging.py`, the Dockerfiles, `.github/workflows/`, `.gitleaks.toml`, `THIRD_PARTY.md` |
 | `testing.md` | `tests/`, `tests/integration/` |
-| `docs-and-releases.md` | `README.md`, `docs/`, `CHANGELOG.md`, `.agents/skills/`, any version field, commits and tags |
+| `docs-and-releases.md` | `README.md`, `docs/`, `CHANGELOG.md`, `.agents/skills/`, any version field, release tags |

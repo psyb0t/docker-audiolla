@@ -6,9 +6,8 @@ Prefix: PY.
 
 ## Style and typing
 
-- **PY1:** Start every module in `src/audiolla/` with `from __future__ import annotations`, except `__init__.py` and `server.py`. `server.py` must not have it: PEP 563 string annotations turned the generated request models into `ForwardRef`s and broke FastAPI's body detection in v1.0.0 (the note at the top of `server.py`). Annotate every function signature and use `X | None`, not `Optional[X]`.
-- **PY2:** flake8 allows 99 columns and ignores `E203` and `W503` (`.flake8`, which also excludes `schema/_generated.py`). mypy runs with `ignore_missing_imports` and overrides for the ML libraries the dev image lacks (`pyproject.toml`). Both pass on the whole tree; keep it that way. A `# noqa` or `# type: ignore` names its code and is a last resort for untyped third-party APIs or a fix that would change behaviour.
-- **PY3:** Docstrings and comments explain why, including the incident behind a choice: the alias fixups in `src/audiolla/schema/__init__.py`, the `output_single_stem` note in `UVRSeparatorEngine._load_sync`, the TOCTOU note in `EngineBase.get_model`. Do not restate the code.
+- **PY1:** Start every module in `src/audiolla/` with `from __future__ import annotations`, except `__init__.py` and `server.py`. `server.py` must not have it: PEP 563 string annotations turned the generated request models into `ForwardRef`s and broke FastAPI's body detection in v1.0.0 (the note at the top of `server.py`).
+- **PY2:** flake8 allows 99 columns and ignores `E203` and `W503` (`.flake8`, which also excludes `schema/_generated.py`). mypy runs with `ignore_missing_imports` and overrides for the ML libraries the dev image lacks (`pyproject.toml`).
 
 ## Configuration
 
@@ -20,18 +19,12 @@ Prefix: PY.
 
 - **PY7:** Stateful or heavy work with a lifecycle (loads weights, caches a resource, needs a lock) is an engine: a subclass of `EngineBase` in `src/audiolla/engines/` with a slug in the registries. Stateless, cheap DSP is a plain function in `src/audiolla/audio.py`, called from handlers and MCP tools, with no slug (the rule of thumb in the `engines/__init__.py` docstring).
 
-## Async and blocking work
-
-- **PY8:** Never block the event loop. Model loading and inference run in `asyncio.to_thread` (`EngineBase.get_model`, each engine's `_*_sync` method), and so do file writes and `audio.py` calls from handlers (`asyncio.to_thread(files_mod.write_atomic, ...)` in `files_put`).
-- **PY9:** Run external programs (ffmpeg, sox, fluidsynth, fpcalc) with an argument list, `capture_output=True` and a `timeout`, never through a shell (`audio.py`, `engines/ffmpeg_render.py`, `engines/midi_render.py`).
-
 ## Errors
 
 - **PY10:** An engine or `audio.py` failure the caller caused raises `AudioConversionError` or a subclass (`UVRSeparatorError`, `MusicGenError`, `DiarizeError`, ...) with a message the caller can act on; handlers map it to 400 and MCP tools to `ValueError`. Path problems raise `FilePathError`, URL problems `FetchError`, both mapped to 400.
-- **PY11:** Re-raise with `from exc` so the cause survives, as every `HTTPException` in `server.py` does.
-- **PY12:** Catch `Exception` broadly only where an optional step must not break the main one (the sweepers, preload, `unload_all`), log it with `log.exception`, and mark the line `# noqa: BLE001`. Never swallow an exception silently.
+- **PY12:** Broad `except Exception` around an optional step (the sweepers, preload, `unload_all`) logs with `log.exception` and carries `# noqa: BLE001`.
 
 ## Logging
 
 - **PY13:** `src/audiolla/logging.py` owns the handlers: `configure()` installs one JSON formatter on stderr for the root and uvicorn loggers, called once from `__main__.py`. Do not add handlers, call `logging.basicConfig` or `print()` in `src/` (the one `print` is `logging.py`'s own warning before logging exists).
-- **PY14:** Name loggers explicitly under `audiolla.`: `logging.getLogger("audiolla.<module>")` per module (`audiolla.server`, `audiolla.fetch`, `audiolla.mcp`), `audiolla.engine.<slug>` per engine (`EngineBase.__init__`), `audiolla.request` for the request summary. Use %-style arguments and put structured fields in `extra={...}`; the formatter promotes them to top-level JSON keys.
+- **PY14:** Name loggers explicitly under `audiolla.`: `logging.getLogger("audiolla.<module>")` per module (`audiolla.server`, `audiolla.fetch`, `audiolla.mcp`), `audiolla.engine.<slug>` per engine (`EngineBase.__init__`), `audiolla.request` for the request summary. Structured fields in `extra={...}` are promoted by the formatter to top-level JSON keys.
