@@ -5,6 +5,10 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## [Unreleased]
+
+- Use the OpenAPI-generated REST reference for endpoint details. Keep workflows and deployment guidance in the guides.
+
 ## v2.0.3. 2026-11-26
 
 - Migrated the documentation to Docusaurus with a generated OpenAPI reference and local search.

@@ -1,13 +1,10 @@
----
-layout: null
-permalink: /llms.txt
-sitemap: false
----
-# {{ site.title }}
+# Audiolla
 
-> {{ site.description }}
+> Self-hosted audio editing, analysis, MIDI and generation over REST and MCP.
 
-{% assign pages = site.pages | where_exp: "item", "item.description" | where_exp: "item", "item.nav_exclude != true" | sort: "nav_order" -%}
-{% for item in pages -%}
-- [{{ item.title }}]({{ item.url | absolute_url }}): {{ item.description }}
-{% endfor -%}
+- [Getting started](https://psyb0t.github.io/docker-audiolla/getting-started/)
+- [REST API](https://psyb0t.github.io/docker-audiolla/api/)
+- [OpenAPI YAML](https://psyb0t.github.io/docker-audiolla/reference/openapi.yaml)
+- [MCP server](https://psyb0t.github.io/docker-audiolla/mcp/)
+- [Presets, pipelines and batch](https://psyb0t.github.io/docker-audiolla/workflows/)
+- [Configuration](https://psyb0t.github.io/docker-audiolla/configuration/)

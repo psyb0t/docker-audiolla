@@ -30,21 +30,7 @@ curl -X POST http://localhost:8000/v1/audio/separate \
 # -> {"job_id":"<uuid>","status":"pending","status_url":"/v1/jobs/<uuid>"}
 ```
 
-With `async_job: true` the output target is optional. Without `output_path` or `output_url` the result is staged at `jobs/<job_id>.<ext>`, where `<ext>` is the output format (`wav` by default). With `output_url` the result is PUT to that URL when the job finishes, so a presigned S3 PUT URL works:
-
-```bash
-curl -X POST http://localhost:8000/v1/audio/master \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "file_path": "uploads/track.wav",
-    "mode": "chain",
-    "preset": "transparent",
-    "async_job": true,
-    "output_url": "https://bucket.s3.amazonaws.com/result.wav?X-Amz-..."
-  }'
-```
-
-`output_url` needs the fetch policy to allow the host; see [files and remote URLs](files.md). The input is read when you submit, so a bad `file_path` or a refused `file_url` fails the request itself with a 400, not the job.
+With `async_job: true` the output target is optional. Without a destination, the result is staged under `jobs/<job_id>.<ext>`. For remote output, supply a presigned PUT URL allowed by the [fetch policy](files.md#fetch-policy). Audiolla reads the input when you submit the job, so bad input fails the submission.
 
 ## Which endpoints queue jobs
 
@@ -56,16 +42,7 @@ These have no `async_job` field at all and always answer inline: the JSON-only a
 
 ## Poll, list and cancel
 
-```bash
-# one job
-curl http://localhost:8000/v1/jobs/<job_id>
-
-# every job, oldest first; filter with ?status=
-curl 'http://localhost:8000/v1/jobs?status=running'
-
-# cancel a running job, or remove a finished one
-curl -X DELETE http://localhost:8000/v1/jobs/<job_id>
-```
+[Get a job](/reference/get-job/) by ID, [list jobs](/reference/list-jobs/) by status, or [cancel or remove a job](/reference/cancel-job/).
 
 A job record has these fields:
 

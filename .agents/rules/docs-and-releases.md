@@ -4,12 +4,12 @@ Prefix: DOC.
 
 ## Where docs live
 
-- **DOC1:** `docs/` is the documentation, published by GitHub Pages from `main` with Just the Docs (`remote_theme` pinned in `docs/_config.yml`, the bundled `mocha` scheme in `docs/_sass/`). `README.md` is the front door: pitch, run, quick start, a Documentation section with full `https://psyb0t.github.io/docker-audiolla/...` links (relative links break on Docker Hub), agents, build, sponsor, license. Reference material goes into `docs/`, not the README.
+- **DOC1:** Docusaurus builds the guides in `docs/` and a single REST reference from `openapi.yaml`. `docs/api.md` is the entry page. Use full published documentation URLs in `README.md` so they also work on Docker Hub.
 - **DOC2:** A change ships with its docs in the same change. Owners:
 
   | Change | Update |
   | --- | --- |
-  | REST endpoint or field | `openapi.yaml` (API1), the feature page in `docs/`, `docs/api.md` (regenerate it from the spec; it must match `openapi.yaml` exactly) |
+  | REST endpoint or field | `openapi.yaml` (API1). Link guides to the generated operation and update them when the workflow changes. |
   | Setting | `docs/configuration.md`, `.env.example`, the skill's `references/setup.md` |
   | Engine | `docs/engines.md`, the feature page, README and `docs/index.md` counts (ENG8) |
   | MCP tool | `docs/mcp.md` and the counts (MCP8) |
@@ -17,7 +17,7 @@ Prefix: DOC.
   | Security behaviour | `docs/security.md` |
   | Make target or CI | `docs/development.md`, `AGENTS.md` Dev workflow |
 
-- **DOC4:** Docs pages carry a `nav_order`. Wrap any `{{` or `{%` in raw tags. Before calling docs done, `make docs` builds and the site checker reports no errors.
+- **DOC4:** Docs pages carry a `nav_order`. Keep request fields, allowed values, and per-operation examples in the spec. Keep end-to-end examples and operational guidance in the guides. Run `make docs` and check links before finishing.
 
 ## CHANGELOG
 

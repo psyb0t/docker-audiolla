@@ -4025,6 +4025,15 @@ paths:
         content:
           application/json:
             schema: { type: object, additionalProperties: true }
+            example: &simple_midi_score
+              tempo_bpm: 120
+              tracks:
+                - name: Piano
+                  program: 0
+                  notes:
+                    - { pitch: 60, start_beats: 0, duration_beats: 1 }
+                    - { pitch: 64, start_beats: 1, duration_beats: 1 }
+                    - { pitch: 67, start_beats: 2, duration_beats: 1 }
       responses:
         "200":
           description: MIDI bytes or staged-output JSON.
@@ -4060,6 +4069,14 @@ paths:
         content:
           application/json:
             schema: { type: object, additionalProperties: true }
+            example:
+              tempo_bpm: 120
+              steps: 4
+              bars: 1
+              pattern:
+                kick: [1, 0, 0, 0]
+                snare: [0, 0, 1, 0]
+                hihat: [1, 1, 1, 1]
       responses:
         "200":
           description: MIDI bytes or staged-output JSON.
@@ -4114,6 +4131,7 @@ paths:
         content:
           application/json:
             schema: { type: object, additionalProperties: true }
+            example: *simple_midi_score
       responses:
         "200":
           description: Audio bytes or staged-output JSON.

@@ -12,34 +12,7 @@ Audio endpoints read their input from the server's staging area or from a URL, a
 
 `/v1/files` is a plain file store under `/data/files` inside the container. Upload a file once, then use its path as `file_path` on any number of requests, and download results written with `output_path`.
 
-```bash
-# upload: the request body is the raw file
-curl -X PUT --data-binary @track.wav \
-  -H 'Content-Type: application/octet-stream' \
-  http://localhost:8000/v1/files/uploads/track.wav
-# -> {"path":"uploads/track.wav","size":5292044}
-
-# list every staged file
-curl http://localhost:8000/v1/files
-# -> {"files":[{"path":"uploads/track.wav","size":5292044,"modified":"2026-11-09T12:00:00Z"}]}
-
-# download
-curl -o copy.wav http://localhost:8000/v1/files/uploads/track.wav
-
-# delete
-curl -X DELETE http://localhost:8000/v1/files/uploads/track.wav
-# -> {"deleted":"uploads/track.wav"}
-```
-
-`PUT` returns 201 and replaces an existing file. It writes to a `.part` file first and renames it, so a reader never sees half a file. A body larger than `AUDIOLLA_MAX_UPLOAD_BYTES` (200 MiB by default) gets a 413. Deleting a file also removes directories it leaves empty.
-
-Once staged, refer to the file by path:
-
-```bash
-curl -X POST http://localhost:8000/v1/audio/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"file_path":"uploads/track.wav","features":["bpm"]}'
-```
+Use the REST reference to [upload a file](/reference/files-put/), [list staged files](/reference/files-list/), [download a file](/reference/files-get/) or [delete a file](/reference/files-delete/). An upload replaces the existing file atomically, so readers never see a partial write. Deleting a file removes empty parent directories.
 
 MCP clients get the same store through the `list_files`, `put_file` (content as base64), `get_file` and `delete_file` tools. `get_file` returns only the path and size; download the bytes with `GET /v1/files/{path}`. See [MCP server](mcp.md).
 

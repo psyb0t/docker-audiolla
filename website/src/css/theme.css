@@ -31,3 +31,11 @@ html[data-theme="dark"] {
   --ifm-code-background: #313244;
   --ifm-breadcrumb-item-background-active: #313244;
 }
+
+.legacy-api-link:not(:target) {
+  display: none;
+}
+
+.legacy-api-link:target {
+  scroll-margin-top: var(--ifm-navbar-height);
+}

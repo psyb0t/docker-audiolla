@@ -77,7 +77,7 @@ client -> MCP slash rewrite -> request log -> bearer auth -> retention lease -> 
 | `requirements-heavy-*.txt`, `scripts/heavy-deps-*.in`, `scripts/heavy-deps-overrides.txt` | Generated hash-locked ML stacks and their inputs. |
 | `scripts/` | `generate_models.sh`, `compile_heavy_deps.sh`, `bump_exclude_newer.sh`. Excluded from the Docker build context. |
 | `tests/` | Offline unit tests (`test_*.py`), `image_smoke.py`, and `tests/integration/` (pytest against a real container). |
-| `docs/` | GitHub Pages documentation site (Just the Docs). `README.md` links to it. |
+| `docs/` | Docusaurus guides published to GitHub Pages. The REST reference is generated from OpenAPI. `README.md` links to it. |
 | `.agents/` | Skill, OpenClaw plugin, Claude and Codex plugin manifests, and these rules. Excluded from the Docker build context. |
 | `.github/workflows/` | `pipeline.yml` (lint, tests, images, badges, release, ClawHub and MCP Registry), `collaborators-only.yml`, `mirror-and-archive.yml`, `issue-pull.yml`. |
 | `server.json`, `glama.json` | MCP Registry entry and Glama claim. |
@@ -105,7 +105,7 @@ Every tool runs in the dev container (`Dockerfile.dev`, tag `psyb0t/audiolla-dev
 | `make pkg-add PKG=...`, `pkg-remove`, `pkg-update`, `pkg-upgrade` | Move `exclude-newer` to UTC midnight seven days ago, then change dependencies through uv. |
 | `make pkg-lock` | `uv lock` at the current cutoff. |
 | `make pkg-compile-heavy` | Recompiles `requirements-heavy-*.txt` (`VARIANT=cpu`, `cuda` or `all`). |
-| `make docs` | Builds `docs/` with the GitHub Pages Jekyll image into `.testing/docs-site`. |
+| `make docs` | Builds the Docusaurus guides and generated REST reference into `website/build`. |
 | `make version` | Prints `v` plus the `pyproject.toml` version. |
 | `make clean` | Removes local images and build and cache artifacts. |
 
@@ -128,7 +128,7 @@ Every tool runs in the dev container (`Dockerfile.dev`, tag `psyb0t/audiolla-dev
 
 ## Common changes
 
-Adding or changing a REST endpoint: follow API1 to API7 in [api-contract.md](.agents/rules/api-contract.md): `openapi.yaml` first, `make generate`, then the handler in `server.py`. Add it to `_CATALOG_GROUPS`, write unit tests (TST2), and update the docs page, `docs/api.md` (DOC2) and the CHANGELOG.
+Adding or changing a REST endpoint: follow API1 to API7 in [api-contract.md](.agents/rules/api-contract.md): `openapi.yaml` first, `make generate`, then the handler in `server.py`. Add it to `_CATALOG_GROUPS`, write unit tests (TST2), and update the relevant guide when its workflow changes (DOC2), and update the CHANGELOG.
 
 Adding an engine with an existing executor:
 

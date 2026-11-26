@@ -62,35 +62,21 @@ Going beyond localhost? Set `AUDIOLLA_AUTH_TOKEN` first and read the [security p
 
 ## Quick start
 
-Stage the input once, then reference it by path. Every audio endpoint takes a JSON body.
+Stage a WAV, then use its path to check tempo, key and loudness. Run this against the local container from the previous section.
 
 ```bash
-# stage your input file
-curl -X PUT --data-binary @song.wav \
+curl --fail-with-body -X PUT \
   -H 'Content-Type: application/octet-stream' \
+  --data-binary @song.wav \
   http://localhost:8000/v1/files/uploads/song.wav
 
-# rip the vocals out of a track
-curl -X POST http://localhost:8000/v1/audio/separate \
+curl --fail-with-body -X POST \
   -H 'Content-Type: application/json' \
-  -d '{"file_path":"uploads/song.wav","engine":"htdemucs","stems":["vocals"],"output_path":"out/vocals.wav"}'
-curl -o vocals.wav http://localhost:8000/v1/files/out/vocals.wav
-
-# what key is it in? what are the chords?
-curl -X POST http://localhost:8000/v1/audio/chords \
-  -H 'Content-Type: application/json' \
-  -d '{"file_path":"uploads/song.wav"}'
-
-# transcribe that vocal melody to MIDI, then render it back through a SoundFont
-curl -X POST http://localhost:8000/v1/audio/to_midi/basic-pitch \
-  -H 'Content-Type: application/json' \
-  -d '{"file_path":"out/vocals.wav","output_path":"out/melody.mid"}'
-curl -X POST http://localhost:8000/v1/midi/render \
-  -H 'Content-Type: application/json' \
-  -d '{"file_path":"out/melody.mid","output_path":"out/rendered.wav"}'
+  --data '{"file_path":"uploads/song.wav"}' \
+  http://localhost:8000/v1/audio/analyze
 ```
 
-Audio in. MIDI out. Chords detected. Re-synthesized. No Python environment to set up. No API keys. Just HTTP.
+For a full run from audio to isolated vocals and MIDI, see [Getting started](https://psyb0t.github.io/docker-audiolla/getting-started/).
 
 ## Documentation
 
@@ -109,7 +95,7 @@ The full documentation lives at **[psyb0t.github.io/docker-audiolla](https://psy
 | [Troubleshooting](https://psyb0t.github.io/docker-audiolla/troubleshooting/) | Exact error messages, causes and fixes |
 | [Development](https://psyb0t.github.io/docker-audiolla/development/) | Makefile, tests, code generation, dependency locks, CI |
 
-Feature guides with curl examples: [separation and restoration](https://psyb0t.github.io/docker-audiolla/separation-and-restoration/), [mastering and effects](https://psyb0t.github.io/docker-audiolla/mastering-and-effects/), [analysis](https://psyb0t.github.io/docker-audiolla/analysis/), [speech](https://psyb0t.github.io/docker-audiolla/speech/), [editing](https://psyb0t.github.io/docker-audiolla/editing/), [generation](https://psyb0t.github.io/docker-audiolla/generation/), [MIDI](https://psyb0t.github.io/docker-audiolla/midi/), [presets and pipelines](https://psyb0t.github.io/docker-audiolla/workflows/), [async jobs](https://psyb0t.github.io/docker-audiolla/jobs/).
+Feature guides: [separation and restoration](https://psyb0t.github.io/docker-audiolla/separation-and-restoration/), [mastering and effects](https://psyb0t.github.io/docker-audiolla/mastering-and-effects/), [analysis](https://psyb0t.github.io/docker-audiolla/analysis/), [speech](https://psyb0t.github.io/docker-audiolla/speech/), [editing](https://psyb0t.github.io/docker-audiolla/editing/), [generation](https://psyb0t.github.io/docker-audiolla/generation/), [MIDI](https://psyb0t.github.io/docker-audiolla/midi/), [presets and pipelines](https://psyb0t.github.io/docker-audiolla/workflows/), [async jobs](https://psyb0t.github.io/docker-audiolla/jobs/).
 
 ## Agents and MCP
 

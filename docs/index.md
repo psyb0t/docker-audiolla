@@ -29,13 +29,7 @@ docker run --rm -it --gpus all \
   psyb0t/audiolla:latest-cuda
 ```
 
-Then check it is up:
-
-```bash
-curl http://localhost:8000/healthz
-```
-
-The [getting started](getting-started.md) page walks through the first real request.
+[Getting started](getting-started.md) walks through checking the server and sending your first request.
 
 ## Where to read
 

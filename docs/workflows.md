@@ -32,11 +32,9 @@ curl -X POST http://localhost:8000/v1/presets/master-for-spotify \
 # -> {"path":"out/mastered.wav","size":...,"preset":"master-for-spotify","steps":[...]}
 
 curl -o mastered.wav http://localhost:8000/v1/files/out/mastered.wav
-
-# list presets, then look at one before running it
-curl http://localhost:8000/v1/presets | jq '.data[] | {name, description}'
-curl http://localhost:8000/v1/presets/podcast-cleanup | jq '.steps'
 ```
+
+See [list presets](/reference/list-presets/) and [inspect a preset](/reference/describe-preset/) to check what is installed.
 
 The image ships three presets from [`presets/`](https://github.com/psyb0t/docker-audiolla/tree/main/presets):
 
@@ -119,9 +117,6 @@ curl -X POST http://localhost:8000/v1/pipeline \
     ]
   }'
 # -> {"path":"out/pipelined.wav","size":...,"steps":[...]}
-
-# list the op names
-curl http://localhost:8000/v1/ops | jq .
 ```
 
 `steps` must be a non-empty list of `{op, params}`. The other body fields are the same as for presets. The `steps` log in the response has one entry per step: `step` (index), `op`, `params` and `size_after` (bytes).
@@ -215,9 +210,6 @@ The response is `{"results": [...]}`. A successful item is `{"index": i, "op": "
 
 `GET /v1/catalog` returns endpoints grouped into 18 categories: `separation`, `restoration`, `dynamics`, `eq-spatial`, `mastering`, `time-pitch`, `editing`, `analysis`, `effects-creative`, `generate`, `visualize`, `midi`, `metadata`, `workflow`, `speech`, `files`, `jobs` and `management`. Each entry has `method`, `path` and a one-line `summary`. Agents and scripts can use it for discovery without reading the whole OpenAPI spec.
 
-```bash
-curl http://localhost:8000/v1/catalog \
-  | jq '.categories[] | {name, endpoint_count: (.endpoints | length)}'
-```
+See [get the catalog](/reference/catalog/) for response details.
 
 The catalog is a hand-written list in `src/audiolla/server.py` (`_CATALOG_GROUPS`), not generated from the routes. It currently leaves out `POST /v1/audio/convert`, `POST /v1/audio/transform` and `POST /v1/midi/generate`. The [REST API reference](api.md) is the complete list.

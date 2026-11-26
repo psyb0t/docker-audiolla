@@ -99,7 +99,7 @@ The version lives in `pyproject.toml`. The [CHANGELOG](https://github.com/psyb0t
 
 ## Docs
 
-This site is built by GitHub Pages from `docs/` on `main`. Build it locally with the same Docusaurus toolchain:
+Docusaurus builds the guides from `docs/` and the REST reference from `openapi.yaml`. Update endpoint fields, allowed values, and examples in the spec. Use the guides for workflows and operational behavior. Build locally with:
 
 ```bash
 make docs   # output in website/build
