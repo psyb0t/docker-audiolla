@@ -147,3 +147,12 @@ git-update.sh.debot
 /website/build/
 /website/guide-order.mjs
 /website/node_modules/
+
+# Local development files
+CLAUDE.local.md
+coverage.txt
+coverage.out
+profile.out
+.cover/
+.editorconfig
+.nvmrc
