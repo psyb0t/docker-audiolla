@@ -10,7 +10,7 @@ from pydantic import AnyUrl, BaseModel, Field, RootModel
 
 
 class ErrorBody(BaseModel):
-    detail: str
+    detail: Annotated[str, Field(description='Explanation of why the request failed.')]
 
 
 class OutputFormat(Enum):
@@ -42,12 +42,28 @@ class BaseAudioInputRequest(BaseModel):
 
 
 class MultiAudioInputRequest(BaseModel):
-    file_paths: Annotated[list[str] | None, Field(min_length=1)] = None
-    file_urls: list[AnyUrl] | None = None
+    file_paths: Annotated[
+        list[str] | None,
+        Field(
+            description='Relative paths of staged inputs, in processing order. Use file_urls for remote inputs instead.',
+            min_length=1,
+        ),
+    ] = None
+    file_urls: Annotated[
+        list[AnyUrl] | None,
+        Field(
+            description='HTTP(S) input URLs in processing order. Use file_paths for staged inputs instead.'
+        ),
+    ] = None
 
 
 class BaseAudioOutputRequest(BaseModel):
-    output_format: OutputFormat = OutputFormat.wav
+    output_format: Annotated[
+        OutputFormat,
+        Field(
+            description='Encoding for the output audio, including audio files inside a ZIP.'
+        ),
+    ] = OutputFormat.wav
     output_path: Annotated[
         str | None,
         Field(
@@ -60,92 +76,191 @@ class BaseAudioOutputRequest(BaseModel):
             description='Presigned PUT URL (S3, hybrids3, MinIO, R2, etc.) — response is JSON {url, size, ...}.'
         ),
     ] = None
-    async_job: bool = False
-    webhook_url: AnyUrl | None = None
+    async_job: Annotated[
+        bool, Field(description='Run in the background and return a job ID to poll.')
+    ] = False
+    webhook_url: Annotated[
+        AnyUrl | None,
+        Field(
+            description='Optional URL that receives a POST when the background job finishes.'
+        ),
+    ] = None
 
 
 class BaseGenerateRequest(BaseModel):
-    prompt: Annotated[str, Field(min_length=1)]
-    duration_sec: Annotated[float, Field(ge=0.001)] = 10.0
-    seed: int | None = None
+    prompt: Annotated[
+        str, Field(description='Text describing the audio to generate.', min_length=1)
+    ]
+    duration_sec: Annotated[
+        float,
+        Field(
+            description='Requested length of the result, in seconds. Each model has its own maximum.',
+            ge=0.001,
+        ),
+    ] = 10.0
+    seed: Annotated[
+        int | None,
+        Field(
+            description='Random seed for repeatable results with the same model and settings.'
+        ),
+    ] = None
 
 
 class StagedOutputResponse(BaseModel):
-    path: str
-    size: int
-    output_format: str | None = None
+    path: Annotated[
+        str, Field(description='Relative staging path. Use it to download the result.')
+    ]
+    size: Annotated[int, Field(description='Size of the result in bytes.')]
+    output_format: Annotated[
+        str | None, Field(description='Encoding for the written audio.')
+    ] = None
 
 
 class UrlOutputResponse(BaseModel):
-    url: AnyUrl
-    size: int
-    output_format: str | None = None
+    url: Annotated[
+        AnyUrl, Field(description='Destination URL to which the result was written.')
+    ]
+    size: Annotated[int, Field(description='Size of the result in bytes.')]
+    output_format: Annotated[
+        str | None, Field(description='Encoding for the written audio.')
+    ] = None
 
 
 class JobAcceptedResponse(BaseModel):
-    job_id: str
-    status_url: AnyUrl
+    job_id: Annotated[
+        str, Field(description='ID returned when the server accepts a background job.')
+    ]
+    status_url: Annotated[
+        AnyUrl, Field(description='URL to poll for the job state and result.')
+    ]
 
 
 class NormalizeResponse(StagedOutputResponse):
-    target_lufs: float | None = None
-    measured_lufs: float | None = None
+    target_lufs: Annotated[
+        float | None, Field(description='Target integrated loudness in LUFS.')
+    ] = None
+    measured_lufs: Annotated[
+        float | None,
+        Field(
+            description='Integrated loudness measured by the normalization operation.'
+        ),
+    ] = None
 
 
 class AnalyzeResult(BaseModel):
-    bpm: float | None = None
-    key: str | None = None
-    loudness_lufs: float | None = None
-    duration: float | None = None
-    spectral_centroid: float | None = None
-    rms: float | None = None
-    zcr: float | None = None
+    bpm: Annotated[float | None, Field(description='Estimated beats per minute.')] = (
+        None
+    )
+    key: Annotated[str | None, Field(description='Estimated musical key and mode.')] = (
+        None
+    )
+    loudness_lufs: Annotated[
+        float | None, Field(description='Integrated loudness in LUFS.')
+    ] = None
+    duration: Annotated[
+        float | None, Field(description='Duration of the recording in seconds.')
+    ] = None
+    spectral_centroid: Annotated[
+        float | None, Field(description='Mean spectral centroid in hertz.')
+    ] = None
+    rms: Annotated[float | None, Field(description='Root mean square amplitude.')] = (
+        None
+    )
+    zcr: Annotated[float | None, Field(description='Mean zero-crossing rate.')] = None
 
 
 class LoudnessResult(BaseModel):
-    loudness_lufs: float
-    target_lufs: float | None = None
-    normalized: bool | None = None
+    loudness_lufs: Annotated[float, Field(description='Integrated loudness in LUFS.')]
+    target_lufs: Annotated[
+        float | None, Field(description='Target integrated loudness in LUFS.')
+    ] = None
+    normalized: Annotated[
+        bool | None, Field(description='Whether normalization was applied.')
+    ] = None
 
 
 class HealthResponse(BaseModel):
-    ok: bool
-    device: str
-    engines: list[str]
+    ok: Annotated[bool, Field(description='Whether the server is responding.')]
+    device: Annotated[str, Field(description='Compute device selected by the server.')]
+    engines: Annotated[
+        list[str], Field(description='Engine slugs configured for this server.')
+    ]
 
 
 class EngineInfo(BaseModel):
-    slug: str
-    executor: str
-    variant: str | None = None
-    stems: list[str] | None = None
-    presets: list[str] | None = None
-    loaded: bool | None = None
-    idle_seconds: float | None = None
-    description: str | None = None
+    slug: Annotated[str, Field(description='Engine identifier used in requests.')]
+    executor: Annotated[
+        str, Field(description='Backend implementation for this engine.')
+    ]
+    variant: Annotated[
+        str | None, Field(description='Model variant used by the backend.')
+    ] = None
+    stems: Annotated[
+        list[str] | None, Field(description='Stem names the engine can produce.')
+    ] = None
+    presets: Annotated[
+        list[str] | None,
+        Field(description='Names of presets supported by this engine.'),
+    ] = None
+    loaded: Annotated[
+        bool | None, Field(description='Whether the engine is currently in memory.')
+    ] = None
+    idle_seconds: Annotated[
+        float | None,
+        Field(description='Seconds since the loaded engine last served a request.'),
+    ] = None
+    description: Annotated[
+        str | None, Field(description='Purpose of this configured engine.')
+    ] = None
 
 
 class AudioSeparateRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
     engine: Annotated[
         str,
         Field(
-            description='Stem-separation engine slug. Demucs (`htdemucs`,\n`htdemucs_ft`, `mdx_extra`) or UVR variant\n(`uvr-vocal-bsr`, `uvr-karaoke`, `uvr-dereverb`, etc.).\n'
+            description='Configured stem-separation engine slug, such as `htdemucs` or\n`uvr-vocal-bsr`. Use GET /v1/engines to check availability.\n'
         ),
     ]
     stems: Annotated[
         list[str],
-        Field(description='Subset of stems to return. Empty = all available stems.'),
+        Field(
+            description='Case-sensitive names from the selected engine, such as vocals for Demucs. Omit this field or send an empty list for all available stems.'
+        ),
     ] = []
 
 
 class PresetRunRequest(BaseModel):
-    file_path: str | None = None
-    file_url: AnyUrl | None = None
-    output_path: str | None = None
-    output_url: AnyUrl | None = None
+    file_path: Annotated[
+        str | None,
+        Field(
+            description='Relative path to a staged input. Give either file_path or file_url.'
+        ),
+    ] = None
+    file_url: Annotated[
+        AnyUrl | None,
+        Field(
+            description="HTTP(S) address of a remote input. The server's fetch policy applies."
+        ),
+    ] = None
+    output_path: Annotated[
+        str | None,
+        Field(description='Relative staging path where the result should be written.'),
+    ] = None
+    output_url: Annotated[
+        AnyUrl | None,
+        Field(description='HTTP(S) destination that accepts a PUT of the result.'),
+    ] = None
     output_format: OutputFormat | None = None
-    async_job: bool = False
-    webhook_url: AnyUrl | None = None
+    async_job: Annotated[
+        bool,
+        Field(description='Return a job ID and process the request in the background.'),
+    ] = False
+    webhook_url: Annotated[
+        AnyUrl | None,
+        Field(
+            description='Optional URL that receives a POST when the background job finishes.'
+        ),
+    ] = None
     params: Annotated[
         dict[str, Any] | None,
         Field(description='Override values for parameters the preset declares.'),
@@ -158,14 +273,43 @@ class Step(BaseModel):
 
 
 class PipelineRunRequest(BaseModel):
-    file_path: str | None = None
-    file_url: AnyUrl | None = None
-    steps: list[Step]
-    output_path: str | None = None
-    output_url: AnyUrl | None = None
+    file_path: Annotated[
+        str | None,
+        Field(
+            description='Relative path to a staged input. Give either file_path or file_url.'
+        ),
+    ] = None
+    file_url: Annotated[
+        AnyUrl | None,
+        Field(
+            description="HTTP(S) address of a remote input. The server's fetch policy applies."
+        ),
+    ] = None
+    steps: Annotated[
+        list[Step],
+        Field(
+            description="Operations in execution order. Each step uses the previous step's output."
+        ),
+    ]
+    output_path: Annotated[
+        str | None,
+        Field(description='Relative staging path where the result should be written.'),
+    ] = None
+    output_url: Annotated[
+        AnyUrl | None,
+        Field(description='HTTP(S) destination that accepts a PUT of the result.'),
+    ] = None
     output_format: OutputFormat | None = None
-    async_job: bool = False
-    webhook_url: AnyUrl | None = None
+    async_job: Annotated[
+        bool,
+        Field(description='Return a job ID and process the request in the background.'),
+    ] = False
+    webhook_url: Annotated[
+        AnyUrl | None,
+        Field(
+            description='Optional URL that receives a POST when the background job finishes.'
+        ),
+    ] = None
 
 
 class Mode(Enum):
@@ -180,19 +324,36 @@ class AudioMasterRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
             description='Either `reference` (match against a reference track via\nmatchering) or `chain` (run a pedalboard preset chain).\nOptional — auto-detected from the request: if\nreference_path or reference_url is set, mode=reference;\nelse if preset is set, mode=chain; else 400.\n'
         ),
     ] = None
-    reference_path: str | None = None
-    reference_url: AnyUrl | None = None
+    reference_path: Annotated[
+        str | None,
+        Field(
+            description='Relative staging path to the track used as the mastering reference.'
+        ),
+    ] = None
+    reference_url: Annotated[
+        AnyUrl | None,
+        Field(
+            description='HTTP(S) URL of a mastering reference. The fetch policy applies.'
+        ),
+    ] = None
     preset: Annotated[
         str | None,
         Field(
             description="For mode=chain, the pedalboard preset to run. Currently\n'transparent' or 'loud'. (Note: this is distinct from the\nworkflow presets listed at GET /v1/presets — those are\nmulti-step pipelines invoked via POST /v1/presets/{name}.)\n"
         ),
     ] = None
-    target_lufs: float | None = None
+    target_lufs: Annotated[
+        float | None, Field(description='Target integrated loudness in LUFS.')
+    ] = None
 
 
 class AudioAnalyzeRequest(BaseAudioInputRequest):
-    features: list[str] = []
+    features: Annotated[
+        list[str],
+        Field(
+            description='Measurements to return. Choose bpm, key, loudness, duration, spectral_centroid, rms or zcr. Omit or send an empty list for all measurements.'
+        ),
+    ] = []
 
 
 class Operation(BaseModel):
@@ -211,7 +372,9 @@ AudioLoudnessRequest = BaseAudioInputRequest
 
 
 class AudioNormalizeRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    target_lufs: float
+    target_lufs: Annotated[
+        float, Field(description='Target integrated loudness in LUFS.')
+    ]
 
 
 class Effect(BaseModel):
@@ -227,85 +390,160 @@ class AudioFxRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
 
 
 class MidiRenderRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    soundfont_path: str | None = None
-    gain: float = 0.5
-    samplerate: int = 44100
+    soundfont_path: Annotated[
+        str | None,
+        Field(
+            description='Relative path of a staged SoundFont. Omit to use the bundled SoundFont.'
+        ),
+    ] = None
+    gain: Annotated[float, Field(description='FluidSynth output gain.')] = 0.5
+    samplerate: Annotated[
+        int, Field(description='Sample rate of rendered audio in hertz.')
+    ] = 44100
 
 
 class AudioBeatsRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    click_track: bool = False
-    start_bpm: float | None = None
+    click_track: Annotated[
+        bool, Field(description='Render an audible click on the estimated beat grid.')
+    ] = False
+    start_bpm: Annotated[
+        float | None,
+        Field(
+            description='Initial tempo estimate, in beats per minute, for beat tracking.'
+        ),
+    ] = None
 
 
 AudioOnsetsRequest = BaseAudioInputRequest
 
 
 class AudioMelodyRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    fmin: float = 65.0
-    fmax: float = 2093.0
-    as_midi: bool = False
+    fmin: Annotated[float, Field(description='Lowest pitch to track, in hertz.')] = 65.0
+    fmax: Annotated[float, Field(description='Highest pitch to track, in hertz.')] = (
+        2093.0
+    )
+    as_midi: Annotated[
+        bool, Field(description='Export tracked melody notes as MIDI.')
+    ] = False
 
 
 class AudioSegmentsRequest(BaseAudioInputRequest):
-    num_segments: int = 6
+    num_segments: Annotated[int, Field(description='Number of sections to find.')] = 6
 
 
 class AudioSilenceRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    threshold_db: float = -30.0
-    min_duration_sec: float = 0.5
-    trim_mode: str | None = None
+    threshold_db: Annotated[
+        float, Field(description='Level threshold in decibels.')
+    ] = -30.0
+    min_duration_sec: Annotated[
+        float, Field(description='Shortest quiet interval to report, in seconds.')
+    ] = 0.5
+    trim_mode: Annotated[
+        str | None,
+        Field(
+            description='Whether to report silence only, trim the edges or remove all detected silent intervals.'
+        ),
+    ] = None
 
 
 class AudioVisualizeImageSpectrogramRequest(
     BaseAudioInputRequest, BaseAudioOutputRequest
 ):
-    width: int = 1280
-    height: int = 720
-    color: str = 'intensity'
-    scale: str = 'log'
+    width: Annotated[int, Field(description='Output width in pixels.')] = 1280
+    height: Annotated[int, Field(description='Output height in pixels.')] = 720
+    color: Annotated[
+        str, Field(description='Color or palette name used for the visualization.')
+    ] = 'intensity'
+    scale: Annotated[
+        str, Field(description='Frequency display scale for the spectrogram.')
+    ] = 'log'
 
 
 class AudioVisualizeImageWaveformRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    width: int = 1280
-    height: int = 720
-    color: str = 'lime'
+    width: Annotated[int, Field(description='Output width in pixels.')] = 1280
+    height: Annotated[int, Field(description='Output height in pixels.')] = 720
+    color: Annotated[
+        str, Field(description='Color or palette name used for the visualization.')
+    ] = 'lime'
 
 
 class AudioVisualizeVideoRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    width: int = 1280
-    height: int = 720
-    fps: int = 30
-    container: str = 'mp4'
+    width: Annotated[int, Field(description='Output width in pixels.')] = 1280
+    height: Annotated[int, Field(description='Output height in pixels.')] = 720
+    fps: Annotated[
+        int, Field(description='Frames per second for the generated video.')
+    ] = 30
+    container: Annotated[
+        str, Field(description='Container format for the generated video.')
+    ] = 'mp4'
 
 
 class AudioFingerprintRequest(BaseAudioInputRequest):
-    analyze_seconds: float = 120.0
-    return_raw: bool = False
+    analyze_seconds: Annotated[
+        float, Field(description='Maximum duration to fingerprint, in seconds.')
+    ] = 120.0
+    return_raw: Annotated[
+        bool, Field(description='Return the uncompressed fingerprint representation.')
+    ] = False
 
 
 class AudioRestoreRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    aggressive: bool = False
+    aggressive: Annotated[
+        bool,
+        Field(
+            description='Use more aggressive echo removal with the compatible UVR engine.'
+        ),
+    ] = False
 
 
 MidiInspectRequest = BaseAudioInputRequest
 
 
 class MidiTransformRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    transpose_semitones: int = 0
-    quantize_grid_beats: float | None = None
-    tempo_bpm: float | None = None
-    keep_channels: str | None = None
-    drop_channels: str | None = None
+    transpose_semitones: Annotated[
+        int,
+        Field(
+            description='Number of semitones to shift notes. Negative values lower the pitch.'
+        ),
+    ] = 0
+    quantize_grid_beats: Annotated[
+        float | None,
+        Field(description='Grid spacing in beats for snapping note starts.'),
+    ] = None
+    tempo_bpm: Annotated[
+        float | None, Field(description='Tempo in beats per minute.')
+    ] = None
+    keep_channels: Annotated[
+        str | None, Field(description='Comma-separated MIDI channels to retain.')
+    ] = None
+    drop_channels: Annotated[
+        str | None, Field(description='Comma-separated MIDI channels to exclude.')
+    ] = None
 
 
 class AudioToMidiRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    onset_threshold: float = 0.5
-    frame_threshold: float = 0.3
-    minimum_note_length_ms: float = 58.0
-    minimum_frequency: float | None = None
-    maximum_frequency: float | None = None
-    multiple_pitch_bends: bool = False
-    melodia_trick: bool = True
+    onset_threshold: Annotated[
+        float, Field(description='Minimum onset confidence used when detecting notes.')
+    ] = 0.5
+    frame_threshold: Annotated[
+        float, Field(description='Minimum frame confidence used when tracking notes.')
+    ] = 0.3
+    minimum_note_length_ms: Annotated[
+        float, Field(description='Shortest note to keep, in milliseconds.')
+    ] = 58.0
+    minimum_frequency: Annotated[
+        float | None, Field(description='Lowest note frequency to consider, in hertz.')
+    ] = None
+    maximum_frequency: Annotated[
+        float | None, Field(description='Highest note frequency to consider, in hertz.')
+    ] = None
+    multiple_pitch_bends: Annotated[
+        bool, Field(description='Allow pitch bends on simultaneous notes.')
+    ] = False
+    melodia_trick: Annotated[
+        bool,
+        Field(description="Enable Basic Pitch's additional melody inference step."),
+    ] = True
 
 
 class AudioEnhanceRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
@@ -313,43 +551,92 @@ class AudioEnhanceRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
 
 
 class AudioChordsRequest(BaseAudioInputRequest):
-    hop_length: int = 512
-    segment_min_duration_sec: float = 0.5
+    hop_length: Annotated[
+        int, Field(description='Number of samples between analysis frames.')
+    ] = 512
+    segment_min_duration_sec: Annotated[
+        float, Field(description='Shortest chord segment to retain, in seconds.')
+    ] = 0.5
 
 
 class AudioVadRequest(BaseAudioInputRequest):
-    threshold: float = 0.5
-    min_speech_duration_ms: float = 250.0
-    min_silence_duration_ms: float = 100.0
+    threshold: Annotated[
+        float,
+        Field(description='Minimum speech probability for voice activity detection.'),
+    ] = 0.5
+    min_speech_duration_ms: Annotated[
+        float,
+        Field(description='Minimum duration of a speech interval, in milliseconds.'),
+    ] = 250.0
+    min_silence_duration_ms: Annotated[
+        float,
+        Field(
+            description='Minimum silence required to separate speech intervals, in milliseconds.'
+        ),
+    ] = 100.0
 
 
 class AudioDiarizeRequest(BaseAudioInputRequest):
-    num_speakers: int | None = None
-    min_speakers: int | None = None
-    max_speakers: int | None = None
+    num_speakers: Annotated[
+        int | None, Field(description='Exact number of speakers, if you know it.')
+    ] = None
+    min_speakers: Annotated[
+        int | None,
+        Field(description='Lower bound on the number of speakers to detect.'),
+    ] = None
+    max_speakers: Annotated[
+        int | None,
+        Field(description='Upper bound on the number of speakers to detect.'),
+    ] = None
 
 
 class AudioStretchRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    tempo_factor: float = 1.0
-    pitch_semitones: float = 0.0
+    tempo_factor: Annotated[
+        float,
+        Field(
+            description='Playback speed multiplier without changing pitch. A value of 0.5 halves the speed.'
+        ),
+    ] = 1.0
+    pitch_semitones: Annotated[
+        float,
+        Field(description='Pitch shift in semitones. Positive values raise the pitch.'),
+    ] = 0.0
 
 
 class AudioTagRequest(BaseAudioInputRequest):
-    top_k: int = 10
+    top_k: Annotated[
+        int, Field(description='Maximum number of ranked labels to return.')
+    ] = 10
 
 
 class AudioEmbedRequest(BaseAudioInputRequest):
-    query_text: str | None = None
+    query_text: Annotated[
+        str | None, Field(description='Text to compare with the audio embedding.')
+    ] = None
 
 
 class AudioSeparateHpssRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    margin: float = 1.0
-    kernel_size: int = 31
+    margin: Annotated[
+        float,
+        Field(
+            description='Separation margin. Values above one make the separation stricter.'
+        ),
+    ] = 1.0
+    kernel_size: Annotated[
+        int,
+        Field(
+            description='Size of the median filter used to separate tonal and percussive content.'
+        ),
+    ] = 31
 
 
 class AudioNoiseReduceRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    stationary: bool = False
-    prop_decrease: float = 1.0
+    stationary: Annotated[
+        bool, Field(description='Treat the noise as steady across the recording.')
+    ] = False
+    prop_decrease: Annotated[
+        float, Field(description='Fraction of estimated background noise to remove.')
+    ] = 1.0
 
 
 AudioInfoRequest = BaseAudioInputRequest
@@ -379,12 +666,21 @@ class AudioConcatRequest(MultiAudioInputRequest, BaseAudioOutputRequest):
 
 
 class AudioSpeedRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    speed: float
+    speed: Annotated[
+        float,
+        Field(
+            description='Playback speed multiplier. A value of 1 keeps the original rate.'
+        ),
+    ]
 
 
 class AudioConvertRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    sample_rate: int | None = None
-    channels: int | None = None
+    sample_rate: Annotated[
+        int | None, Field(description='Output sample rate in hertz.')
+    ] = None
+    channels: Annotated[
+        int | None, Field(description='Number of output audio channels.')
+    ] = None
 
 
 class AudioSimilarRequest(BaseAudioInputRequest):
@@ -409,7 +705,12 @@ class AudioSimilarRequest(BaseAudioInputRequest):
 
 
 class MidiQuantizeRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    grid_beats: float = 0.25
+    grid_beats: Annotated[
+        float,
+        Field(
+            description='Grid spacing in beats. A value of 0.25 is a sixteenth note in 4/4.'
+        ),
+    ] = 0.25
 
 
 class AudioClassifyRequest(BaseAudioInputRequest):
@@ -438,7 +739,10 @@ class AudioFadeRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
     fade_out_sec: Annotated[
         float | None, Field(description='Alias for fade_out. Wins if both are set.')
     ] = None
-    curve: str = 'tri'
+    curve: Annotated[
+        str,
+        Field(description='Fade curve that controls how gain changes during the fade.'),
+    ] = 'tri'
 
 
 class AudioReverseRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
@@ -446,16 +750,29 @@ class AudioReverseRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
 
 
 class AudioLoopRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    count: int = 2
+    count: Annotated[
+        int,
+        Field(description='Number of times to play the source in the resulting file.'),
+    ] = 2
 
 
 class AudioBpmMatchRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    target_bpm: float
-    pitch_semitones: float = 0.0
+    target_bpm: Annotated[
+        float, Field(description='Desired tempo in beats per minute.')
+    ]
+    pitch_semitones: Annotated[
+        float,
+        Field(description='Pitch shift in semitones. Positive values raise the pitch.'),
+    ] = 0.0
 
 
 class AudioStereoWidthRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    width: float = 1.0
+    width: Annotated[
+        float,
+        Field(
+            description='Stereo width multiplier. Zero is mono and one keeps the original width.'
+        ),
+    ] = 1.0
 
 
 class Mode1(Enum):
@@ -464,14 +781,31 @@ class Mode1(Enum):
 
 
 class AudioSplitRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    mode: Mode1 = Mode1.equal
-    count: int | None = None
-    threshold_db: float = -30.0
-    min_duration_sec: float = 0.5
+    mode: Annotated[
+        Mode1,
+        Field(
+            description='Use equal for a fixed number of pieces or silence to cut at quiet intervals.'
+        ),
+    ] = Mode1.equal
+    count: Annotated[
+        int | None, Field(description='Number of pieces in equal-length mode.')
+    ] = None
+    threshold_db: Annotated[
+        float, Field(description='Level threshold in decibels.')
+    ] = -30.0
+    min_duration_sec: Annotated[
+        float,
+        Field(description='Minimum quiet interval used as a split point, in seconds.'),
+    ] = 0.5
 
 
 class AudioPanRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    position: float = 0.0
+    position: Annotated[
+        float,
+        Field(
+            description='Stereo placement from -1 at the left through 0 at center to 1 at the right.'
+        ),
+    ] = 0.0
 
 
 class AudioEqRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
@@ -482,16 +816,32 @@ class AudioEqRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
 
 
 class AudioKeyMatchRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    target_key: str
+    target_key: Annotated[str, Field(description='Target root note, such as C or F#.')]
 
 
 class AudioSidechainDuckRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    trigger_file_path: str | None = None
-    trigger_file_url: str | None = None
-    threshold_db: float = -20.0
-    ratio: float = 4.0
-    attack_ms: float = 10.0
-    release_ms: float = 200.0
+    trigger_file_path: Annotated[
+        str | None,
+        Field(
+            description='Relative staging path of the audio that triggers gain reduction.'
+        ),
+    ] = None
+    trigger_file_url: Annotated[
+        str | None,
+        Field(description='HTTP(S) URL of the audio that triggers gain reduction.'),
+    ] = None
+    threshold_db: Annotated[
+        float, Field(description='Level threshold in decibels.')
+    ] = -20.0
+    ratio: Annotated[
+        float, Field(description='Compression ratio above the threshold.')
+    ] = 4.0
+    attack_ms: Annotated[
+        float, Field(description='Time in milliseconds for gain reduction to engage.')
+    ] = 10.0
+    release_ms: Annotated[
+        float, Field(description='Time in milliseconds for gain to recover.')
+    ] = 200.0
 
 
 class AudioMetadataRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
@@ -512,7 +862,12 @@ class Mode2(Enum):
 
 
 class AudioMidSideRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    mode: Mode2
+    mode: Annotated[
+        Mode2,
+        Field(
+            description='Use encode for stereo to mid-side, or decode for mid-side to stereo.'
+        ),
+    ]
 
 
 class AudioBeatSliceRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
@@ -520,14 +875,28 @@ class AudioBeatSliceRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
 
 
 class AudioConvReverbRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    ir_file_path: str | None = None
-    ir_file_url: str | None = None
-    wet_mix: float = 0.3
+    ir_file_path: Annotated[
+        str | None, Field(description='Relative staging path of the impulse response.')
+    ] = None
+    ir_file_url: Annotated[
+        str | None, Field(description='HTTP(S) URL of the impulse response.')
+    ] = None
+    wet_mix: Annotated[
+        float,
+        Field(
+            description='Fraction of the reverberated signal in the result. Zero is dry and one is fully wet.'
+        ),
+    ] = 0.3
 
 
 class AudioTransientRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    attack_gain_db: float = 0.0
-    sustain_gain_db: float = 0.0
+    attack_gain_db: Annotated[
+        float,
+        Field(description='Gain change in decibels applied to transient attacks.'),
+    ] = 0.0
+    sustain_gain_db: Annotated[
+        float, Field(description='Gain change in decibels applied to sustain.')
+    ] = 0.0
 
 
 class AudioMultibandCompressRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
@@ -559,52 +928,97 @@ AudioDjPrepRequest = BaseAudioInputRequest
 
 
 class AudioLoudnessCurveRequest(BaseAudioInputRequest):
-    hop_length: int = 512
+    hop_length: Annotated[
+        int, Field(description='Number of samples between analysis frames.')
+    ] = 512
 
 
 class AudioPitchCorrectRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    strength: float = 1.0
+    strength: Annotated[
+        float,
+        Field(
+            description='Correction strength. Zero bypasses the correction and one applies the full estimated shift.'
+        ),
+    ] = 1.0
 
 
 class AudioRepairRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    declip: bool = True
-    dehum: bool = False
-    hum_freq: float = 50.0
+    declip: Annotated[bool, Field(description='Interpolate clipped samples.')] = True
+    dehum: Annotated[
+        bool, Field(description='Remove mains hum around the specified frequency.')
+    ] = False
+    hum_freq: Annotated[
+        float,
+        Field(description='Fundamental hum frequency in hertz, typically 50 or 60.'),
+    ] = 50.0
 
 
 class AudioLoopPointRequest(BaseAudioInputRequest):
-    min_loop_bars: int = 4
-    num_candidates: int = 5
+    min_loop_bars: Annotated[int, Field(description='Minimum loop length in bars.')] = 4
+    num_candidates: Annotated[
+        int, Field(description='Maximum number of alternate loop candidates to return.')
+    ] = 5
 
 
 class AudioChordsToMidiRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    tempo_bpm: float | None = None
-    velocity: int = 80
-    octave: int = 4
+    tempo_bpm: Annotated[
+        float | None, Field(description='Tempo in beats per minute.')
+    ] = None
+    velocity: Annotated[
+        int, Field(description='MIDI note-on velocity for generated chord notes.')
+    ] = 80
+    octave: Annotated[
+        int, Field(description='MIDI octave used when voicing detected chords.')
+    ] = 4
 
 
 class AudioDeessRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    threshold_db: float = -20.0
-    frequency_hz: float = 6000.0
-    ratio: float = 4.0
+    threshold_db: Annotated[
+        float, Field(description='Level threshold in decibels.')
+    ] = -20.0
+    frequency_hz: Annotated[
+        float, Field(description='Cutoff in hertz for the band containing sibilance.')
+    ] = 6000.0
+    ratio: Annotated[
+        float, Field(description='Compression ratio above the threshold.')
+    ] = 4.0
 
 
 AudioStereoFieldRequest = BaseAudioInputRequest
 
 
 class AudioThumbnailRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    duration_sec: float = 30.0
+    duration_sec: Annotated[
+        float, Field(description='Length of the preview clip in seconds.')
+    ] = 30.0
 
 
 class MidiHumanizeRequest(BaseAudioInputRequest, BaseAudioOutputRequest):
-    timing_ms: float = 10.0
-    velocity_pct: float = 10.0
-    seed: int | None = None
+    timing_ms: Annotated[
+        float,
+        Field(
+            description='Maximum timing variation in milliseconds in either direction.'
+        ),
+    ] = 10.0
+    velocity_pct: Annotated[
+        float,
+        Field(
+            description='Maximum velocity variation as a percentage of the MIDI velocity range.'
+        ),
+    ] = 10.0
+    seed: Annotated[
+        int | None,
+        Field(description='Seed for repeatable timing and velocity variations.'),
+    ] = None
 
 
 class StableAudioOpenRequest(BaseGenerateRequest, BaseAudioOutputRequest):
-    num_inference_steps: Annotated[int, Field(ge=1, le=500)] = 100
-    negative_prompt: str = 'low quality, average quality'
+    num_inference_steps: Annotated[
+        int, Field(description='Number of inference steps to run.', ge=1, le=500)
+    ] = 100
+    negative_prompt: Annotated[
+        str, Field(description='Text describing sounds or qualities to avoid.')
+    ] = 'low quality, average quality'
 
 
 class MusicGenRequest(BaseGenerateRequest, BaseAudioOutputRequest):
@@ -621,5 +1035,9 @@ class RiffusionRequest(BaseGenerateRequest, BaseAudioOutputRequest):
 
 
 class AudioLDM2Request(BaseGenerateRequest, BaseAudioOutputRequest):
-    num_inference_steps: Annotated[int, Field(ge=1, le=500)] = 200
-    negative_prompt: str = 'Low quality.'
+    num_inference_steps: Annotated[
+        int, Field(description='Number of inference steps to run.', ge=1, le=500)
+    ] = 200
+    negative_prompt: Annotated[
+        str, Field(description='Text describing sounds or qualities to avoid.')
+    ] = 'Low quality.'

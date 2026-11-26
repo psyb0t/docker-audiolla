@@ -147,7 +147,7 @@ components:
       type: object
       required: [detail]
       properties:
-        detail: { type: string }
+        detail: { type: string, description: "Explanation of why the request failed." }
 
     OutputFormat:
       type: string
@@ -179,11 +179,13 @@ components:
         Multi-file audio input. Provide exactly one of `file_paths` or `file_urls`.
       properties:
         file_paths:
+          description: "Relative paths of staged inputs, in processing order. Use file_urls for remote inputs instead."
           type: array
           items: { type: string }
           minItems: 1
           nullable: true
         file_urls:
+          description: "HTTP(S) input URLs in processing order. Use file_paths for staged inputs instead."
           type: array
           items: { type: string, format: uri }
           minItems: 1
@@ -198,6 +200,7 @@ components:
         output_format:
           $ref: "#/components/schemas/OutputFormat"
           default: wav
+          description: Encoding for the output audio, including audio files inside a ZIP.
         output_path:
           type: string
           nullable: true
@@ -210,79 +213,83 @@ components:
         async_job:
           type: boolean
           default: false
+          description: Run in the background and return a job ID to poll.
         webhook_url:
           type: string
           format: uri
           nullable: true
+          description: Optional URL that receives a POST when the background job finishes.
 
     BaseGenerateRequest:
       type: object
       required: [prompt]
       properties:
-        prompt: { type: string, minLength: 1 }
+        prompt: { type: string, minLength: 1, description: "Text describing the audio to generate." }
         duration_sec:
+          description: "Requested length of the result, in seconds. Each model has its own maximum."
           type: number
           minimum: 0.001
           default: 10.0
-        seed: { type: integer, nullable: true }
+        seed: { type: integer, nullable: true, description: "Random seed for repeatable results with the same model and settings." }
 
     StagedOutputResponse:
       type: object
       required: [path, size]
       properties:
-        path: { type: string }
-        size: { type: integer }
-        output_format: { type: string, nullable: true }
+        path: { type: string, description: "Relative staging path. Use it to download the result." }
+        size: { type: integer, description: "Size of the result in bytes." }
+        output_format: { type: string, nullable: true, description: "Encoding for the written audio." }
 
     UrlOutputResponse:
       type: object
       required: [url, size]
       properties:
-        url: { type: string, format: uri }
-        size: { type: integer }
-        output_format: { type: string, nullable: true }
+        url: { type: string, format: uri, description: "Destination URL to which the result was written." }
+        size: { type: integer, description: "Size of the result in bytes." }
+        output_format: { type: string, nullable: true, description: "Encoding for the written audio." }
 
     JobAcceptedResponse:
       type: object
       required: [job_id, status_url]
       properties:
-        job_id: { type: string }
-        status_url: { type: string, format: uri }
+        job_id: { type: string, description: "ID returned when the server accepts a background job." }
+        status_url: { type: string, format: uri, description: "URL to poll for the job state and result." }
 
     NormalizeResponse:
       allOf:
         - $ref: "#/components/schemas/StagedOutputResponse"
         - type: object
           properties:
-            target_lufs: { type: number, nullable: true }
-            measured_lufs: { type: number, nullable: true }
+            target_lufs: { type: number, nullable: true, description: "Target integrated loudness in LUFS." }
+            measured_lufs: { type: number, nullable: true, description: "Integrated loudness measured by the normalization operation." }
 
     AnalyzeResult:
       type: object
       properties:
-        bpm: { type: number, nullable: true }
-        key: { type: string, nullable: true }
-        loudness_lufs: { type: number, nullable: true }
-        duration: { type: number, nullable: true }
-        spectral_centroid: { type: number, nullable: true }
-        rms: { type: number, nullable: true }
-        zcr: { type: number, nullable: true }
+        bpm: { type: number, nullable: true, description: "Estimated beats per minute." }
+        key: { type: string, nullable: true, description: "Estimated musical key and mode." }
+        loudness_lufs: { type: number, nullable: true, description: "Integrated loudness in LUFS." }
+        duration: { type: number, nullable: true, description: "Duration of the recording in seconds." }
+        spectral_centroid: { type: number, nullable: true, description: "Mean spectral centroid in hertz." }
+        rms: { type: number, nullable: true, description: "Root mean square amplitude." }
+        zcr: { type: number, nullable: true, description: "Mean zero-crossing rate." }
 
     LoudnessResult:
       type: object
       required: [loudness_lufs]
       properties:
-        loudness_lufs: { type: number }
-        target_lufs: { type: number, nullable: true }
-        normalized: { type: boolean }
+        loudness_lufs: { type: number, description: "Integrated loudness in LUFS." }
+        target_lufs: { type: number, nullable: true, description: "Target integrated loudness in LUFS." }
+        normalized: { type: boolean, description: "Whether normalization was applied." }
 
     HealthResponse:
       type: object
       required: [ok, device, engines]
       properties:
-        ok: { type: boolean }
-        device: { type: string }
+        ok: { type: boolean, description: "Whether the server is responding." }
+        device: { type: string, description: "Compute device selected by the server." }
         engines:
+          description: "Engine slugs configured for this server."
           type: array
           items: { type: string }
 
@@ -290,18 +297,20 @@ components:
       type: object
       required: [slug, executor]
       properties:
-        slug: { type: string }
-        executor: { type: string }
-        variant: { type: string, nullable: true }
+        slug: { type: string, description: "Engine identifier used in requests." }
+        executor: { type: string, description: "Backend implementation for this engine." }
+        variant: { type: string, nullable: true, description: "Model variant used by the backend." }
         stems:
+          description: "Stem names the engine can produce."
           type: array
           items: { type: string }
         presets:
+          description: "Names of presets supported by this engine."
           type: array
           items: { type: string }
-        loaded: { type: boolean, nullable: true }
-        idle_seconds: { type: number, nullable: true }
-        description: { type: string, nullable: true }
+        loaded: { type: boolean, nullable: true, description: "Whether the engine is currently in memory." }
+        idle_seconds: { type: number, nullable: true, description: "Seconds since the loaded engine last served a request." }
+        description: { type: string, nullable: true, description: "Purpose of this configured engine." }
 
     # ── per-endpoint request schemas (generated from server handler signatures) ──
     AudioSeparateRequest:
@@ -315,15 +324,14 @@ components:
               type: string
               default: htdemucs
               description: |
-                Stem-separation engine slug. Demucs (`htdemucs`,
-                `htdemucs_ft`, `mdx_extra`) or UVR variant
-                (`uvr-vocal-bsr`, `uvr-karaoke`, `uvr-dereverb`, etc.).
+                Configured stem-separation engine slug, such as `htdemucs` or
+                `uvr-vocal-bsr`. Use GET /v1/engines to check availability.
             stems:
               type: array
               items:
                 type: string
               default: []
-              description: Subset of stems to return. Empty = all available stems.
+              description: Case-sensitive names from the selected engine, such as vocals for Demucs. Omit this field or send an empty list for all available stems.
 
     PresetRunRequest:
       type: object
@@ -333,13 +341,13 @@ components:
         specifies the input + output destination and optional per-step
         param overrides.
       properties:
-        file_path: { type: string, nullable: true }
-        file_url: { type: string, format: uri, nullable: true }
-        output_path: { type: string, nullable: true }
-        output_url: { type: string, format: uri, nullable: true }
+        file_path: { type: string, nullable: true, description: "Relative path to a staged input. Give either file_path or file_url." }
+        file_url: { type: string, format: uri, nullable: true, description: "HTTP(S) address of a remote input. The server's fetch policy applies." }
+        output_path: { type: string, nullable: true, description: "Relative staging path where the result should be written." }
+        output_url: { type: string, format: uri, nullable: true, description: "HTTP(S) destination that accepts a PUT of the result." }
         output_format: { $ref: "#/components/schemas/OutputFormat" }
-        async_job: { type: boolean, default: false }
-        webhook_url: { type: string, format: uri, nullable: true }
+        async_job: { type: boolean, default: false, description: "Return a job ID and process the request in the background." }
+        webhook_url: { type: string, format: uri, nullable: true, description: "Optional URL that receives a POST when the background job finishes." }
         params:
           type: object
           additionalProperties: true
@@ -354,9 +362,10 @@ components:
         one input. Intermediates stay in memory between steps — no
         re-upload required.
       properties:
-        file_path: { type: string, nullable: true }
-        file_url: { type: string, format: uri, nullable: true }
+        file_path: { type: string, nullable: true, description: "Relative path to a staged input. Give either file_path or file_url." }
+        file_url: { type: string, format: uri, nullable: true, description: "HTTP(S) address of a remote input. The server's fetch policy applies." }
         steps:
+          description: "Operations in execution order. Each step uses the previous step's output."
           type: array
           items:
             type: object
@@ -366,11 +375,11 @@ components:
               params:
                 type: object
                 additionalProperties: true
-        output_path: { type: string, nullable: true }
-        output_url: { type: string, format: uri, nullable: true }
+        output_path: { type: string, nullable: true, description: "Relative staging path where the result should be written." }
+        output_url: { type: string, format: uri, nullable: true, description: "HTTP(S) destination that accepts a PUT of the result." }
         output_format: { $ref: "#/components/schemas/OutputFormat" }
-        async_job: { type: boolean, default: false }
-        webhook_url: { type: string, format: uri, nullable: true }
+        async_job: { type: boolean, default: false, description: "Return a job ID and process the request in the background." }
+        webhook_url: { type: string, format: uri, nullable: true, description: "Optional URL that receives a POST when the background job finishes." }
 
     AudioMasterRequest:
       allOf:
@@ -389,9 +398,11 @@ components:
                 reference_path or reference_url is set, mode=reference;
                 else if preset is set, mode=chain; else 400.
             reference_path:
+              description: "Relative staging path to the track used as the mastering reference."
               type: string
               nullable: true
             reference_url:
+              description: "HTTP(S) URL of a mastering reference. The fetch policy applies."
               type: string
               format: uri
               nullable: true
@@ -404,6 +415,7 @@ components:
                 workflow presets listed at GET /v1/presets — those are
                 multi-step pipelines invoked via POST /v1/presets/{name}.)
             target_lufs:
+              description: "Target integrated loudness in LUFS."
               type: number
               nullable: true
 
@@ -413,6 +425,7 @@ components:
         - type: object
           properties:
             features:
+              description: "Measurements to return. Choose bpm, key, loudness, duration, spectral_centroid, rms or zcr. Omit or send an empty list for all measurements."
               type: array
               items:
                 type: string
@@ -446,6 +459,7 @@ components:
           required: [target_lufs]
           properties:
             target_lufs:
+              description: "Target integrated loudness in LUFS."
               type: number
 
     AudioFxRequest:
@@ -471,12 +485,15 @@ components:
         - type: object
           properties:
             soundfont_path:
+              description: "Relative path of a staged SoundFont. Omit to use the bundled SoundFont."
               type: string
               nullable: true
             gain:
+              description: "FluidSynth output gain."
               type: number
               default: 0.5
             samplerate:
+              description: "Sample rate of rendered audio in hertz."
               type: integer
               default: 44100
 
@@ -487,9 +504,11 @@ components:
         - type: object
           properties:
             click_track:
+              description: "Render an audible click on the estimated beat grid."
               type: boolean
               default: false
             start_bpm:
+              description: "Initial tempo estimate, in beats per minute, for beat tracking."
               type: number
               nullable: true
 
@@ -504,12 +523,15 @@ components:
         - type: object
           properties:
             fmin:
+              description: "Lowest pitch to track, in hertz."
               type: number
               default: 65.0
             fmax:
+              description: "Highest pitch to track, in hertz."
               type: number
               default: 2093.0
             as_midi:
+              description: "Export tracked melody notes as MIDI."
               type: boolean
               default: false
 
@@ -519,6 +541,7 @@ components:
         - type: object
           properties:
             num_segments:
+              description: "Number of sections to find."
               type: integer
               default: 6
 
@@ -529,12 +552,15 @@ components:
         - type: object
           properties:
             threshold_db:
+              description: "Level threshold in decibels."
               type: number
               default: -30.0
             min_duration_sec:
+              description: "Shortest quiet interval to report, in seconds."
               type: number
               default: 0.5
             trim_mode:
+              description: "Whether to report silence only, trim the edges or remove all detected silent intervals."
               type: string
               nullable: true
 
@@ -545,15 +571,19 @@ components:
         - type: object
           properties:
             width:
+              description: "Output width in pixels."
               type: integer
               default: 1280
             height:
+              description: "Output height in pixels."
               type: integer
               default: 720
             color:
+              description: "Color or palette name used for the visualization."
               type: string
               default: intensity
             scale:
+              description: "Frequency display scale for the spectrogram."
               type: string
               default: log
 
@@ -564,12 +594,15 @@ components:
         - type: object
           properties:
             width:
+              description: "Output width in pixels."
               type: integer
               default: 1280
             height:
+              description: "Output height in pixels."
               type: integer
               default: 720
             color:
+              description: "Color or palette name used for the visualization."
               type: string
               default: lime
 
@@ -580,15 +613,19 @@ components:
         - type: object
           properties:
             width:
+              description: "Output width in pixels."
               type: integer
               default: 1280
             height:
+              description: "Output height in pixels."
               type: integer
               default: 720
             fps:
+              description: "Frames per second for the generated video."
               type: integer
               default: 30
             container:
+              description: "Container format for the generated video."
               type: string
               default: mp4
 
@@ -598,9 +635,11 @@ components:
         - type: object
           properties:
             analyze_seconds:
+              description: "Maximum duration to fingerprint, in seconds."
               type: number
               default: 120.0
             return_raw:
+              description: "Return the uncompressed fingerprint representation."
               type: boolean
               default: false
 
@@ -611,6 +650,7 @@ components:
         - type: object
           properties:
             aggressive:
+              description: "Use more aggressive echo removal with the compatible UVR engine."
               type: boolean
               default: false
 
@@ -625,18 +665,23 @@ components:
         - type: object
           properties:
             transpose_semitones:
+              description: "Number of semitones to shift notes. Negative values lower the pitch."
               type: integer
               default: 0
             quantize_grid_beats:
+              description: "Grid spacing in beats for snapping note starts."
               type: number
               nullable: true
             tempo_bpm:
+              description: "Tempo in beats per minute."
               type: number
               nullable: true
             keep_channels:
+              description: "Comma-separated MIDI channels to retain."
               type: string
               nullable: true
             drop_channels:
+              description: "Comma-separated MIDI channels to exclude."
               type: string
               nullable: true
 
@@ -647,24 +692,31 @@ components:
         - type: object
           properties:
             onset_threshold:
+              description: "Minimum onset confidence used when detecting notes."
               type: number
               default: 0.5
             frame_threshold:
+              description: "Minimum frame confidence used when tracking notes."
               type: number
               default: 0.3
             minimum_note_length_ms:
+              description: "Shortest note to keep, in milliseconds."
               type: number
               default: 58.0
             minimum_frequency:
+              description: "Lowest note frequency to consider, in hertz."
               type: number
               nullable: true
             maximum_frequency:
+              description: "Highest note frequency to consider, in hertz."
               type: number
               nullable: true
             multiple_pitch_bends:
+              description: "Allow pitch bends on simultaneous notes."
               type: boolean
               default: false
             melodia_trick:
+              description: "Enable Basic Pitch's additional melody inference step."
               type: boolean
               default: true
 
@@ -679,9 +731,11 @@ components:
         - type: object
           properties:
             hop_length:
+              description: "Number of samples between analysis frames."
               type: integer
               default: 512
             segment_min_duration_sec:
+              description: "Shortest chord segment to retain, in seconds."
               type: number
               default: 0.5
 
@@ -691,12 +745,15 @@ components:
         - type: object
           properties:
             threshold:
+              description: "Minimum speech probability for voice activity detection."
               type: number
               default: 0.5
             min_speech_duration_ms:
+              description: "Minimum duration of a speech interval, in milliseconds."
               type: number
               default: 250.0
             min_silence_duration_ms:
+              description: "Minimum silence required to separate speech intervals, in milliseconds."
               type: number
               default: 100.0
 
@@ -706,12 +763,15 @@ components:
         - type: object
           properties:
             num_speakers:
+              description: "Exact number of speakers, if you know it."
               type: integer
               nullable: true
             min_speakers:
+              description: "Lower bound on the number of speakers to detect."
               type: integer
               nullable: true
             max_speakers:
+              description: "Upper bound on the number of speakers to detect."
               type: integer
               nullable: true
 
@@ -722,9 +782,11 @@ components:
         - type: object
           properties:
             tempo_factor:
+              description: "Playback speed multiplier without changing pitch. A value of 0.5 halves the speed."
               type: number
               default: 1.0
             pitch_semitones:
+              description: "Pitch shift in semitones. Positive values raise the pitch."
               type: number
               default: 0.0
 
@@ -734,6 +796,7 @@ components:
         - type: object
           properties:
             top_k:
+              description: "Maximum number of ranked labels to return."
               type: integer
               default: 10
 
@@ -743,6 +806,7 @@ components:
         - type: object
           properties:
             query_text:
+              description: "Text to compare with the audio embedding."
               type: string
               nullable: true
 
@@ -753,9 +817,11 @@ components:
         - type: object
           properties:
             margin:
+              description: "Separation margin. Values above one make the separation stricter."
               type: number
               default: 1.0
             kernel_size:
+              description: "Size of the median filter used to separate tonal and percussive content."
               type: integer
               default: 31
 
@@ -766,9 +832,11 @@ components:
         - type: object
           properties:
             stationary:
+              description: "Treat the noise as steady across the recording."
               type: boolean
               default: false
             prop_decrease:
+              description: "Fraction of estimated background noise to remove."
               type: number
               default: 1.0
 
@@ -809,6 +877,7 @@ components:
           required: [speed]
           properties:
             speed:
+              description: "Playback speed multiplier. A value of 1 keeps the original rate."
               type: number
 
     AudioConvertRequest:
@@ -818,9 +887,11 @@ components:
         - type: object
           properties:
             sample_rate:
+              description: "Output sample rate in hertz."
               type: integer
               nullable: true
             channels:
+              description: "Number of output audio channels."
               type: integer
               nullable: true
 
@@ -860,6 +931,7 @@ components:
         - type: object
           properties:
             grid_beats:
+              description: "Grid spacing in beats. A value of 0.25 is a sixteenth note in 4/4."
               type: number
               default: 0.25
 
@@ -902,6 +974,7 @@ components:
               nullable: true
               description: Alias for fade_out. Wins if both are set.
             curve:
+              description: "Fade curve that controls how gain changes during the fade."
               type: string
               default: tri
 
@@ -917,6 +990,7 @@ components:
         - type: object
           properties:
             count:
+              description: "Number of times to play the source in the resulting file."
               type: integer
               default: 2
 
@@ -928,8 +1002,10 @@ components:
           required: [target_bpm]
           properties:
             target_bpm:
+              description: "Desired tempo in beats per minute."
               type: number
             pitch_semitones:
+              description: "Pitch shift in semitones. Positive values raise the pitch."
               type: number
               default: 0.0
 
@@ -940,6 +1016,7 @@ components:
         - type: object
           properties:
             width:
+              description: "Stereo width multiplier. Zero is mono and one keeps the original width."
               type: number
               default: 1.0
 
@@ -950,16 +1027,20 @@ components:
         - type: object
           properties:
             mode:
+              description: "Use equal for a fixed number of pieces or silence to cut at quiet intervals."
               type: string
               enum: [equal, silence]
               default: equal
             count:
+              description: "Number of pieces in equal-length mode."
               type: integer
               nullable: true
             threshold_db:
+              description: "Level threshold in decibels."
               type: number
               default: -30.0
             min_duration_sec:
+              description: "Minimum quiet interval used as a split point, in seconds."
               type: number
               default: 0.5
 
@@ -970,6 +1051,7 @@ components:
         - type: object
           properties:
             position:
+              description: "Stereo placement from -1 at the left through 0 at center to 1 at the right."
               type: number
               default: 0.0
 
@@ -993,6 +1075,7 @@ components:
           required: [target_key]
           properties:
             target_key:
+              description: "Target root note, such as C or F#."
               type: string
 
     AudioSidechainDuckRequest:
@@ -1002,21 +1085,27 @@ components:
         - type: object
           properties:
             trigger_file_path:
+              description: "Relative staging path of the audio that triggers gain reduction."
               type: string
               nullable: true
             trigger_file_url:
+              description: "HTTP(S) URL of the audio that triggers gain reduction."
               type: string
               nullable: true
             threshold_db:
+              description: "Level threshold in decibels."
               type: number
               default: -20.0
             ratio:
+              description: "Compression ratio above the threshold."
               type: number
               default: 4.0
             attack_ms:
+              description: "Time in milliseconds for gain reduction to engage."
               type: number
               default: 10.0
             release_ms:
+              description: "Time in milliseconds for gain to recover."
               type: number
               default: 200.0
 
@@ -1051,6 +1140,7 @@ components:
           required: [mode]
           properties:
             mode:
+              description: "Use encode for stereo to mid-side, or decode for mid-side to stereo."
               type: string
               enum: [encode, decode]
 
@@ -1066,12 +1156,15 @@ components:
         - type: object
           properties:
             ir_file_path:
+              description: "Relative staging path of the impulse response."
               type: string
               nullable: true
             ir_file_url:
+              description: "HTTP(S) URL of the impulse response."
               type: string
               nullable: true
             wet_mix:
+              description: "Fraction of the reverberated signal in the result. Zero is dry and one is fully wet."
               type: number
               default: 0.3
 
@@ -1082,9 +1175,11 @@ components:
         - type: object
           properties:
             attack_gain_db:
+              description: "Gain change in decibels applied to transient attacks."
               type: number
               default: 0.0
             sustain_gain_db:
+              description: "Gain change in decibels applied to sustain."
               type: number
               default: 0.0
 
@@ -1133,6 +1228,7 @@ components:
         - type: object
           properties:
             hop_length:
+              description: "Number of samples between analysis frames."
               type: integer
               default: 512
 
@@ -1143,6 +1239,7 @@ components:
         - type: object
           properties:
             strength:
+              description: "Correction strength. Zero bypasses the correction and one applies the full estimated shift."
               type: number
               default: 1.0
 
@@ -1153,12 +1250,15 @@ components:
         - type: object
           properties:
             declip:
+              description: "Interpolate clipped samples."
               type: boolean
               default: true
             dehum:
+              description: "Remove mains hum around the specified frequency."
               type: boolean
               default: false
             hum_freq:
+              description: "Fundamental hum frequency in hertz, typically 50 or 60."
               type: number
               default: 50.0
 
@@ -1168,9 +1268,11 @@ components:
         - type: object
           properties:
             min_loop_bars:
+              description: "Minimum loop length in bars."
               type: integer
               default: 4
             num_candidates:
+              description: "Maximum number of alternate loop candidates to return."
               type: integer
               default: 5
 
@@ -1181,12 +1283,15 @@ components:
         - type: object
           properties:
             tempo_bpm:
+              description: "Tempo in beats per minute."
               type: number
               nullable: true
             velocity:
+              description: "MIDI note-on velocity for generated chord notes."
               type: integer
               default: 80
             octave:
+              description: "MIDI octave used when voicing detected chords."
               type: integer
               default: 4
 
@@ -1197,12 +1302,15 @@ components:
         - type: object
           properties:
             threshold_db:
+              description: "Level threshold in decibels."
               type: number
               default: -20.0
             frequency_hz:
+              description: "Cutoff in hertz for the band containing sibilance."
               type: number
               default: 6000.0
             ratio:
+              description: "Compression ratio above the threshold."
               type: number
               default: 4.0
 
@@ -1217,6 +1325,7 @@ components:
         - type: object
           properties:
             duration_sec:
+              description: "Length of the preview clip in seconds."
               type: number
               default: 30.0
 
@@ -1227,12 +1336,15 @@ components:
         - type: object
           properties:
             timing_ms:
+              description: "Maximum timing variation in milliseconds in either direction."
               type: number
               default: 10.0
             velocity_pct:
+              description: "Maximum velocity variation as a percentage of the MIDI velocity range."
               type: number
               default: 10.0
             seed:
+              description: "Seed for repeatable timing and velocity variations."
               type: integer
               nullable: true
 
@@ -1243,8 +1355,8 @@ components:
         - $ref: "#/components/schemas/BaseAudioOutputRequest"
         - type: object
           properties:
-            num_inference_steps: { type: integer, minimum: 1, maximum: 500, default: 100 }
-            negative_prompt: { type: string, default: 'low quality, average quality' }
+            num_inference_steps: { type: integer, minimum: 1, maximum: 500, default: 100, description: "Number of inference steps to run." }
+            negative_prompt: { type: string, default: 'low quality, average quality', description: "Text describing sounds or qualities to avoid." }
 
     MusicGenRequest:
       allOf:
@@ -1269,16 +1381,17 @@ components:
         - $ref: "#/components/schemas/BaseAudioOutputRequest"
         - type: object
           properties:
-            num_inference_steps: { type: integer, minimum: 1, maximum: 500, default: 200 }
-            negative_prompt: { type: string, default: 'Low quality.' }
+            num_inference_steps: { type: integer, minimum: 1, maximum: 500, default: 200, description: "Number of inference steps to run." }
+            negative_prompt: { type: string, default: 'Low quality.', description: "Text describing sounds or qualities to avoid." }
 
 paths:
   /healthz:
     get:
       tags:
         - "Health"
-      summary: Liveness check (always unauthenticated)
+      summary: "Check service health"
       operationId: healthz
+      description: "Check that the server is responding and see its device and configured engines. This route is public even when bearer authentication is enabled."
       security: []
       responses:
         "200":
@@ -1291,16 +1404,34 @@ paths:
     post:
       tags:
         - "Audio Separation"
-      summary: separate
+      summary: "Separate a mix into stems"
       operationId: separate
+      description: "Isolate vocals, drums, bass or other parts with a configured separation engine. Send one input and an output destination for a synchronous request. One requested stem produces an audio file. Several stems, or the default request for all stems, produce a ZIP."
       requestBody:
+        description: Choose the source, engine, stems and output destination.
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSeparateRequest" }
+            examples:
+              vocals:
+                summary: Extract vocals from a staged mix
+                value:
+                  file_path: uploads/song.wav
+                  engine: htdemucs
+                  stems: [vocals]
+                  output_format: wav
+                  output_path: out/vocals.wav
+              allStems:
+                summary: Save every stem in a ZIP
+                value:
+                  file_path: uploads/song.wav
+                  engine: htdemucs
+                  output_format: wav
+                  output_path: out/stems.zip
       responses:
         "200":
-          description: Audio produced.
+          description: Output file descriptor. One stem is returned as audio. Multiple stems are saved as a ZIP.
           content:
             application/json:
               schema:
@@ -1308,7 +1439,7 @@ paths:
                   - $ref: "#/components/schemas/StagedOutputResponse"
                   - $ref: "#/components/schemas/UrlOutputResponse"
         "202":
-          description: Async job accepted.
+          description: Background separation accepted. Poll the job URL for the result.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JobAcceptedResponse" }
@@ -1324,13 +1455,19 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: master
+      summary: "Master an audio track"
       operationId: master
+      description: "Use a reference track to match its tonal balance and loudness, or apply a built-in mastering preset without a reference. The server infers the mode from the supplied reference or preset when you omit the mode."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioMasterRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/master.wav
+              mode: reference
+              reference_path: uploads/reference.wav
       responses:
         "200":
           description: Audio produced.
@@ -1357,13 +1494,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: analyze
+      summary: "Analyze an audio track"
       operationId: analyze
+      description: "Measure tempo, key, loudness and optional audio features from one recording. The JSON fields depend on the requested features and may be null when a measurement cannot be calculated."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioAnalyzeRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -1387,13 +1527,21 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: transform
+      summary: "Run SoX audio transforms"
       operationId: transform
+      description: "Apply the listed effects in order to one input. Each step names a SoX operation and supplies its parameters."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioTransformRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/sox.wav
+              operations:
+              - op: gain
+                params:
+                  db: -3
       responses:
         "200":
           description: Audio produced.
@@ -1420,13 +1568,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: loudness
+      summary: "Measure integrated loudness"
       operationId: loudness
+      description: "Report integrated loudness in LUFS. Use the normalization operation to apply a gain change to the file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioLoudnessRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -1450,13 +1601,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: normalize
+      summary: "Normalize integrated loudness"
       operationId: normalize
+      description: "Apply gain to bring an audio file to the target integrated loudness in LUFS. This writes a new file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioNormalizeRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/normalized.wav
+              target_lufs: -16
       responses:
         "200":
           description: Audio produced.
@@ -1483,13 +1639,21 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: fx
+      summary: "Apply an audio effects chain"
       operationId: fx
+      description: "Run supported Pedalboard effects in order. Each effect takes the keyword arguments for its constructor."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioFxRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/effects.wav
+              effects:
+              - type: Gain
+                params:
+                  gain_db: -3
       responses:
         "200":
           description: Audio produced.
@@ -1516,13 +1680,17 @@ paths:
     post:
       tags:
         - "MIDI"
-      summary: midi_render
+      summary: "Render MIDI to audio"
       operationId: midiRender
+      description: "Play a MIDI file through FluidSynth. The server uses its bundled General MIDI SoundFont unless you supply a staged SoundFont."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/MidiRenderRequest" }
+            example:
+              file_path: uploads/melody.mid
+              output_path: out/rendered.wav
       responses:
         "200":
           description: Audio produced.
@@ -1549,13 +1717,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: beats
+      summary: "Detect beats"
       operationId: beats
+      description: "Return estimated tempo and beat timestamps. You can also render a click track to check the detected beat grid by ear."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioBeatsRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: Audio produced.
@@ -1582,13 +1753,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: onsets
+      summary: "Detect note and sound onsets"
       operationId: onsets
+      description: "Return the timestamps at which notes or other sounds appear to begin. Use these markers to locate individual attacks in a recording."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioOnsetsRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -1612,13 +1786,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: melody
+      summary: "Track melody pitch"
       operationId: melody
+      description: "Estimate pitch over time. Request the optional MIDI export to use the tracked melody in a sequencer."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioMelodyRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: Audio produced.
@@ -1645,13 +1822,17 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: segments
+      summary: "Find musical sections"
       operationId: segments
+      description: "Detect candidate section boundaries within a recording. Use the returned times to navigate or cut the source."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSegmentsRequest" }
+            example:
+              file_path: uploads/song.wav
+              num_segments: 4
       responses:
         "200":
           description: JSON result.
@@ -1675,13 +1856,18 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: silence
+      summary: "Detect silent intervals"
       operationId: silence
+      description: "Find quiet intervals using a level threshold and minimum duration. The operation can also trim silence from the recording."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSilenceRequest" }
+            example:
+              file_path: uploads/song.wav
+              threshold_db: -40
+              min_duration_sec: 0.5
       responses:
         "200":
           description: Audio produced.
@@ -1708,13 +1894,19 @@ paths:
     post:
       tags:
         - "Audio Visualization"
-      summary: visualize_spectrogram
+      summary: "Render a spectrogram image"
       operationId: visualizeSpectrogram
+      description: "Create a still image showing how the recording's frequency content changes over time."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioVisualizeImageSpectrogramRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/spectrogram.png
+              width: 1200
+              height: 600
       responses:
         "200":
           description: Audio produced.
@@ -1741,13 +1933,19 @@ paths:
     post:
       tags:
         - "Audio Visualization"
-      summary: visualize_waveform
+      summary: "Render a waveform image"
       operationId: visualizeWaveform
+      description: "Create a still image of the recording's amplitude over time."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioVisualizeImageWaveformRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/waveform.png
+              width: 1200
+              height: 300
       responses:
         "200":
           description: Audio produced.
@@ -1774,8 +1972,9 @@ paths:
     post:
       tags:
         - "Audio Visualization"
-      summary: visualize_video
+      summary: "Render an audio visualization video"
       operationId: visualizeVideo
+      description: "Choose a visualization mode in the path. The output combines the animated visualization with the source audio."
       parameters:
         - $ref: "#/components/parameters/ModePath"
       requestBody:
@@ -1783,6 +1982,11 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioVisualizeVideoRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/waveform-video.mp4
+              width: 1280
+              height: 720
       responses:
         "200":
           description: Audio produced.
@@ -1809,13 +2013,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: fingerprint
+      summary: "Fingerprint an audio recording"
       operationId: fingerprint
+      description: "Calculate a Chromaprint fingerprint for identifying the same recording across different encodings."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioFingerprintRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -1839,8 +2046,9 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: restore
+      summary: "Restore a recording with UVR"
       operationId: restore
+      description: "Choose a configured restoration engine for the artifact you want to remove, such as reverb or echo. The engine slug goes in the path."
       parameters:
         - $ref: "#/components/parameters/EnginePath"
       requestBody:
@@ -1848,6 +2056,9 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioRestoreRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/restored.wav
       responses:
         "200":
           description: Audio produced.
@@ -1874,13 +2085,16 @@ paths:
     post:
       tags:
         - "MIDI"
-      summary: midi_inspect
+      summary: "Inspect a MIDI file"
       operationId: midiInspect
+      description: "Read musical metadata such as tracks, channels and tempo events without rendering or modifying the file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/MidiInspectRequest" }
+            example:
+              file_path: uploads/melody.mid
       responses:
         "200":
           description: JSON result.
@@ -1904,13 +2118,18 @@ paths:
     post:
       tags:
         - "MIDI"
-      summary: midi_transform
+      summary: "Transform a MIDI file"
       operationId: midiTransform
+      description: "Apply note transposition, tempo, timing or channel changes and save the resulting MIDI. Drum notes are excluded from transposition."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/MidiTransformRequest" }
+            example:
+              file_path: uploads/melody.mid
+              output_path: out/transposed.mid
+              transpose_semitones: 2
       responses:
         "200":
           description: Audio produced.
@@ -1937,8 +2156,9 @@ paths:
     post:
       tags:
         - "MIDI"
-      summary: to_midi
+      summary: "Transcribe audio to MIDI"
       operationId: toMidi
+      description: "Use Basic Pitch to estimate notes and write a polyphonic MIDI file from the audio."
       parameters:
         - $ref: "#/components/parameters/EnginePath"
       requestBody:
@@ -1946,6 +2166,9 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioToMidiRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/transcribed.mid
       responses:
         "200":
           description: Audio produced.
@@ -1972,8 +2195,9 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: audio_enhance
+      summary: "Enhance recorded speech"
       operationId: audioEnhance
+      description: "Use a configured speech enhancement engine to reduce noise in a voice recording and save the processed audio."
       parameters:
         - $ref: "#/components/parameters/EnginePath"
       requestBody:
@@ -1981,6 +2205,9 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioEnhanceRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/enhanced.wav
       responses:
         "200":
           description: Audio produced.
@@ -2007,13 +2234,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: chords
+      summary: "Detect chords and key"
       operationId: chords
+      description: "Estimate the recording's key and return timestamped chord segments as JSON."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioChordsRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -2037,13 +2267,17 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: vad
+      summary: "Detect speech intervals"
       operationId: vad
+      description: "Use Silero voice activity detection to mark where speech starts and ends. The result contains time ranges."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioVadRequest" }
+            example:
+              file_path: uploads/song.wav
+              min_speech_duration_ms: 250
       responses:
         "200":
           description: JSON result.
@@ -2067,8 +2301,9 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: diarize
+      summary: "Identify speaker turns"
       operationId: diarize
+      description: "Use a configured diarization model to assign speaker labels to time ranges. Supply a speaker count if you know how many people are in the recording."
       parameters:
         - $ref: "#/components/parameters/EnginePath"
       requestBody:
@@ -2076,6 +2311,9 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioDiarizeRequest" }
+            example:
+              file_path: uploads/song.wav
+              num_speakers: 2
       responses:
         "200":
           description: JSON result.
@@ -2099,13 +2337,19 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: stretch
+      summary: "Stretch time and shift pitch"
       operationId: stretch
+      description: "Adjust playback speed and pitch independently. A tempo factor below one slows the audio, and positive semitone values raise its pitch."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioStretchRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/stretched.wav
+              tempo_factor: 0.8
+              pitch_semitones: -2
       responses:
         "200":
           description: Audio produced.
@@ -2132,13 +2376,17 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: tag
+      summary: "Tag an audio recording"
       operationId: tag
+      description: "Return ranked AudioSet labels and scores for content such as speech, instruments or environmental sounds."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioTagRequest" }
+            example:
+              file_path: uploads/song.wav
+              top_k: 5
       responses:
         "200":
           description: JSON result.
@@ -2162,13 +2410,17 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: embed
+      summary: "Embed audio for search"
       operationId: embed
+      description: "Return a normalized CLAP audio vector. If you pass a text query, the result also includes the audio-to-text similarity score."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioEmbedRequest" }
+            example:
+              file_path: uploads/song.wav
+              query_text: acoustic guitar
       responses:
         "200":
           description: JSON result.
@@ -2192,13 +2444,17 @@ paths:
     post:
       tags:
         - "Audio Separation"
-      summary: hpss
+      summary: "Split harmonic and percussive audio"
       operationId: hpss
+      description: "Separate tonal content from transients using median filters. The output is a ZIP with a harmonic file and a percussive file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSeparateHpssRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/harmonic-percussive.zip
       responses:
         "200":
           description: Audio produced.
@@ -2225,8 +2481,9 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: noise_reduce
+      summary: "Reduce background noise"
       operationId: noiseReduce
+      description: "Choose a configured noise reduction engine. Use stationary reduction for a steady noise floor or adaptive reduction when the background changes."
       parameters:
         - $ref: "#/components/parameters/EnginePath"
       requestBody:
@@ -2234,6 +2491,10 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioNoiseReduceRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/denoised.wav
+              stationary: true
       responses:
         "200":
           description: Audio produced.
@@ -2260,13 +2521,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: audio_info_endpoint
+      summary: "Read audio file metadata"
       operationId: audioInfo
+      description: "Probe the file for its duration, channels, sample rate, container and codec without rewriting it."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioInfoRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -2290,13 +2554,19 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: trim
+      summary: "Trim an audio clip"
       operationId: trim
+      description: "Keep the time range between the start and end offsets. Omit the end offset to keep audio through the end of the file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioTrimRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/trimmed.wav
+              start_sec: 1
+              end_sec: 5
       responses:
         "200":
           description: Audio produced.
@@ -2323,13 +2593,19 @@ paths:
     post:
       tags:
         - "Audio Mixing"
-      summary: mix
+      summary: "Mix audio tracks"
       operationId: mix
+      description: "Combine two or more recordings so they play at the same time. Inputs are summed, so overlapping loud tracks can clip."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioMixRequest" }
+            example:
+              file_paths:
+              - uploads/song.wav
+              - uploads/second.wav
+              output_path: out/mixed.wav
       responses:
         "200":
           description: Audio produced.
@@ -2356,13 +2632,19 @@ paths:
     post:
       tags:
         - "Audio Mixing"
-      summary: concat
+      summary: "Concatenate audio clips"
       operationId: concat
+      description: "Join at least two recordings end to end in the supplied order."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioConcatRequest" }
+            example:
+              file_paths:
+              - uploads/song.wav
+              - uploads/second.wav
+              output_path: out/joined.wav
       responses:
         "200":
           description: Audio produced.
@@ -2389,13 +2671,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: speed
+      summary: "Change playback speed"
       operationId: speed
+      description: "Speed up or slow down playback while keeping the original pitch."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSpeedRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/faster.wav
+              speed: 1.25
       responses:
         "200":
           description: Audio produced.
@@ -2422,13 +2709,19 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: convert
+      summary: "Convert audio format"
       operationId: convert
+      description: "Re-encode a recording to the requested format. You can also change its sample rate or channel count."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioConvertRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/converted.flac
+              output_format: flac
+              sample_rate: 48000
       responses:
         "200":
           description: Audio produced.
@@ -2455,13 +2748,17 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: similar
+      summary: "Compare two audio clips"
       operationId: similar
+      description: "Compute the cosine similarity of two CLAP embeddings to compare their audio content."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSimilarRequest" }
+            example:
+              file_path: uploads/song.wav
+              reference_file_path: uploads/second.wav
       responses:
         "200":
           description: JSON result.
@@ -2485,13 +2782,18 @@ paths:
     post:
       tags:
         - "MIDI"
-      summary: midi_quantize
+      summary: "Quantize MIDI notes"
       operationId: midiQuantize
+      description: "Snap note starts to the selected beat grid. For example, a grid of 0.25 beats uses sixteenth notes in 4/4."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/MidiQuantizeRequest" }
+            example:
+              file_path: uploads/melody.mid
+              output_path: out/quantized.mid
+              grid_beats: 0.25
       responses:
         "200":
           description: Audio produced.
@@ -2518,13 +2820,20 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: classify
+      summary: "Classify audio with custom labels"
       operationId: classify
+      description: "Score the input against your own text labels and return them in descending similarity order."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioClassifyRequest" }
+            example:
+              file_path: uploads/song.wav
+              labels:
+              - speech
+              - music
+              - room tone
       responses:
         "200":
           description: JSON result.
@@ -2548,13 +2857,19 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: fade
+      summary: "Fade audio in or out"
       operationId: fade
+      description: "Apply a fade at the start, the end or both. Supply a positive duration for at least one fade."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioFadeRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/fade.wav
+              fade_in: 0.5
+              fade_out: 1
       responses:
         "200":
           description: Audio produced.
@@ -2581,13 +2896,17 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: reverse
+      summary: "Reverse audio playback"
       operationId: reverse
+      description: "Write a new file with its samples in reverse playback order."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioReverseRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/reversed.wav
       responses:
         "200":
           description: Audio produced.
@@ -2614,13 +2933,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: loop
+      summary: "Repeat an audio clip"
       operationId: loop
+      description: "Play the entire input the requested number of times and write the repeats as one audio file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioLoopRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/loop.wav
+              count: 3
       responses:
         "200":
           description: Audio produced.
@@ -2647,13 +2971,18 @@ paths:
     post:
       tags:
         - "Audio Mixing"
-      summary: bpm_match
+      summary: "Match a target tempo"
       operationId: bpmMatch
+      description: "Detect the source tempo, then time-stretch the recording to the requested BPM. The request fails when the source tempo cannot be detected."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioBpmMatchRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/tempo-matched.wav
+              target_bpm: 120
       responses:
         "200":
           description: Audio produced.
@@ -2680,13 +3009,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: stereo_width
+      summary: "Adjust stereo width"
       operationId: stereoWidth
+      description: "Change the balance of the mid and side signals. A width of zero collapses the stereo field and one keeps its original width."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioStereoWidthRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/wider.wav
+              width: 1.25
       responses:
         "200":
           description: Audio produced.
@@ -2713,13 +3047,19 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: split
+      summary: "Split audio into segments"
       operationId: split
+      description: "Split into a fixed number of pieces or use silent gaps as boundaries. The output is a ZIP of numbered clips."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSplitRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/parts.zip
+              mode: equal
+              count: 3
       responses:
         "200":
           description: Audio produced.
@@ -2746,13 +3086,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: pan
+      summary: "Pan audio left or right"
       operationId: pan
+      description: "Place the sound in the stereo field. A negative position moves it left and a positive position moves it right."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioPanRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/panned.wav
+              position: -0.4
       responses:
         "200":
           description: Audio produced.
@@ -2779,13 +3124,21 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: eq
+      summary: "Apply parametric equalization"
       operationId: eq
+      description: "Cut or boost one or more frequency bands. Specify each band's center frequency, gain and bandwidth."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioEqRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/eq.wav
+              bands:
+              - freq: 1000
+                gain_db: -3
+                width_hz: 100
       responses:
         "200":
           description: Audio produced.
@@ -2812,13 +3165,18 @@ paths:
     post:
       tags:
         - "Audio Mixing"
-      summary: key_match
+      summary: "Match a target musical key"
       operationId: keyMatch
+      description: "Estimate the source key and pitch-shift by the shortest interval to the target root note."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioKeyMatchRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/key-matched.wav
+              target_key: C
       responses:
         "200":
           description: Audio produced.
@@ -2845,13 +3203,19 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: sidechain_duck_endpoint
+      summary: "Duck audio under a trigger track"
       operationId: sidechainDuck
+      description: "Reduce the primary track's gain when the trigger track crosses the threshold. The output contains the processed primary track."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioSidechainDuckRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/ducked.wav
+              trigger_file_path: uploads/narration.wav
+              threshold_db: -24
       responses:
         "200":
           description: Audio produced.
@@ -2878,13 +3242,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: audio_metadata
+      summary: "Read or update audio tags"
       operationId: audioMetadata
+      description: "Omit tags to read current metadata. Supply tags to update them and an output destination to save the modified file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioMetadataRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -2908,13 +3275,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: clip_detect_endpoint
+      summary: "Detect digital clipping"
       operationId: clipDetect
+      description: "Report clipped sample counts, peak level and related measurements without changing the recording."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioClipDetectRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -2938,13 +3308,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: mid_side
+      summary: "Convert between stereo and mid-side"
       operationId: midSide
+      description: "Use the path mode to convert left and right channels to mid and side, or to decode mid and side back to stereo."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioMidSideRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/mid-side.wav
+              mode: encode
       responses:
         "200":
           description: Audio produced.
@@ -2971,13 +3346,17 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: beat_slice_endpoint
+      summary: "Slice audio at beat boundaries"
       operationId: beatSlice
+      description: "Detect the beat grid and write a ZIP of numbered beat-aligned clips."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioBeatSliceRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/beat-slices.zip
       responses:
         "200":
           description: Audio produced.
@@ -3004,13 +3383,19 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: conv_reverb_endpoint
+      summary: "Apply convolution reverb"
       operationId: convReverb
+      description: "Process the input with a second file as the impulse response. Use the wet mix to blend dry and reverberated audio."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioConvReverbRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/reverberated.wav
+              ir_file_path: uploads/room-impulse.wav
+              wet_mix: 0.25
       responses:
         "200":
           description: Audio produced.
@@ -3037,13 +3422,19 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: transient_endpoint
+      summary: "Shape attacks and sustain"
       operationId: transient
+      description: "Boost or cut transient attacks and sustain independently to change how sharp or sustained the sound is."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioTransientRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/transients.wav
+              attack_gain_db: 3
+              sustain_gain_db: -1
       responses:
         "200":
           description: Audio produced.
@@ -3070,13 +3461,24 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: multiband_compress_endpoint
+      summary: "Compress separate frequency bands"
       operationId: multibandCompress
+      description: "Split the audio at ascending crossover frequencies, apply a compressor to each band and sum the bands back together."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioMultibandCompressRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/compressed.wav
+              crossovers_hz:
+              - 200
+              bands:
+              - threshold_db: -18
+                ratio: 3
+              - threshold_db: -14
+                ratio: 2
       responses:
         "200":
           description: Audio produced.
@@ -3103,13 +3505,21 @@ paths:
     post:
       tags:
         - "Audio Mixing"
-      summary: remix
+      summary: "Remix separated stems"
       operationId: remix
+      description: "Separate the input, apply the requested stem levels and mix the stems back into one audio file."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioRemixRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/remixed.wav
+              engine: htdemucs
+              stem_mix:
+                vocals: 0.5
+                drums: 1
       responses:
         "200":
           description: Audio produced.
@@ -3136,13 +3546,16 @@ paths:
     post:
       tags:
         - "Audio Mixing"
-      summary: dj_prep
+      summary: "Measure a track for DJ mixing"
       operationId: djPrep
+      description: "Return tempo, key, Camelot notation and integrated loudness together."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioDjPrepRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -3166,13 +3579,17 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: loudness_curve_endpoint
+      summary: "Measure loudness over time"
       operationId: loudnessCurve
+      description: "Return a time series of windowed RMS levels to locate quiet or loud passages."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioLoudnessCurveRequest" }
+            example:
+              file_path: uploads/song.wav
+              hop_length: 2048
       responses:
         "200":
           description: JSON result.
@@ -3196,13 +3613,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: pitch_correct_endpoint
+      summary: "Correct the overall pitch"
       operationId: pitchCorrect
+      description: "Estimate how far the input is from the nearest chromatic note and shift the entire recording by a single amount."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioPitchCorrectRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/pitch-corrected.wav
+              strength: 0.5
       responses:
         "200":
           description: Audio produced.
@@ -3229,13 +3651,20 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: repair_endpoint
+      summary: "Repair clipping or mains hum"
       operationId: repair
+      description: "Interpolate clipped samples, remove hum at the specified frequency, or apply both repairs to the same recording."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioRepairRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/repaired.wav
+              declip: true
+              dehum: true
+              hum_freq: 50
       responses:
         "200":
           description: Audio produced.
@@ -3262,13 +3691,18 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: loop_point_endpoint
+      summary: "Find beat-aligned loop points"
       operationId: loopPoint
+      description: "Rank start and end points on the beat grid by similarity near the boundary. Listen to the cut before using it in a loop."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioLoopPointRequest" }
+            example:
+              file_path: uploads/song.wav
+              min_loop_bars: 2
+              num_candidates: 3
       responses:
         "200":
           description: JSON result.
@@ -3292,13 +3726,18 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: chords_to_midi
+      summary: "Export detected chords as MIDI"
       operationId: chordsToMidi
+      description: "Turn each detected chord segment into sustained MIDI notes. Supply the tempo used for the MIDI timeline."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioChordsToMidiRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/chords.mid
+              tempo_bpm: 110
       responses:
         "200":
           description: Audio produced.
@@ -3325,13 +3764,19 @@ paths:
     post:
       tags:
         - "Audio Restoration"
-      summary: deess_endpoint
+      summary: "Reduce vocal sibilance"
       operationId: deess
+      description: "Compress the signal above the selected cutoff to soften harsh sibilants while retaining the rest of the recording."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioDeessRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/deessed.wav
+              frequency_hz: 6500
+              threshold_db: -18
       responses:
         "200":
           description: Audio produced.
@@ -3358,13 +3803,16 @@ paths:
     post:
       tags:
         - "Audio Analysis"
-      summary: stereo_field_endpoint
+      summary: "Analyze the stereo field"
       operationId: stereoField
+      description: "Measure left-right balance and phase correlation to check width and mono compatibility."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioStereoFieldRequest" }
+            example:
+              file_path: uploads/song.wav
       responses:
         "200":
           description: JSON result.
@@ -3388,13 +3836,18 @@ paths:
     post:
       tags:
         - "Audio Transform"
-      summary: thumbnail_endpoint
+      summary: "Extract an audio preview"
       operationId: thumbnail
+      description: "Find a high-activity window using onset strength and save a clip of the requested duration."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AudioThumbnailRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/preview.wav
+              duration_sec: 8
       responses:
         "200":
           description: Audio produced.
@@ -3421,13 +3874,20 @@ paths:
     post:
       tags:
         - "MIDI"
-      summary: midi_humanize
+      summary: "Humanize MIDI notes"
       operationId: midiHumanize
+      description: "Add small timing and velocity variations. Use a fixed seed when the same input should produce the same result."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/MidiHumanizeRequest" }
+            example:
+              file_path: uploads/melody.mid
+              output_path: out/humanized.mid
+              timing_ms: 8
+              velocity_pct: 5
+              seed: 42
       responses:
         "200":
           description: Audio produced.
@@ -3454,13 +3914,18 @@ paths:
     post:
       tags:
         - "Audio Generation"
-      summary: Stability Stable Audio Open 1.0 — text-to-audio.
+      summary: "Generate with Stable Audio Open"
       operationId: generateStableAudioOpen
+      description: "Generate up to 47 seconds of stereo instrumental audio or sound effects from a text prompt."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/StableAudioOpenRequest" }
+            example:
+              prompt: Dry acoustic drum loop with brushed snare and a soft kick
+              duration_sec: 12
+              output_path: out/stable-audio.wav
       responses:
         "200":
           description: Audio generated.
@@ -3483,9 +3948,19 @@ paths:
     post:
       tags:
         - "Audio Generation"
-      summary: Meta MusicGen 300M — CC-BY-NC, opt-in required.
+      summary: "Generate with MusicGen Small"
       operationId: generateMusicGenSmall
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/MusicGenRequest" } } } }
+      description: "Generate instrumental audio with the 300-million-parameter MusicGen model. Enable non-commercial models in the deployment first."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MusicGenRequest'
+            example:
+              prompt: Solo nylon-string guitar with a steady gentle rhythm
+              duration_sec: 8
+              output_path: out/musicgen-small.wav
       responses:
         "200":
           description: Audio generated.
@@ -3512,9 +3987,19 @@ paths:
     post:
       tags:
         - "Audio Generation"
-      summary: Meta MusicGen 1.5B — CC-BY-NC.
+      summary: "Generate with MusicGen Medium"
       operationId: generateMusicGenMedium
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/MusicGenRequest" } } } }
+      description: "Generate instrumental audio with the 1.5-billion-parameter MusicGen model. Enable non-commercial models in the deployment first."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MusicGenRequest'
+            example:
+              prompt: Instrumental jazz trio with upright bass and brushed drums
+              duration_sec: 10
+              output_path: out/musicgen-medium.wav
       responses:
         "200":
           description: Audio generated.
@@ -3541,9 +4026,19 @@ paths:
     post:
       tags:
         - "Audio Generation"
-      summary: Riffusion v1 — spectrogram via Griffin-Lim.
+      summary: "Generate with Riffusion"
       operationId: generateRiffusion
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RiffusionRequest" } } } }
+      description: "Synthesize a short loop from a text prompt. One pass produces about five seconds and shorter requests are trimmed."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RiffusionRequest'
+            example:
+              prompt: Warm analog synth arpeggio loop
+              duration_sec: 4
+              output_path: out/riffusion.wav
       responses:
         "200":
           description: Audio generated.
@@ -3570,9 +4065,19 @@ paths:
     post:
       tags:
         - "Audio Generation"
-      summary: AudioLDM 2 — CC-BY 4.0, general SFX.
+      summary: "Generate with AudioLDM 2"
       operationId: generateAudioLDM2
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AudioLDM2Request" } } } }
+      description: "Generate sound effects or ambience from a text prompt, such as a room tone, animal call or mechanical sound."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AudioLDM2Request'
+            example:
+              prompt: Quiet rain tapping against a window
+              duration_sec: 8
+              output_path: out/audioldm2.wav
       responses:
         "200":
           description: Audio generated.
@@ -3600,13 +4105,9 @@ paths:
   /v1/batch:
     post:
       tags: ["Audio Mixing"]
-      summary: Apply a single operation to many input files at once
+      summary: "Run operations in a batch"
       operationId: batch
-      description: |
-        Run the same transform against a list of staged files (or URLs).
-        Body is a JSON array of independent per-file request objects (the
-        same shape the underlying operation takes). Server returns a JSON
-        list of per-file results.
+      description: "Submit independent operations on staged files in one request. Each item names its operation and supplies its own inputs and options. Items execute in order and report their own result or error."
       requestBody:
         required: true
         content:
@@ -3614,6 +4115,16 @@ paths:
             schema:
               type: array
               items: { type: object, additionalProperties: true }
+            example:
+            - op: trim
+              file_path: uploads/song.wav
+              output_path: out/short-clip.wav
+              start_sec: 1
+              end_sec: 4
+            - op: convert
+              file_path: uploads/song.wav
+              output_path: out/song.flac
+              output_format: flac
       responses:
         "200":
           description: Per-file result array.
@@ -3631,16 +4142,25 @@ paths:
   /v1/pipeline:
     post:
       tags: ["Workflow"]
-      summary: Ad-hoc op chain across one input
+      summary: "Run an audio pipeline"
       operationId: runPipeline
-      description: |
-        Apply N transforms in order to one input. Body is `{file_path | file_url, steps: [{op, params}, ...], output_path | output_url}`.
-        Intermediates stay in memory between steps — no re-upload required.
+      description: "Apply an ordered chain of operations to one input. The output of one step feeds the next without re-uploading it. Use the pipeline operations list to discover accepted step names."
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/PipelineRunRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/pipeline.wav
+              steps:
+              - op: trim
+                params:
+                  start_sec: 1
+                  end_sec: 8
+              - op: normalize
+                params:
+                  target_lufs: -16
       responses:
         "200":
           description: Pipeline executed.
@@ -3666,8 +4186,9 @@ paths:
   /v1/presets:
     get:
       tags: ["Workflow"]
-      summary: List configured workflow presets
+      summary: "List workflow presets"
       operationId: listPresets
+      description: "Discover the preset names and their descriptions before running a saved workflow."
       responses:
         "200":
           description: Preset list.
@@ -3684,8 +4205,9 @@ paths:
   /v1/presets/{name}:
     get:
       tags: ["Workflow"]
-      summary: Describe a single preset
+      summary: "Describe a workflow preset"
       operationId: describePreset
+      description: "Read the selected preset's steps and parameter definitions before supplying input or overrides."
       parameters:
         - in: path
           name: name
@@ -3701,8 +4223,9 @@ paths:
         "404": { $ref: "#/components/responses/404" }
     post:
       tags: ["Workflow"]
-      summary: Run a named preset
+      summary: "Run a workflow preset"
       operationId: runPreset
+      description: "Apply the named preset's ordered steps to one input. Supply overrides only for parameters that preset exposes."
       parameters:
         - in: path
           name: name
@@ -3713,6 +4236,9 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/PresetRunRequest" }
+            example:
+              file_path: uploads/song.wav
+              output_path: out/mastered.wav
       responses:
         "200":
           description: Preset executed.
@@ -3739,8 +4265,9 @@ paths:
   /v1/engines:
     get:
       tags: ["Engines"]
-      summary: List configured engines
+      summary: "List available engines"
       operationId: listEngines
+      description: "See which engine slugs and capabilities the running deployment has configured."
       responses:
         "200":
           description: Engine inventory.
@@ -3759,12 +4286,9 @@ paths:
   /v1/catalog:
     get:
       tags: ["Engines"]
-      summary: Machine-readable endpoint catalog
+      summary: "Browse the REST operation catalog"
       operationId: catalog
-      description: |
-        Returns the categorised endpoint list — same data the documentation
-        sidebar uses. Useful for LLM agents discovering what audiolla can do
-        without parsing the full OpenAPI spec.
+      description: "Discover available REST operations grouped by purpose. Use the OpenAPI reference for request and response details."
       responses:
         "200":
           description: Catalog.
@@ -3776,9 +4300,9 @@ paths:
   /v1/ops:
     get:
       tags: ["Engines"]
-      summary: List pipeline op slugs
+      summary: "List pipeline operations"
       operationId: listOps
-      description: Ops available to `/v1/pipeline` and `/v1/presets/{name}`.
+      description: "Return operation names that can be used in pipeline steps. These names belong in the op field of each step."
       responses:
         "200":
           description: Op list.
@@ -3795,8 +4319,9 @@ paths:
   /v1/ps:
     get:
       tags: ["Engines"]
-      summary: List currently loaded engines
+      summary: "List loaded engines"
       operationId: listLoaded
+      description: "Show the engines currently loaded in memory. Use the available-engines list to include engines that can load on demand."
       responses:
         "200":
           description: Loaded engines.
@@ -3821,8 +4346,9 @@ paths:
   /v1/ps/{engine}:
     delete:
       tags: ["Engines"]
-      summary: Evict one engine from memory
+      summary: "Unload an engine"
       operationId: unloadOne
+      description: "Ask the server to release the selected engine's in-memory model. The next request for that engine can load it again."
       parameters:
         - $ref: "#/components/parameters/EnginePath"
       responses:
@@ -3840,8 +4366,9 @@ paths:
   /v1/unload:
     post:
       tags: ["Engines"]
-      summary: Evict every loaded engine
+      summary: "Unload all engines"
       operationId: unloadAll
+      description: "Ask the server to release all currently loaded models from memory."
       responses:
         "200":
           description: All engines evicted.
@@ -3859,8 +4386,9 @@ paths:
   /v1/jobs:
     get:
       tags: ["Jobs"]
-      summary: List async jobs
+      summary: "List background jobs"
       operationId: listJobs
+      description: "Return jobs tracked by the running server. Filter by status when you only need jobs in a particular state."
       responses:
         "200":
           description: Job list.
@@ -3877,8 +4405,9 @@ paths:
   /v1/jobs/{job_id}:
     get:
       tags: ["Jobs"]
-      summary: Get job status / result
+      summary: "Get a background job"
       operationId: getJob
+      description: "Poll the job ID returned at submission. The response reports the current state and includes a result or error when available."
       parameters:
         - $ref: "#/components/parameters/JobIdPath"
       responses:
@@ -3898,8 +4427,9 @@ paths:
         "404": { $ref: "#/components/responses/404" }
     delete:
       tags: ["Jobs"]
-      summary: Cancel a pending or running job
+      summary: "Cancel or remove a background job"
       operationId: cancelJob
+      description: "Request cancellation of an active job or remove an existing terminal job record."
       parameters:
         - $ref: "#/components/parameters/JobIdPath"
       responses:
@@ -3918,8 +4448,9 @@ paths:
   /v1/files:
     get:
       tags: ["Files"]
-      summary: List staged files
+      summary: "List staged files"
       operationId: filesList
+      description: "Browse files available in the staging area, with their paths and sizes. Use a staged path as input to a processing request."
       responses:
         "200":
           description: File listing.
@@ -3941,12 +4472,9 @@ paths:
   /v1/files/{path}:
     put:
       tags: ["Files"]
-      summary: Stage a file (multipart octet-stream upload)
+      summary: "Upload a staged file"
       operationId: filesPut
-      description: |
-        The ONLY endpoint that accepts raw bytes on the wire. All other
-        audio endpoints reference staged files via `file_path` or
-        external URLs via `file_url`.
+      description: "Send the file bytes as application/octet-stream and put its staging path in the URL. Uploading to an existing path replaces that file."
       parameters:
         - $ref: "#/components/parameters/FilesPath"
       requestBody:
@@ -3969,8 +4497,9 @@ paths:
         "413": { $ref: "#/components/responses/413" }
     get:
       tags: ["Files"]
-      summary: Download a staged file
+      summary: "Download a staged file"
       operationId: filesGet
+      description: "Return the bytes of the file at the requested staging path. Use this to retrieve uploaded inputs and processed outputs."
       parameters:
         - $ref: "#/components/parameters/FilesPath"
       responses:
@@ -3983,8 +4512,9 @@ paths:
         "404": { $ref: "#/components/responses/404" }
     delete:
       tags: ["Files"]
-      summary: Delete a staged file
+      summary: "Delete a staged file"
       operationId: filesDelete
+      description: "Remove the file at the exact staging path, including any empty parent directories left behind."
       parameters:
         - $ref: "#/components/parameters/FilesPath"
       responses:
@@ -4004,13 +4534,9 @@ paths:
   /v1/midi/compose:
     post:
       tags: ["MIDI"]
-      summary: Compose a song spec to a Standard MIDI File
+      summary: "Compose a MIDI file"
       operationId: midiCompose
-      description: |
-        Body is the song spec (tempo_bpm, time_signature, key_signature,
-        ticks_per_beat, tracks). Server returns raw MIDI bytes by default,
-        or JSON descriptor when `output_path` / `output_url` are set as
-        query parameters.
+      description: "Send a JSON score with tracks and notes. The response is MIDI bytes by default, or a file descriptor when you provide an output destination in the query string."
       parameters:
         - in: query
           name: output_path
@@ -4052,9 +4578,9 @@ paths:
   /v1/midi/drum:
     post:
       tags: ["MIDI"]
-      summary: Generate a drum-pattern MIDI clip
+      summary: "Build a MIDI drum pattern"
       operationId: midiDrum
-      description: JSON spec body → MIDI bytes or staged-output JSON.
+      description: "Send named percussion voices and step sequences as JSON. The response is MIDI bytes by default, or a file descriptor when you supply an output destination in the query string."
       parameters:
         - in: query
           name: output_path
@@ -4095,12 +4621,9 @@ paths:
   /v1/midi/generate:
     post:
       tags: ["MIDI"]
-      summary: Compose + render in one call
+      summary: "Compose and render audio"
       operationId: midiGenerate
-      description: |
-        Convenience wrapper: takes the same song spec body as
-        `/v1/midi/compose`, immediately runs `/v1/midi/render`. Returns
-        rendered audio bytes or a staged-output JSON descriptor.
+      description: "Send the same score as MIDI compose, then render it through FluidSynth in one request. Set the audio format and destination in the query string."
       parameters:
         - in: query
           name: output_format

@@ -20,7 +20,9 @@ export default function ApiExplorer({ item }) {
   const url = endpoint + path + (query.size ? "?" + query : "");
   const args = ["curl --fail-with-body", "-X " + item.method.toUpperCase(), shellQuote(url)];
   if (body["application/json"]) {
-    const sample = body["application/json"].example ?? item.jsonRequestBodyExample;
+    const json = body["application/json"];
+    const firstExample = Object.values(json.examples ?? {})[0];
+    const sample = json.example ?? firstExample?.value ?? item.jsonRequestBodyExample;
     args.push("-H 'Content-Type: application/json'");
     if (sample !== undefined) args.push("--data " + shellQuote(JSON.stringify(sample, null, 2)));
   } else if (body["application/octet-stream"] || body["image/png"]) {

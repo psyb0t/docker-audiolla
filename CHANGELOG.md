@@ -8,6 +8,7 @@ docs / build / fixes only.
 ## [Unreleased]
 
 - Use the OpenAPI-generated REST reference for endpoint details. Keep workflows and deployment guidance in the guides.
+- Explain what each REST operation does and provide example requests for every JSON body, including single-stem and ZIP separation.
 
 ## v2.0.3. 2026-11-26
 
