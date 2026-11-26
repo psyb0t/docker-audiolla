@@ -5,8 +5,6 @@ CPU_IMAGE  := psyb0t/audiolla:local
 CUDA_IMAGE := psyb0t/audiolla:local-cuda
 TORCHBASE_CPU_IMAGE ?= psyb0t/torchbase:py3.12-torch2.5.1-v0.1.1-cpu@sha256:805f9ea0ad6a815b144e5d110cc762bd4e976e5ba1f6682ea347a485db0d7b37
 TORCHBASE_CUDA_IMAGE ?= psyb0t/torchbase:py3.12-torch2.5.1-v0.1.1-cu124@sha256:11ccac6fafe5c136cbff749f8690ca2a98d0abe84ce6f673df4db2be7a265d63
-# The image GitHub Pages builds docs/ with, pinned by digest.
-JEKYLL_IMAGE := ghcr.io/actions/jekyll-build-pages:v1.0.13@sha256:6791ebfd912185ed59bfb5fb102664fa872496b79f87ff8b9cfba292a7345041
 VERSION := $(shell awk -F\" '/^version *= *"/ {print $$2; exit}' pyproject.toml)
 
 PYPROJECT := pyproject.toml
@@ -214,20 +212,22 @@ generate: dev-image ## Regenerate src/audiolla/schema/ from openapi.yaml
 # Output lands in the gitignored .testing/docs-site.
 # -----------------------------------------------------------------------------
 
-docs: ## Build the docs site into .testing/docs-site (GitHub Pages image)
-	mkdir -p .testing
-	docker run --rm \
-		-u $(UID):$(GID) \
-		-e HOME=/tmp \
-		-e GITHUB_WORKSPACE=/work \
-		-e GITHUB_REPOSITORY=psyb0t/docker-audiolla \
-		-e INPUT_SOURCE=docs \
-		-e INPUT_DESTINATION=.testing/docs-site \
-		-e INPUT_VERBOSE=false \
-		-v $(PWD):/work \
-		$(JEKYLL_IMAGE)
+docs: docs-build ## Build the GitHub Pages site into website/build
+
+
 
 clean: ## Remove build / cache artifacts (host-side)
 	docker rmi $(CPU_IMAGE) $(CUDA_IMAGE) 2>/dev/null || true
 	rm -rf build dist *.egg-info .pytest_cache .mypy_cache .ruff_cache .venv
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+PAGES_NODE_IMAGE := node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+DOCS_RUN := docker run --rm --cap-drop ALL --security-opt no-new-privileges \
+	--user "$$(id -u):$$(id -g)" -e HOME=/tmp -e COREPACK_HOME=/work/website/.corepack \
+	-v "$(CURDIR):/work:ro" -v "$(CURDIR)/website:/work/website" -w /work/website
+OPENAPI_FILE ?= openapi.yaml
+
+.PHONY: docs-build
+docs-build: ## Build and check the documentation site
+	$(DOCS_RUN) $(PAGES_NODE_IMAGE) corepack pnpm install --frozen-lockfile --ignore-scripts --store-dir .pnpm-store
+	$(DOCS_RUN) --network none -e OPENAPI_FILE="$(OPENAPI_FILE)" $(PAGES_NODE_IMAGE) corepack pnpm run build

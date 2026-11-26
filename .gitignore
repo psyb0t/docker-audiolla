@@ -137,3 +137,13 @@ git-update.sh.debot
 
 # Local JSON configuration at any depth
 *.local.json
+
+# Generated documentation and dependencies
+/website/.assets/
+/website/.content/
+/website/.corepack/
+/website/.docusaurus/
+/website/.pnpm-store/
+/website/build/
+/website/guide-order.mjs
+/website/node_modules/

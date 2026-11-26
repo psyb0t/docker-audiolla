@@ -89,7 +89,7 @@ Both build on Torchbase images pinned by digest; override with `TORCHBASE_CPU_IM
 
 ## CI and releases
 
-[.github/workflows/pipeline.yml](https://github.com/psyb0t/docker-audiolla/blob/main/.github/workflows/pipeline.yml) runs on every push:
+[.github/workflows/pipeline.yml](https://github.com/psyb0t/docker-audiolla/blob/main/.github/workflows/pipeline.yml) runs on branch pushes and `v*` tags:
 
 - every branch: `make lint`, `make test`, and `make generate`, which fails the run if the committed `src/audiolla/schema/_generated.py` does not match `openapi.yaml`;
 - `main`: also builds both images, scans them with Grype, and pushes `:latest`, `:latest-cuda`, `:sha-<commit>` and `:sha-<commit>-cuda`;
@@ -99,8 +99,8 @@ The version lives in `pyproject.toml`. The [CHANGELOG](https://github.com/psyb0t
 
 ## Docs
 
-This site is built by GitHub Pages from `docs/` on `main`. Build it locally with the same Jekyll image:
+This site is built by GitHub Pages from `docs/` on `main`. Build it locally with the same Docusaurus toolchain:
 
 ```bash
-make docs   # output in .testing/docs-site
+make docs   # output in website/build
 ```

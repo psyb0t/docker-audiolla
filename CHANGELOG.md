@@ -5,6 +5,11 @@ From v1.0.0 onward the REST API is stable — breaking changes will be major
 bumps and called out explicitly; minor bumps are additive, patch bumps are
 docs / build / fixes only.
 
+## [Unreleased]
+
+- Migrated the documentation to Docusaurus with a generated OpenAPI reference and local search.
+- Restricted image builds to the default branch and releases to version tags. Tag runs reuse the scanned images and refresh release badges after the GitHub release.
+
 ## v2.0.2. 2026-11-09
 
 Documentation site, a release pipeline that promotes tested images, lint that passes, and funding links. REST and MCP request shapes are unchanged.
