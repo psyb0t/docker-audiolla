@@ -138,6 +138,8 @@ The host needs `docker`, `make` and `git`. [Development](https://psyb0t.github.i
 
 ## Sponsor
 
+[Sponsor on GitHub](https://github.com/sponsors/psyb0t)
+
 <a href="https://www.buymeacoffee.com/psyb0t"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" alt="Buy Me a Coffee" height="60" width="217"></a>
 
 ## License
