@@ -46,7 +46,9 @@ mkdir -p "${TORCH_HOME}/hub/checkpoints"
 echo "[entrypoint] resolving enabled engines (AUDIOLLA_ENABLED_ENGINES=${AUDIOLLA_ENABLED_ENGINES:-<all>})"
 echo "[entrypoint] TORCH_HOME=${TORCH_HOME}"
 
-python3 -c "
+case "${AUDIOLLA_MODEL_DOWNLOAD:-}" in
+    "")
+        python3 -c "
 import json, os, sys
 from pathlib import Path
 
@@ -85,5 +87,15 @@ if demucs_variants:
 
 print('[entrypoint] prefetch done', flush=True)
 "
+        ;;
+    startup)
+        CUDA_VISIBLE_DEVICES= python3 -m audiolla.prefetch
+        ;;
+    on-demand) ;;
+    *)
+        echo "[entrypoint] AUDIOLLA_MODEL_DOWNLOAD must be startup or on-demand" >&2
+        exit 1
+        ;;
+esac
 
 exec python3 -m audiolla

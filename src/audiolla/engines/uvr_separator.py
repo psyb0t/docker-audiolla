@@ -58,6 +58,11 @@ class UVRSeparatorEngine(EngineBase):
         self._aggressive_load_lock: asyncio.Lock = asyncio.Lock()
         self._aggressive_run_lock: asyncio.Lock = asyncio.Lock()
 
+    async def prefetch(self) -> None:
+        await self.get_model()
+        if self._model_aggressive_filename is not None:
+            await self._get_aggressive_model()
+
     def _load_sync(self) -> object:
         from audio_separator.separator import Separator  # noqa: PLC0415
 

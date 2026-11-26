@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 from ..audio import AudioConversionError, write_temp_input
+from ._weights import load_pretrained
 from .base import EngineBase
 
 _MODEL_ID = "laion/larger_clap_music_and_speech"
@@ -25,8 +26,8 @@ class EmbedEngine(EngineBase):
         import torch  # noqa: PLC0415
 
         self._log.info("loading CLAP model %s", _MODEL_ID)
-        self._processor = ClapProcessor.from_pretrained(_MODEL_ID)
-        model = ClapModel.from_pretrained(_MODEL_ID)
+        self._processor = load_pretrained(ClapProcessor.from_pretrained, _MODEL_ID)
+        model = load_pretrained(ClapModel.from_pretrained, _MODEL_ID)
         model.eval()
         self._torch = torch
         self._log.info("EmbedEngine ready (CLAP %s)", _MODEL_ID)

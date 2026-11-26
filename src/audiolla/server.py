@@ -46,8 +46,11 @@ import json
 import logging
 import mimetypes
 import os
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from collections.abc import Awaitable, Callable
+from importlib.util import find_spec
 from typing import Any
 from urllib.parse import unquote
 
@@ -212,6 +215,7 @@ from .schema import (
     validate_multi_input_xor,
     validate_output_xor,
 )
+from .engine_workers import AudioWorkers, WorkerEngine, isolate_models
 from .mcp_server import build_mcp_server
 from .output_writer import write_output
 from .schema import AnalyzeResult, HealthResponse, LoudnessResult
@@ -239,17 +243,28 @@ def _ensure_json_array(value, field_name: str) -> list:
 def _resolve_device(req: str) -> str:
     if req != "auto":
         return req
-    try:
-        import torch
-
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except ImportError:
+    if find_spec("torch") is None:
         return "cpu"
+    try:
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import torch; raise SystemExit(not torch.cuda.is_available())",
+            ],
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        log.warning("CUDA probe failed, using CPU", exc_info=True)
+        return "cpu"
+    return "cuda" if probe.returncode == 0 else "cpu"
 
 
 REGISTRY = config.load_registry()
 DEVICE = _resolve_device(config.DEVICE)
-ENGINES = build_engines(REGISTRY, DEVICE)
+_workers = AudioWorkers()
+ENGINES = isolate_models(build_engines(REGISTRY, DEVICE), DEVICE, _workers)
 from .presets import load_presets as _load_presets  # noqa: E402, PLC0415
 
 PRESETS = _load_presets(config.PRESETS_DIR)
@@ -375,6 +390,9 @@ async def _lifespan(_app: FastAPI):
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+        for engine in ENGINES.values():
+            if isinstance(engine, WorkerEngine):
+                await engine.close()
 
 
 app = FastAPI(
@@ -1004,23 +1022,25 @@ async def unload_one(engine: str) -> JSONResponse:
     eng = ENGINES.get(decoded)
     if eng is None:
         return JSONResponse({"detail": f"unknown engine {decoded!r}"}, status_code=404)
-    if not eng.loaded():
-        return JSONResponse({"detail": "not loaded"}, status_code=404)
-    await eng.unload()
+    with _workers.eviction():
+        if not eng.loaded():
+            return JSONResponse({"detail": "not loaded"}, status_code=404)
+        if isinstance(eng, WorkerEngine):
+            await eng.close()
+        else:
+            await eng.unload()
     return JSONResponse({"unloaded": decoded}, status_code=200)
 
 
 @app.post("/v1/unload")
-async def unload_all() -> dict[str, Any]:
-    unloaded = []
-    for slug, engine in ENGINES.items():
-        if not engine.loaded():
-            continue
-        try:
-            await engine.unload()
-            unloaded.append(slug)
-        except Exception:  # noqa: BLE001
-            log.exception("unload %s failed", slug)
+async def unload_all() -> dict[str, list[str]]:
+    with _workers.eviction():
+        unloaded = [slug for slug, engine in ENGINES.items() if engine.loaded()]
+        for engine in ENGINES.values():
+            if isinstance(engine, WorkerEngine):
+                await engine.close()
+            else:
+                await engine.unload()
     return {"unloaded": unloaded}
 
 

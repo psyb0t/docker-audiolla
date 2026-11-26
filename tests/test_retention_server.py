@@ -9,8 +9,63 @@ import httpx
 import pytest
 
 from audiolla import server
+from audiolla.engines.base import EngineBase
+from audiolla.engine_workers import WorkerEngine
 from audiolla.file_retention import FileRetention
 from audiolla.jobs import JobQueue
+from audiolla.model_process import ModelProcess
+
+
+class BlockingModel:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def execute(self, operation: str) -> int:
+        assert operation == "get_model"
+        (self.root / "worker-started").touch()
+        deadline = time.monotonic() + 5
+        while not (self.root / "worker-release").exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("worker test was not released")
+            await asyncio.sleep(0.01)
+        return os.getpid()
+
+    def resident(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_bulk_unload_waits_for_no_inference_and_reaps_worker(tmp_path, monkeypatch):
+    engine = WorkerEngine(EngineBase("fixture", {}), "cpu", server._workers)
+    engine._process = ModelProcess(BlockingModel, tmp_path)
+    monkeypatch.setattr(server, "ENGINES", {"fixture": engine})
+    monkeypatch.setattr(server.config, "FILES_DIR", tmp_path / "files")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=server.app), base_url="http://test"
+    ) as client:
+        assert (await client.post("/v1/unload")).json() == {"unloaded": []}
+        task = asyncio.create_task(engine.get_model())
+        try:
+            for _ in range(500):
+                if (tmp_path / "worker-started").exists():
+                    break
+                await asyncio.sleep(0.01)
+            assert (tmp_path / "worker-started").exists()
+            assert (await client.post("/v1/unload")).status_code == 409
+        finally:
+            (tmp_path / "worker-release").touch()
+            pid = await task
+        try:
+            assert pid != os.getpid()
+            assert (await client.post("/v1/unload")).json() == {"unloaded": ["fixture"]}
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+            assert (await client.post("/v1/unload")).json() == {"unloaded": []}
+        finally:
+            await engine.close()
 
 
 def old_file(tmp_path: Path) -> Path:

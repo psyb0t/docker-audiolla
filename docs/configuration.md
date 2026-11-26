@@ -19,6 +19,7 @@ Durations accept plain seconds (`600`, `0.5`) or Go-style strings (`10m`, `1h30m
 | `AUDIOLLA_DEVICE` | `auto` in code; `cpu` in the CPU image, `cuda` in the CUDA image | `auto`, `cpu`, `cuda` or `cuda:N`. `auto` picks `cuda` when Torch sees a GPU. Anything else stops startup. |
 | `AUDIOLLA_ENGINES_FILE` | `/app/engines.json` | Engine registry to load. See [registry format](engines.md#registry-format). |
 | `AUDIOLLA_ENABLED_ENGINES` | empty (all) | Comma-separated slugs to keep from the registry. An unknown slug stops startup, both in `entrypoint.sh` and in the server. |
+| `AUDIOLLA_MODEL_DOWNLOAD` | unset | `startup` fetches missing weights for enabled engines before serving. `on-demand` skips the boot download. Unset keeps Demucs prefetch and lazy downloads for the other models. |
 | `AUDIOLLA_PRELOAD` | empty | Comma-separated slugs to load at startup instead of on first use. Unknown slugs are skipped with a warning. |
 | `AUDIOLLA_ENGINE_TTL` | `600` | Duration an engine may sit idle before it is unloaded. `0` keeps engines loaded. |
 | `AUDIOLLA_SWEEPER_INTERVAL` | `60` | Duration between idle-engine and staged-file cleanup checks. Must be greater than zero. |

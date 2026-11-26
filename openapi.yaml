@@ -4348,12 +4348,12 @@ paths:
       tags: ["Engines"]
       summary: "Unload an engine"
       operationId: unloadOne
-      description: "Ask the server to release the selected engine's in-memory model. The next request for that engine can load it again."
+      description: "Stop the selected engine's worker and release its model memory. The next request starts the worker again."
       parameters:
         - $ref: "#/components/parameters/EnginePath"
       responses:
         "200":
-          description: Engine evicted.
+          description: Engine released.
           content:
             application/json:
               schema:
@@ -4362,25 +4362,30 @@ paths:
                   unloaded: { type: string }
         "401": { $ref: "#/components/responses/401" }
         "404": { $ref: "#/components/responses/404" }
-
+        "409":
+          description: An audio engine is busy.
   /v1/unload:
     post:
       tags: ["Engines"]
       summary: "Unload all engines"
       operationId: unloadAll
-      description: "Ask the server to release all currently loaded models from memory."
+      description: "Stop resident model workers and release their CPU and GPU memory. Workers start again on demand."
       responses:
         "200":
-          description: All engines evicted.
+          description: Released engine slugs. The list is empty when nothing was loaded.
           content:
             application/json:
               schema:
                 type: object
+                required: [unloaded]
                 properties:
                   unloaded:
                     type: array
+                    description: Engine slugs released by this request.
                     items: { type: string }
         "401": { $ref: "#/components/responses/401" }
+        "409":
+          description: An audio engine is busy. No workers were stopped.
 
   # ── Jobs ─────────────────────────────────────────────────────────────────
   /v1/jobs:

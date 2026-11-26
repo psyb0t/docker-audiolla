@@ -20,3 +20,5 @@ The default local URL is `http://localhost:8000`. When `AUDIOLLA_AUTH_TOKEN` is 
 - [MCP server](mcp.md) explains how to use the tools at `/v1/mcp`.
 
 The running server also serves the OpenAPI JSON at `/openapi.json` and interactive documentation at `/docs` and `/redoc`.
+
+`POST /v1/unload` stops resident model workers and returns the released engine slugs in `unloaded`. An idle service returns an empty list. Active inference returns 409. Workers start again on demand.

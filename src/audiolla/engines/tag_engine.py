@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from ..audio import AudioConversionError, write_temp_input
+from ._weights import load_pretrained
 from .base import EngineBase
 
 _MODEL_ID = "MIT/ast-finetuned-audioset-10-10-0.4593"
@@ -27,8 +28,8 @@ class TagEngine(EngineBase):
         import torch  # noqa: PLC0415
 
         self._log.info("loading %s ...", _MODEL_ID)
-        self._extractor = AutoFeatureExtractor.from_pretrained(_MODEL_ID)
-        model = AutoModelForAudioClassification.from_pretrained(_MODEL_ID)
+        self._extractor = load_pretrained(AutoFeatureExtractor.from_pretrained, _MODEL_ID)
+        model = load_pretrained(AutoModelForAudioClassification.from_pretrained, _MODEL_ID)
         model.eval()
         self._torch = torch
         self._log.info("TagEngine ready (AST %s)", _MODEL_ID)

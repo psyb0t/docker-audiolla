@@ -48,6 +48,7 @@ All config is via environment variables passed at `docker run`:
 | `AUDIOLLA_DATA_DIR` | `/data` | where models and staged files live |
 | `AUDIOLLA_AUTH_TOKEN` | _(none)_ | bearer token; empty means no auth |
 | `AUDIOLLA_ENABLED_ENGINES` | _(all)_ | comma-separated slugs to allow; empty = all |
+| `AUDIOLLA_MODEL_DOWNLOAD` | unset | `startup` fetches missing weights for enabled engines. `on-demand` fetches them when needed. |
 | `AUDIOLLA_PRELOAD` | _(none)_ | comma-separated slugs to load into memory at startup |
 | `AUDIOLLA_ENGINE_TTL` | `600` | seconds idle before an engine is unloaded (`10m` also works) |
 | `AUDIOLLA_FILES_TTL` | `24h` | Retention age for staged files; seconds or h/m/s durations, `0` disables cleanup |

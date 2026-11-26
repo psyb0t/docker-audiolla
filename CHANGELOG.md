@@ -7,6 +7,10 @@ docs / build / fixes only.
 
 ## [Unreleased]
 
+- Add `AUDIOLLA_MODEL_DOWNLOAD` to choose when missing weights download. Unset keeps the current Demucs prefetch.
+
+- Stop model workers on `POST /v1/unload` to release their model memory and CUDA contexts. Return 409 while inference is active.
+
 - Use the OpenAPI-generated REST reference for endpoint details. Keep workflows and deployment guidance in the guides.
 - Explain what each REST operation does and provide example requests for every JSON body, including single-stem and ZIP separation.
 

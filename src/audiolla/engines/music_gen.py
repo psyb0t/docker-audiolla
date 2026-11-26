@@ -65,6 +65,7 @@ import time
 from typing import Any
 
 from ..audio import AudioConversionError, encode_audio
+from ._weights import load_pretrained
 from .base import EngineBase
 
 _log = logging.getLogger("audiolla.engine.music_gen")
@@ -143,8 +144,8 @@ class StableAudioOpenEngine(EngineBase):
         device = _resolve_device()
         dtype = torch.float16 if device == "cuda" else torch.float32
         self._log.info("loading Stable Audio Open 1.0 (device=%s dtype=%s)", device, dtype)
-        pipe = StableAudioPipeline.from_pretrained(
-            self.MODEL_ID, torch_dtype=dtype,
+        pipe = load_pretrained(
+            StableAudioPipeline.from_pretrained, self.MODEL_ID, torch_dtype=dtype,
         )
         pipe.to(device)
         self._device = device
@@ -281,9 +282,9 @@ class _MusicGenBase(EngineBase):
         self._log.info(
             "loading MusicGen %s (device=%s dtype=%s)", self.MODEL_ID, device, dtype,
         )
-        processor = MusicgenProcessor.from_pretrained(self.MODEL_ID)
-        model = MusicgenForConditionalGeneration.from_pretrained(
-            self.MODEL_ID, torch_dtype=dtype,
+        processor = load_pretrained(MusicgenProcessor.from_pretrained, self.MODEL_ID)
+        model = load_pretrained(
+            MusicgenForConditionalGeneration.from_pretrained, self.MODEL_ID, torch_dtype=dtype,
         )
         model.to(device)
         self._processor = processor
@@ -419,8 +420,11 @@ class RiffusionEngine(EngineBase):
         device = _resolve_device()
         dtype = torch.float16 if device == "cuda" else torch.float32
         self._log.info("loading Riffusion (device=%s dtype=%s)", device, dtype)
-        pipe = StableDiffusionPipeline.from_pretrained(
-            self.MODEL_ID, torch_dtype=dtype, safety_checker=None,
+        pipe = load_pretrained(
+            StableDiffusionPipeline.from_pretrained,
+            self.MODEL_ID,
+            torch_dtype=dtype,
+            safety_checker=None,
         )
         pipe.to(device)
         pipe.set_progress_bar_config(disable=True)
@@ -569,7 +573,7 @@ class AudioLDM2Engine(EngineBase):
         device = _resolve_device()
         dtype = torch.float16 if device == "cuda" else torch.float32
         self._log.info("loading AudioLDM2 (device=%s dtype=%s)", device, dtype)
-        pipe = AudioLDM2Pipeline.from_pretrained(self.MODEL_ID, torch_dtype=dtype)
+        pipe = load_pretrained(AudioLDM2Pipeline.from_pretrained, self.MODEL_ID, torch_dtype=dtype)
         # CPU offload trims peak VRAM on 12 GB cards. On CPU-only this is a
         # no-op (and would error on .to("cuda") in the helper), so guard.
         if device == "cuda":

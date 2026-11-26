@@ -86,6 +86,9 @@ class EngineBase:
             self._touch()
             return model
 
+    async def prefetch(self) -> None:
+        await self.get_model()
+
     def _load_sync(self) -> Any:
         return None
 

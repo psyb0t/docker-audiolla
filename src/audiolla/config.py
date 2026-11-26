@@ -120,6 +120,9 @@ MAX_UPLOAD_BYTES: int = _int_env("AUDIOLLA_MAX_UPLOAD_BYTES", 200 * 1024 * 1024)
 
 PRELOAD: list[str] = _list_env("AUDIOLLA_PRELOAD")
 ENABLED_ENGINES: list[str] = _list_env("AUDIOLLA_ENABLED_ENGINES")
+MODEL_DOWNLOAD = os.environ.get("AUDIOLLA_MODEL_DOWNLOAD", "")
+if MODEL_DOWNLOAD and MODEL_DOWNLOAD not in {"startup", "on-demand"}:
+    raise ValueError("AUDIOLLA_MODEL_DOWNLOAD must be startup or on-demand")
 
 
 # ── URL fetch policy ─────────────────────────────────────────────────────────
